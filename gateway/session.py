@@ -276,7 +276,22 @@ def build_session_context_prompt(
         if redact_pii:
             uid = _hash_sender_id(uid)
         lines.append(f"**User ID:** {uid}")
-    
+
+        # Inject user profile from Artemis if available, so the agent
+        # knows onboarding status without needing to call a tool.
+        _artemis_dir = Path(os.environ.get(
+            "HERMES_HOME", str(Path.home() / ".hermes")
+        )) / "artemis"
+        _profile_path = _artemis_dir / uid / "profile.json"
+        try:
+            if _profile_path.exists():
+                _profile_data = _profile_path.read_text(encoding="utf-8").strip()
+                lines.append(f"**User Profile (onboarded):** {_profile_data}")
+            else:
+                lines.append("**User Profile:** Not onboarded yet")
+        except Exception:
+            pass  # non-fatal, agent can still call get_user_profile
+
     # Platform-specific behavioral notes
     if context.source.platform == Platform.SLACK:
         lines.append("")
@@ -796,10 +811,31 @@ class SessionStore:
                 try:
                     parent_history = self.load_transcript(parent_entry.session_id)
                     if parent_history:
-                        self.rewrite_transcript(entry.session_id, parent_history)
+                        # Only seed the last few user/assistant exchanges
+                        # from the parent session.  Older history (especially
+                        # stale onboarding loops) misleads the LLM.  Also
+                        # strip tool calls/results entirely — the new session
+                        # must re-check state via fresh tool calls.
+                        seeded = [
+                            msg for msg in parent_history
+                            if msg.get("role") in ("user", "assistant")
+                            and not (
+                                msg.get("role") == "assistant"
+                                and msg.get("tool_calls")
+                                and not msg.get("content")
+                            )
+                        ]
+                        for msg in seeded:
+                            msg.pop("tool_calls", None)
+                        # Keep only the last 4 messages (2 exchanges)
+                        seeded = seeded[-4:]
+                        self.rewrite_transcript(entry.session_id, seeded)
                         logger.info(
-                            "[Session] Seeded DM thread session %s with %d messages from parent %s",
-                            entry.session_id, len(parent_history), parent_entry.session_id,
+                            "[Session] Seeded DM thread session %s with %d messages "
+                            "(%d filtered) from parent %s",
+                            entry.session_id, len(seeded),
+                            len(parent_history) - len(seeded),
+                            parent_entry.session_id,
                         )
                 except Exception as e:
                     logger.warning("[Session] Failed to seed thread session: %s", e)
