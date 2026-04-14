@@ -771,9 +771,16 @@ class SlackAdapter(BasePlatformAdapter):
                     if v > cutoff
                 }
 
-        # Ignore bot messages (including our own)
-        if event.get("bot_id") or event.get("subtype") == "bot_message":
-            return
+        # Ignore bot messages (including our own), but allow specific bot_ids
+        allowed_bots = set(
+            b.strip()
+            for b in os.getenv("ALLOWED_BOT_IDS", "").split(",")
+            if b.strip()
+        )
+        event_bot_id = event.get("bot_id")
+        if event_bot_id or event.get("subtype") == "bot_message":
+            if not (event_bot_id and event_bot_id in allowed_bots):
+                return
 
         # Ignore message edits and deletions
         subtype = event.get("subtype")
