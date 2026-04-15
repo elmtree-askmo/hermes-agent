@@ -54,6 +54,46 @@ from cron.jobs import get_due_jobs, mark_job_run, save_job_output, advance_next_
 # locally for audit.
 SILENT_MARKER = "[SILENT]"
 
+# ---------------------------------------------------------------------------
+# Output quality validation — catches degenerate LLM output before delivery
+# ---------------------------------------------------------------------------
+
+def _validate_output_quality(text: str) -> tuple:
+    """Check if LLM output is coherent enough to deliver to user.
+
+    Free-tier models occasionally produce garbled text (mixed-script fragments,
+    random Unicode, path-like concatenations).  This gate runs *before*
+    delivery so bad output never reaches the user.
+
+    Returns ``(True, "ok")`` when the text looks reasonable, or
+    ``(False, reason)`` when it should be suppressed.
+    """
+    if not text or not text.strip():
+        return False, "empty"
+
+    s = text.strip()
+
+    # 1. Non-ASCII ratio — coherent responses are mostly ASCII.
+    #    Threshold 0.15 allows emoji, light formatting, proper nouns.
+    if len(s) > 30:
+        non_ascii = sum(1 for c in s if ord(c) > 127)
+        ratio = non_ascii / len(s)
+        if ratio > 0.15:
+            return False, f"non-ASCII ratio {ratio:.0%}"
+
+    # 2. Word density — garbled text lacks word boundaries.
+    words = s.split()
+    if len(s) > 50 and len(words) < 5:
+        return False, f"too few words ({len(words)}) for length {len(s)}"
+
+    # 3. Average word length — garbled concatenations produce very long tokens.
+    if len(words) >= 3:
+        avg_len = sum(len(w) for w in words) / len(words)
+        if avg_len > 30:
+            return False, f"avg word length {avg_len:.0f}"
+
+    return True, "ok"
+
 # Resolve Hermes home directory (respects HERMES_HOME override)
 _hermes_home = get_hermes_home()
 
@@ -872,6 +912,17 @@ def tick(verbose: bool = True, adapters=None, loop=None) -> int:
                 if should_deliver and success and SILENT_MARKER in deliver_content.strip().upper():
                     logger.info("Job '%s': agent returned %s — skipping delivery", job["id"], SILENT_MARKER)
                     should_deliver = False
+
+                # Pre-delivery quality gate — suppress garbled/degenerate output
+                if should_deliver and success:
+                    valid, reason = _validate_output_quality(deliver_content)
+                    if not valid:
+                        logger.warning(
+                            "Job '%s': output failed quality check (%s) — skipping delivery. "
+                            "First 200 chars: %s",
+                            job["id"], reason, deliver_content[:200],
+                        )
+                        should_deliver = False
 
                 delivery_error = None
                 if should_deliver:
