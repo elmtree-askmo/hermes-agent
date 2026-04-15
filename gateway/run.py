@@ -662,13 +662,26 @@ class GatewayRunner:
             # active provider is openai-codex.
             model = _resolve_gateway_model()
 
+            # Check which built-in memory targets are enabled so we can
+            # skip the memory toolset entirely when both are disabled.
+            try:
+                from hermes_cli.config import load_config as _flush_load_cfg
+                _flush_cfg = _flush_load_cfg().get("memory", {})
+            except Exception:
+                _flush_cfg = {}
+            _mem_enabled = _flush_cfg.get("memory_enabled", True)
+            _user_enabled = _flush_cfg.get("user_profile_enabled", True)
+            _flush_toolsets = ["skills"]
+            if _mem_enabled or _user_enabled:
+                _flush_toolsets.insert(0, "memory")
+
             tmp_agent = AIAgent(
                 **runtime_kwargs,
                 model=model,
                 max_iterations=8,
                 quiet_mode=True,
-                skip_memory=False,  # Flush agent needs memory tools to persist session facts
-                enabled_toolsets=["memory", "skills"],
+                skip_memory=not (_mem_enabled or _user_enabled),
+                enabled_toolsets=_flush_toolsets,
                 session_id=old_session_id,
             )
             # Fully silence the flush agent — quiet_mode only suppresses init
@@ -685,14 +698,21 @@ class GatewayRunner:
 
             # Read live memory state from disk so the flush agent can see
             # what's already saved and avoid overwriting newer entries.
+            # Read live memory state from disk so the flush agent can see
+            # what's already saved and avoid overwriting newer entries.
+            # Only show files that are enabled in config — MEMORY.md and
+            # USER.md are not per-user scoped, so multi-user deployments
+            # should disable them and use an external provider (e.g. Mem0).
             _current_memory = ""
             try:
                 from tools.memory_tool import get_memory_dir
                 _mem_dir = get_memory_dir()
-                for fname, label in [
-                    ("MEMORY.md", "MEMORY (your personal notes)"),
-                    ("USER.md", "USER PROFILE (who the user is)"),
-                ]:
+                _flush_files = []
+                if _mem_enabled:
+                    _flush_files.append(("MEMORY.md", "MEMORY (your personal notes)"))
+                if _user_enabled:
+                    _flush_files.append(("USER.md", "USER PROFILE (who the user is)"))
+                for fname, label in _flush_files:
                     fpath = _mem_dir / fname
                     if fpath.exists():
                         content = fpath.read_text(encoding="utf-8").strip()
@@ -701,14 +721,36 @@ class GatewayRunner:
             except Exception:
                 pass  # Non-fatal — flush still works, just without the guard
 
-            # Give the agent a real turn to think about what to save
+            # Build memory instructions based on which targets are enabled.
+            if _mem_enabled and _user_enabled:
+                _memory_instruction = (
+                    "1. Save any important facts, preferences, or decisions to memory "
+                    "(user profile or your notes) that would be useful in future sessions.\n"
+                )
+            elif _mem_enabled:
+                _memory_instruction = (
+                    "1. Save any important environment facts, conventions, or lessons "
+                    "learned to memory (target='memory' ONLY — do NOT write to "
+                    "target='user', user data is managed separately).\n"
+                )
+            elif _user_enabled:
+                _memory_instruction = (
+                    "1. Save any important user preferences or decisions to memory "
+                    "(target='user' ONLY — do NOT write to target='memory', "
+                    "environment notes are managed separately).\n"
+                )
+            else:
+                _memory_instruction = (
+                    "1. Do NOT use the memory tool — memory is managed by an "
+                    "external provider.\n"
+                )
+
             flush_prompt = (
                 "[System: This session is about to be automatically reset due to "
                 "inactivity or a scheduled daily reset. The conversation context "
                 "will be cleared after this turn.\n\n"
                 "Review the conversation above and:\n"
-                "1. Save any important facts, preferences, or decisions to memory "
-                "(user profile or your notes) that would be useful in future sessions.\n"
+                + _memory_instruction +
                 "2. If you discovered a reusable workflow or solved a non-trivial "
                 "problem, consider saving it as a skill.\n"
                 "3. If nothing is worth saving, that's fine — just skip.\n\n"

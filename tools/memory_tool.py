@@ -454,6 +454,31 @@ def memory_tool(
     if target not in ("memory", "user"):
         return tool_error(f"Invalid target '{target}'. Use 'memory' or 'user'.", success=False)
 
+    # Block writes when the corresponding target is disabled in config.
+    # MEMORY.md and USER.md are not per-user scoped, so multi-user deployments
+    # should disable them and use an external provider (e.g. Mem0).
+    # Note: load_config() re-reads YAML on each call. Acceptable at R&D scale;
+    # cache at module level if this becomes a hot path.
+    if action in ("add", "replace", "remove"):
+        try:
+            from hermes_cli.config import load_config as _load_cfg
+            _cfg = _load_cfg()
+            _mem_cfg = _cfg.get("memory", {})
+            if target == "user" and not _mem_cfg.get("user_profile_enabled", True):
+                return tool_error(
+                    "Writes to 'user' target are disabled (user_profile_enabled=false). "
+                    "User data is managed by an external memory provider.",
+                    success=False,
+                )
+            if target == "memory" and not _mem_cfg.get("memory_enabled", True):
+                return tool_error(
+                    "Writes to 'memory' target are disabled (memory_enabled=false). "
+                    "Memory is managed by an external provider.",
+                    success=False,
+                )
+        except Exception:
+            pass  # Config unavailable — allow the write
+
     if action == "add":
         if not content:
             return tool_error("Content is required for 'add' action.", success=False)
