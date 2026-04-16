@@ -400,6 +400,7 @@ class GatewayConfig:
             group_sessions_per_user=_coerce_bool(group_sessions_per_user, True),
             thread_sessions_per_user=_coerce_bool(thread_sessions_per_user, False),
             unauthorized_dm_behavior=unauthorized_dm_behavior,
+            first_message_help_hint=_coerce_bool(data.get("first_message_help_hint"), True),
             streaming=StreamingConfig.from_dict(data.get("streaming", {})),
         )
 
