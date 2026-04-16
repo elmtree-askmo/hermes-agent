@@ -251,6 +251,9 @@ class GatewayConfig:
     # Unauthorized DM policy
     unauthorized_dm_behavior: str = "pair"  # "pair" or "ignore"
 
+    # First-message help hint — inject "[mention /help]" into first-ever message context
+    first_message_help_hint: bool = True
+
     # Streaming configuration
     streaming: StreamingConfig = field(default_factory=StreamingConfig)
 
@@ -483,6 +486,9 @@ def load_gateway_config() -> GatewayConfig:
 
             if "always_log_local" in yaml_cfg:
                 gw_data["always_log_local"] = yaml_cfg["always_log_local"]
+
+            if "first_message_help_hint" in yaml_cfg:
+                gw_data["first_message_help_hint"] = yaml_cfg["first_message_help_hint"]
 
             if "unauthorized_dm_behavior" in yaml_cfg:
                 gw_data["unauthorized_dm_behavior"] = _normalize_unauthorized_dm_behavior(

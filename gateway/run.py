@@ -2716,11 +2716,19 @@ class GatewayRunner:
 
         # First-message onboarding -- only on the very first interaction ever
         if not history and not self.session_store.has_any_sessions():
-            context_prompt += (
-                "\n\n[System note: This is the user's very first message ever. "
-                "Briefly introduce yourself and mention that /help shows available commands. "
-                "Keep the introduction concise -- one or two sentences max.]"
-            )
+            _help_hint = getattr(self.config, "first_message_help_hint", True)
+            if _help_hint:
+                context_prompt += (
+                    "\n\n[System note: This is the user's very first message ever. "
+                    "Briefly introduce yourself and mention that /help shows available commands. "
+                    "Keep the introduction concise -- one or two sentences max.]"
+                )
+            else:
+                context_prompt += (
+                    "\n\n[System note: This is the user's very first message ever. "
+                    "Briefly introduce yourself. "
+                    "Keep the introduction concise -- one or two sentences max.]"
+                )
         
         # One-time prompt if no home channel is set for this platform
         # Skip for webhooks - they deliver directly to configured targets (github_comment, etc.)
