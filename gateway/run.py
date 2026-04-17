@@ -5958,19 +5958,37 @@ class GatewayRunner:
         return True
 
     def _set_session_env(self, context: SessionContext) -> None:
-        """Set environment variables for the current session."""
-        os.environ["HERMES_SESSION_PLATFORM"] = context.source.platform.value
+        """Set environment variables and task-local ContextVars for the current session.
+
+        ContextVars isolate concurrent asyncio tasks; env vars remain set for
+        tools/callers that still read from ``os.environ``.
+        """
+        from tools.session_context import set_session as _ctx_set_session
+
+        platform_value = context.source.platform.value
+        os.environ["HERMES_SESSION_PLATFORM"] = platform_value
         os.environ["HERMES_SESSION_CHAT_ID"] = context.source.chat_id
-        if context.source.chat_name:
-            os.environ["HERMES_SESSION_CHAT_NAME"] = context.source.chat_name
-        if context.source.thread_id:
-            os.environ["HERMES_SESSION_THREAD_ID"] = str(context.source.thread_id)
+        chat_name = context.source.chat_name
+        if chat_name:
+            os.environ["HERMES_SESSION_CHAT_NAME"] = chat_name
+        thread_id = str(context.source.thread_id) if context.source.thread_id else None
+        if thread_id:
+            os.environ["HERMES_SESSION_THREAD_ID"] = thread_id
+        _ctx_set_session(
+            platform=platform_value,
+            chat_id=context.source.chat_id,
+            chat_name=chat_name,
+            thread_id=thread_id,
+        )
 
     def _clear_session_env(self) -> None:
-        """Clear session environment variables."""
+        """Clear environment variables and task-local ContextVars."""
+        from tools.session_context import clear_session as _ctx_clear_session
+
         for var in ["HERMES_SESSION_PLATFORM", "HERMES_SESSION_CHAT_ID", "HERMES_SESSION_CHAT_NAME", "HERMES_SESSION_THREAD_ID"]:
             if var in os.environ:
                 del os.environ[var]
+        _ctx_clear_session()
     
     async def _enrich_message_with_vision(
         self,

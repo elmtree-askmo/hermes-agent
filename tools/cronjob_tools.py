@@ -278,7 +278,24 @@ def cronjob(
             )
 
         if normalized == "list":
-            jobs = [_format_job(job) for job in list_jobs(include_disabled=include_disabled)]
+            all_jobs = list_jobs(include_disabled=include_disabled)
+            # Scope to current session so agents only see jobs whose origin
+            # matches the caller's chat_id. ContextVar is asyncio-task-local
+            # and safe under concurrent gateway sessions; env is a fallback
+            # for unscoped contexts (CLI, scripts), where it stays unset.
+            from tools.session_context import get_chat_id as _ctx_get_chat_id, get_platform as _ctx_get_platform
+            session_chat_id = _ctx_get_chat_id() or os.getenv("HERMES_SESSION_CHAT_ID")
+            session_platform = _ctx_get_platform() or os.getenv("HERMES_SESSION_PLATFORM")
+            if session_chat_id:
+                def _owned(job: Dict[str, Any]) -> bool:
+                    origin = job.get("origin") or {}
+                    if origin.get("chat_id") != session_chat_id:
+                        return False
+                    if session_platform and origin.get("platform") != session_platform:
+                        return False
+                    return True
+                all_jobs = [j for j in all_jobs if _owned(j)]
+            jobs = [_format_job(job) for job in all_jobs]
             return json.dumps({"success": True, "count": len(jobs), "jobs": jobs}, indent=2)
 
         if not job_id:
