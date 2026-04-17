@@ -254,6 +254,9 @@ class GatewayConfig:
     # First-message help hint — inject "[mention /help]" into first-ever message context
     first_message_help_hint: bool = True
 
+    # Home-channel hint — send "No home channel is set" prompt on first message per session
+    home_channel_hint: bool = True
+
     # Streaming configuration
     streaming: StreamingConfig = field(default_factory=StreamingConfig)
 
@@ -401,6 +404,7 @@ class GatewayConfig:
             thread_sessions_per_user=_coerce_bool(thread_sessions_per_user, False),
             unauthorized_dm_behavior=unauthorized_dm_behavior,
             first_message_help_hint=_coerce_bool(data.get("first_message_help_hint"), True),
+            home_channel_hint=_coerce_bool(data.get("home_channel_hint"), True),
             streaming=StreamingConfig.from_dict(data.get("streaming", {})),
         )
 
@@ -490,6 +494,9 @@ def load_gateway_config() -> GatewayConfig:
 
             if "first_message_help_hint" in yaml_cfg:
                 gw_data["first_message_help_hint"] = yaml_cfg["first_message_help_hint"]
+
+            if "home_channel_hint" in yaml_cfg:
+                gw_data["home_channel_hint"] = yaml_cfg["home_channel_hint"]
 
             if "unauthorized_dm_behavior" in yaml_cfg:
                 gw_data["unauthorized_dm_behavior"] = _normalize_unauthorized_dm_behavior(
