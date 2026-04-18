@@ -551,6 +551,20 @@ class SlackAdapter(BasePlatformAdapter):
                 or user_id
             )
             self._user_name_cache[user_id] = name
+
+            # Persist Slack-reported IANA timezone so session context can inject
+            # it without a second API round-trip. Used by cron creation rules.
+            tz = user.get("tz", "")
+            if tz:
+                try:
+                    _artemis_dir = _Path(
+                        os.environ.get("HERMES_HOME", str(_Path.home() / ".hermes"))
+                    ) / "artemis" / user_id
+                    _artemis_dir.mkdir(parents=True, exist_ok=True)
+                    (_artemis_dir / "slack_tz.txt").write_text(tz)
+                except Exception as e:
+                    logger.warning("[Slack] slack_tz.txt write failed for %s: %s", user_id, e)
+
             return name
         except Exception as e:
             logger.debug("[Slack] users.info failed for %s: %s", user_id, e)

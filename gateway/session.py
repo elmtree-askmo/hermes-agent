@@ -292,6 +292,18 @@ def build_session_context_prompt(
         except Exception:
             pass  # non-fatal, agent can still call get_user_profile
 
+        # Inject Slack-reported IANA timezone (populated by the Slack platform
+        # adapter on users.info). Used by cron creation rules to convert local
+        # wall-clock times to UTC without asking the user.
+        _tz_path = _artemis_dir / uid / "slack_tz.txt"
+        try:
+            if _tz_path.exists():
+                _tz = _tz_path.read_text(encoding="utf-8").strip()
+                if _tz:
+                    lines.append(f"**User TZ:** {_tz}")
+        except Exception:
+            pass
+
     # Platform-specific behavioral notes
     if context.source.platform == Platform.SLACK:
         lines.append("")
