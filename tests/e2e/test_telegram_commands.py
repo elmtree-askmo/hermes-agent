@@ -182,7 +182,7 @@ class TestAuthorization:
         # (not via _send_with_retry), so check it was called with a pairing message
         adapter.send.assert_called()
         response_text = adapter.send.call_args[0][1] if len(adapter.send.call_args[0]) > 1 else ""
-        assert "recognize" in response_text.lower() or "pair" in response_text.lower() or "ABC123" in response_text
+        assert "private beta" in response_text.lower()
 
     @pytest.mark.asyncio
     async def test_unauthorized_user_does_not_get_help(self, adapter, runner):

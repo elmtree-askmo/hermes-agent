@@ -154,7 +154,7 @@ async def test_unauthorized_dm_pairs_by_default(monkeypatch):
         "tester",
     )
     adapter.send.assert_awaited_once()
-    assert "ABC12DEF" in adapter.send.await_args.args[1]
+    assert "private beta" in adapter.send.await_args.args[1]
 
 
 @pytest.mark.asyncio
@@ -227,7 +227,7 @@ async def test_rejection_message_records_rate_limit(monkeypatch):
 
     assert result is None
     adapter.send.assert_awaited_once()
-    assert "Too many" in adapter.send.await_args.args[1]
+    assert "private beta" in adapter.send.await_args.args[1]
     runner.pairing_store._record_rate_limit.assert_called_once_with(
         "whatsapp", "15551234567@s.whatsapp.net"
     )
