@@ -516,7 +516,23 @@ def _build_job_prompt(job: dict) -> str:
         skills = [legacy] if legacy else []
 
     skill_names = [str(name).strip() for name in skills if str(name).strip()]
+
+    # Onboarding footer for daily briefing: append a one-line opt-out reminder
+    # to the first 3 briefing runs so new users discover the pause path.
+    # Gated on skill=artemis-briefing to avoid leaking into other cron jobs.
+    footer_line = ""
+    if "artemis-briefing" in skill_names:
+        completed = (job.get("repeat") or {}).get("completed", 0) or 0
+        if completed < 3:
+            footer_line = (
+                "FOOTER_REQUIRED: append "
+                "_(daily briefing — say \"pause\" anytime to stop)_ "
+                "as the absolute last line."
+            )
+
     if not skill_names:
+        if footer_line:
+            prompt = f"{prompt}\n\n{footer_line}"
         return prompt
 
     from tools.skills_tool import skill_view
@@ -553,6 +569,8 @@ def _build_job_prompt(job: dict) -> str:
 
     if prompt:
         parts.extend(["", f"The user has provided the following instruction alongside the skill invocation: {prompt}"])
+    if footer_line:
+        parts.extend(["", footer_line])
     return "\n".join(parts)
 
 

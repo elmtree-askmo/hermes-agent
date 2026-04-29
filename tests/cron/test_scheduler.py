@@ -1104,6 +1104,62 @@ class TestBuildJobPromptMissingSkill:
         assert "go" in result
 
 
+class TestBuildJobPromptArtemisFooter:
+    """Verify FOOTER_REQUIRED injection for the artemis-briefing skill."""
+
+    _FOOTER_LINE = (
+        'FOOTER_REQUIRED: append _(daily briefing — say "pause" anytime to stop)_'
+    )
+
+    def _briefing_skill_view(self, name: str) -> str:
+        return json.dumps({"success": True, "content": "Briefing skill body."})
+
+    def test_footer_injected_for_first_briefing_run(self):
+        with patch("tools.skills_tool.skill_view", side_effect=self._briefing_skill_view):
+            result = _build_job_prompt({
+                "skills": ["artemis-briefing"],
+                "prompt": "Run briefing",
+                "repeat": {"times": None, "completed": 0},
+            })
+        assert self._FOOTER_LINE in result
+
+    def test_footer_injected_at_third_run(self):
+        with patch("tools.skills_tool.skill_view", side_effect=self._briefing_skill_view):
+            result = _build_job_prompt({
+                "skills": ["artemis-briefing"],
+                "prompt": "Run briefing",
+                "repeat": {"times": None, "completed": 2},
+            })
+        assert self._FOOTER_LINE in result
+
+    def test_footer_dropped_from_fourth_run_onward(self):
+        with patch("tools.skills_tool.skill_view", side_effect=self._briefing_skill_view):
+            result = _build_job_prompt({
+                "skills": ["artemis-briefing"],
+                "prompt": "Run briefing",
+                "repeat": {"times": None, "completed": 3},
+            })
+        assert "FOOTER_REQUIRED" not in result
+
+    def test_footer_skipped_for_non_briefing_skill(self):
+        with patch("tools.skills_tool.skill_view", side_effect=self._briefing_skill_view):
+            result = _build_job_prompt({
+                "skills": ["some-other-skill"],
+                "prompt": "Run something else",
+                "repeat": {"times": None, "completed": 0},
+            })
+        assert "FOOTER_REQUIRED" not in result
+
+    def test_footer_injected_when_repeat_missing(self):
+        """Jobs without a repeat block default to completed=0 and still get the footer if briefing."""
+        with patch("tools.skills_tool.skill_view", side_effect=self._briefing_skill_view):
+            result = _build_job_prompt({
+                "skills": ["artemis-briefing"],
+                "prompt": "Run briefing",
+            })
+        assert self._FOOTER_LINE in result
+
+
 class TestTickAdvanceBeforeRun:
     """Verify that tick() calls advance_next_run before run_job for crash safety."""
 
