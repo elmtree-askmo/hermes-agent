@@ -44,6 +44,13 @@ from gateway.platforms.base import (
 
 logger = logging.getLogger(__name__)
 
+# G3 (S-0429-01 / audit M-8): gateway-side format guard for Slack user IDs.
+# ``U…`` covers normal Slack workspaces; ``W…`` covers Enterprise Grid users.
+# Bot IDs (``B…``) are intentionally excluded — bots are not isolated user
+# units in the Hermes/Artemis isolation model. See
+# ``docs/specs/multi-user-isolation-v2.md`` § G3 in the Artemis repo.
+_SLACK_USER_ID_PATTERN = re.compile(r"^[UW][A-Z0-9]+$")
+
 
 def check_slack_requirements() -> bool:
     """Check if Slack dependencies are available."""
@@ -558,6 +565,17 @@ class SlackAdapter(BasePlatformAdapter):
             # by other profiles (e.g. Executor) can target this DM at fire time
             # without re-resolving via Slack API.
             tz = user.get("tz", "")
+            # G3 (audit M-8): refuse to materialize per-user filesystem
+            # paths if the upstream user_id is malformed. Slack Socket Mode
+            # currently emits well-formed ``U…`` IDs, but a future platform
+            # adapter or Enterprise Grid bot id could otherwise carry a
+            # traversal payload (``../OTHER``) that escapes the artemis tree.
+            if not _SLACK_USER_ID_PATTERN.match(user_id):
+                logger.warning(
+                    "[Slack] rejecting user_id with bad format in _resolve_user_name: %r",
+                    user_id,
+                )
+                return name
             try:
                 _artemis_dir = _Path(
                     os.environ.get("HERMES_HOME", str(_Path.home() / ".hermes"))

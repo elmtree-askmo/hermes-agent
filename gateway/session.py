@@ -22,6 +22,11 @@ from typing import Dict, List, Optional, Any
 
 logger = logging.getLogger(__name__)
 
+# G3 (S-0429-01 / audit M-8): gateway-side user_id format guard. Mirrors the
+# pattern used in ``gateway/platforms/slack.py``; kept local to avoid a new
+# cross-module import.
+_SESSION_USER_ID_PATTERN = re.compile(r"^[UW][A-Z0-9]+$")
+
 
 def _now() -> datetime:
     """Return the current local time."""
@@ -277,39 +282,56 @@ def build_session_context_prompt(
             uid = _hash_sender_id(uid)
         lines.append(f"**User ID:** {uid}")
 
-        # Inject user profile from Artemis if available, so the agent
-        # knows onboarding status without needing to call a tool.
-        _artemis_dir = Path(os.environ.get(
-            "HERMES_HOME", str(Path.home() / ".hermes")
-        )) / "artemis"
-        _profile_path = _artemis_dir / uid / "profile.json"
-        try:
-            if _profile_path.exists():
-                # Don't inject raw profile.json into the system prompt — free-form
-                # fields like `context` may carry user-supplied content (resume
-                # paste, chat input) that becomes a persistent prompt-injection
-                # vector. Tell the agent the profile exists; it can call
-                # get_user_profile, which routes content through the user-message
-                # channel where the model is more skeptical.
-                lines.append(
-                    "**User Profile:** onboarded (call `get_user_profile` for details)"
-                )
-            else:
-                lines.append("**User Profile:** Not onboarded yet")
-        except Exception:
-            pass  # non-fatal, agent can still call get_user_profile
+        # G3 (S-0429-01 / audit M-8): only touch ``~/.hermes/artemis/<uid>/``
+        # paths when the raw user_id matches the expected Slack/Grid format.
+        # Without this guard, a malformed ``user_id`` (``"../OTHER"`` from a
+        # future platform adapter, or a bot id like ``"B0…"``) would
+        # path-traverse out of the artemis tree on read. ``redact_pii``
+        # substitutes a hash that won't match either — short-circuiting on
+        # redaction is fine because the per-user injection isn't needed when
+        # we're hiding identity anyway.
+        _raw_uid = context.source.user_id
+        if _raw_uid and _SESSION_USER_ID_PATTERN.match(_raw_uid):
+            # Inject user profile from Artemis if available, so the agent
+            # knows onboarding status without needing to call a tool.
+            _artemis_dir = Path(os.environ.get(
+                "HERMES_HOME", str(Path.home() / ".hermes")
+            )) / "artemis"
+            _profile_path = _artemis_dir / _raw_uid / "profile.json"
+            try:
+                if _profile_path.exists():
+                    # Don't inject raw profile.json into the system prompt —
+                    # free-form fields like `context` may carry user-supplied
+                    # content (resume paste, chat input) that becomes a
+                    # persistent prompt-injection vector. Tell the agent the
+                    # profile exists; it can call get_user_profile, which
+                    # routes content through the user-message channel where
+                    # the model is more skeptical.
+                    lines.append(
+                        "**User Profile:** onboarded (call `get_user_profile` for details)"
+                    )
+                else:
+                    lines.append("**User Profile:** Not onboarded yet")
+            except Exception:
+                pass  # non-fatal, agent can still call get_user_profile
 
-        # Inject Slack-reported IANA timezone (populated by the Slack platform
-        # adapter on users.info). Used by cron creation rules to convert local
-        # wall-clock times to UTC without asking the user.
-        _tz_path = _artemis_dir / uid / "slack_tz.txt"
-        try:
-            if _tz_path.exists():
-                _tz = _tz_path.read_text(encoding="utf-8").strip()
-                if _tz:
-                    lines.append(f"**User TZ:** {_tz}")
-        except Exception:
-            pass
+            # Inject Slack-reported IANA timezone (populated by the Slack
+            # platform adapter on users.info). Used by cron creation rules
+            # to convert local wall-clock times to UTC without asking the
+            # user.
+            _tz_path = _artemis_dir / _raw_uid / "slack_tz.txt"
+            try:
+                if _tz_path.exists():
+                    _tz = _tz_path.read_text(encoding="utf-8").strip()
+                    if _tz:
+                        lines.append(f"**User TZ:** {_tz}")
+            except Exception:
+                pass
+        elif _raw_uid:
+            logger.warning(
+                "session: skipping per-user context inject — bad user_id format: %r",
+                _raw_uid,
+            )
 
     # Platform-specific behavioral notes
     if context.source.platform == Platform.SLACK:
