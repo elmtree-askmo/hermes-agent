@@ -74,15 +74,21 @@ def _origin_from_env() -> Optional[Dict[str, str]]:
         get_chat_id as _ctx_get_chat_id,
         get_chat_name as _ctx_get_chat_name,
         get_platform as _ctx_get_platform,
+        get_user_id as _ctx_get_user_id,
     )
     origin_platform = _ctx_get_platform() or os.getenv("HERMES_SESSION_PLATFORM")
     origin_chat_id = _ctx_get_chat_id() or os.getenv("HERMES_SESSION_CHAT_ID")
     if origin_platform and origin_chat_id:
+        # G1 (S-0429-01): persist user_id alongside chat_id so the cron
+        # firing path can re-bind ``HERMES_SESSION_USER_ID`` without a
+        # reverse-lookup. Reverse-lookup in ``cron/scheduler._resolve_origin``
+        # is the legacy fallback for jobs created before this change.
         return {
             "platform": origin_platform,
             "chat_id": origin_chat_id,
             "chat_name": _ctx_get_chat_name() or os.getenv("HERMES_SESSION_CHAT_NAME"),
             "thread_id": None,
+            "user_id": _ctx_get_user_id() or os.getenv("HERMES_SESSION_USER_ID"),
         }
     return None
 
