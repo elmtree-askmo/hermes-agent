@@ -834,6 +834,30 @@ class MCPServerTask:
         safe_env = _build_safe_env(user_env)
         command, safe_env = _resolve_stdio_command(command, safe_env)
 
+        # G1 (S-0429-01): propagate session-bound identifiers from the
+        # current asyncio task's ContextVars into the spawned MCP
+        # subprocess env. ContextVars are in-process — without this
+        # materialization the subprocess can't tell which user the gateway
+        # is currently serving, and the Artemis MCP server has no choice
+        # but to trust LLM-supplied args.user_id (the IDOR vector this
+        # spec closes). Explicitly drop any stale value when the
+        # ContextVar is unset, rather than letting os.environ leak across
+        # sessions through the safe-env allowlist.
+        from tools.session_context import (
+            get_chat_id as _ctx_chat,
+            get_platform as _ctx_platform,
+            get_user_id as _ctx_user,
+        )
+        for env_key, ctx_value in (
+            ("HERMES_SESSION_USER_ID", _ctx_user()),
+            ("HERMES_SESSION_CHAT_ID", _ctx_chat()),
+            ("HERMES_SESSION_PLATFORM", _ctx_platform()),
+        ):
+            if ctx_value:
+                safe_env[env_key] = ctx_value
+            else:
+                safe_env.pop(env_key, None)
+
         # Check package against OSV malware database before spawning
         from tools.osv_check import check_package_for_malware
         malware_error = check_package_for_malware(command, args)

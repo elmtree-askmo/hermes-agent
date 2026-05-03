@@ -5983,6 +5983,7 @@ class GatewayRunner:
             chat_id=context.source.chat_id,
             chat_name=chat_name,
             thread_id=thread_id,
+            user_id=context.source.user_id,
         )
 
     def _clear_session_env(self) -> None:

@@ -19,6 +19,11 @@ session_platform: ContextVar[Optional[str]] = ContextVar("hermes_session_platfor
 session_chat_id: ContextVar[Optional[str]] = ContextVar("hermes_session_chat_id", default=None)
 session_chat_name: ContextVar[Optional[str]] = ContextVar("hermes_session_chat_name", default=None)
 session_thread_id: ContextVar[Optional[str]] = ContextVar("hermes_session_thread_id", default=None)
+# G1 (S-0429-01): asyncio-task-local Slack/Grid user_id. The MCP subprocess
+# spawn path materializes this into ``HERMES_SESSION_USER_ID`` env so the
+# Artemis MCP server can bind every handler's user_id to the calling
+# session — never to LLM-supplied args.
+session_user_id: ContextVar[Optional[str]] = ContextVar("hermes_session_user_id", default=None)
 
 
 def set_session(
@@ -27,11 +32,13 @@ def set_session(
     chat_id: Optional[str],
     chat_name: Optional[str] = None,
     thread_id: Optional[str] = None,
+    user_id: Optional[str] = None,
 ) -> None:
     session_platform.set(platform)
     session_chat_id.set(chat_id)
     session_chat_name.set(chat_name)
     session_thread_id.set(thread_id)
+    session_user_id.set(user_id)
 
 
 def clear_session() -> None:
@@ -39,6 +46,7 @@ def clear_session() -> None:
     session_chat_id.set(None)
     session_chat_name.set(None)
     session_thread_id.set(None)
+    session_user_id.set(None)
 
 
 def get_chat_id() -> Optional[str]:
@@ -55,3 +63,7 @@ def get_chat_name() -> Optional[str]:
 
 def get_thread_id() -> Optional[str]:
     return session_thread_id.get()
+
+
+def get_user_id() -> Optional[str]:
+    return session_user_id.get()
