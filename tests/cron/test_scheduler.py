@@ -9,6 +9,14 @@ import pytest
 
 from cron.scheduler import _resolve_origin, _resolve_delivery_target, _deliver_result, _send_media_via_adapter, run_job, SILENT_MARKER, _build_job_prompt
 
+# Pin the whole module to a single xdist worker. Tests in TestSilentDelivery
+# and TestTickAdvanceBeforeRun patch cron.scheduler module-level attributes
+# (`advance_next_run`, `_deliver_result`, `get_due_jobs`) via context managers;
+# under default xdist scheduling the patches racily disagree across workers
+# importing the same module. Pinning to one worker via xdist_group is the
+# minimal fix — preserves parallelism for all other test files.
+pytestmark = pytest.mark.xdist_group("cron_scheduler")
+
 
 class TestResolveOrigin:
     def test_full_origin(self):
