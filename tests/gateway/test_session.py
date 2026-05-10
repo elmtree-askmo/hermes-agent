@@ -1063,3 +1063,124 @@ class TestProfileInjectionContainment:
         prompt = build_session_context_prompt(ctx)
 
         assert "Not onboarded" in prompt
+
+
+# =========================================================================
+# Time context injection (B-0508-01 Phase 2)
+# =========================================================================
+#
+# Artemis ships scripts/compute-time-context.py that emits precomputed
+# day-deltas (last_user_inbound_days_ago, follow_ups[].days_until, etc.)
+# from ~/.hermes/ runtime state. build_session_context_prompt invokes it
+# per-turn via subprocess so Coach reads exact numbers instead of computing
+# them from session memory.
+
+class TestTimeContextInjection:
+    def _make_source(self, user_id="U0TESTUSER"):
+        return SessionSource(
+            platform=Platform.SLACK,
+            chat_id="D_TEST",
+            chat_name="dm",
+            chat_type="dm",
+            user_id=user_id,
+            user_name="alice",
+        )
+
+    def _config(self):
+        return GatewayConfig(
+            platforms={Platform.SLACK: PlatformConfig(enabled=True, token="fake")},
+        )
+
+    def test_inject_when_script_present_and_returns_json(
+        self, tmp_path, monkeypatch
+    ):
+        """When the helper script exists and returns parseable JSON, the
+        prompt contains a fenced **User Time Context** block."""
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        scripts_dir = tmp_path / "scripts"
+        scripts_dir.mkdir()
+        script = scripts_dir / "compute-time-context.py"
+        script.write_text(
+            '#!/usr/bin/env python3\n'
+            'import json, sys\n'
+            'print(json.dumps({"now": "2026-05-10T14:00:00Z", '
+            '"last_user_inbound_days_ago": 3}))\n'
+        )
+        script.chmod(0o755)
+
+        ctx = build_session_context(self._make_source(), self._config())
+        prompt = build_session_context_prompt(ctx)
+
+        assert "**User Time Context**" in prompt
+        assert "last_user_inbound_days_ago" in prompt
+        assert '"3"' in prompt or ": 3" in prompt
+
+    def test_skip_when_script_missing(self, tmp_path, monkeypatch):
+        """No helper script → no time context block, no error."""
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        # Don't create scripts/compute-time-context.py.
+
+        ctx = build_session_context(self._make_source(), self._config())
+        prompt = build_session_context_prompt(ctx)
+
+        assert "User Time Context" not in prompt
+
+    def test_skip_when_script_returns_non_json(self, tmp_path, monkeypatch):
+        """Garbage stdout must not crash or leak into the prompt."""
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        scripts_dir = tmp_path / "scripts"
+        scripts_dir.mkdir()
+        script = scripts_dir / "compute-time-context.py"
+        script.write_text(
+            '#!/usr/bin/env python3\n'
+            'print("not valid json")\n'
+        )
+        script.chmod(0o755)
+
+        ctx = build_session_context(self._make_source(), self._config())
+        prompt = build_session_context_prompt(ctx)
+
+        assert "User Time Context" not in prompt
+        assert "not valid json" not in prompt
+
+    def test_skip_when_script_exits_nonzero(self, tmp_path, monkeypatch):
+        """Non-zero exit code → silently skip; no partial block in prompt."""
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        scripts_dir = tmp_path / "scripts"
+        scripts_dir.mkdir()
+        script = scripts_dir / "compute-time-context.py"
+        script.write_text(
+            '#!/usr/bin/env python3\n'
+            'import sys\n'
+            'sys.exit(2)\n'
+        )
+        script.chmod(0o755)
+
+        ctx = build_session_context(self._make_source(), self._config())
+        prompt = build_session_context_prompt(ctx)
+
+        assert "User Time Context" not in prompt
+
+    def test_skip_for_invalid_user_id_format(self, tmp_path, monkeypatch):
+        """The existing _SESSION_USER_ID_PATTERN guard short-circuits per-user
+        injection, so a malformed user_id should NOT trigger the helper."""
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        scripts_dir = tmp_path / "scripts"
+        scripts_dir.mkdir()
+        # Helper would emit valid JSON if invoked.
+        script = scripts_dir / "compute-time-context.py"
+        script.write_text(
+            '#!/usr/bin/env python3\n'
+            'import json\n'
+            'print(json.dumps({"smoke": "should not appear"}))\n'
+        )
+        script.chmod(0o755)
+
+        ctx = build_session_context(
+            self._make_source(user_id="B0BOTID01"),  # 'B'-prefix bot id
+            self._config(),
+        )
+        prompt = build_session_context_prompt(ctx)
+
+        assert "User Time Context" not in prompt
+        assert "smoke" not in prompt

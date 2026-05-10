@@ -13,6 +13,7 @@ import logging
 import os
 import json
 import re
+import subprocess
 import threading
 import uuid
 from pathlib import Path
@@ -327,6 +328,44 @@ def build_session_context_prompt(
                         lines.append(f"**User TZ:** {_tz}")
             except Exception:
                 pass
+
+            # B-0508-01 Phase 2: precomputed time context. Calls Artemis-side
+            # `compute-time-context.py` (deployed by `setup.sh` to
+            # `~/.hermes/scripts/`) and injects the JSON dict so Coach reads
+            # exact day-deltas instead of computing them from session memory.
+            # Failure modes (script missing / timeout / non-JSON output) are
+            # silently skipped — this is a soft enrichment, not a hard
+            # dependency.
+            _tc_script = (
+                Path(os.environ.get(
+                    "HERMES_HOME", str(Path.home() / ".hermes")
+                )) / "scripts" / "compute-time-context.py"
+            )
+            if _tc_script.exists():
+                try:
+                    _tc_proc = subprocess.run(
+                        ["python3", str(_tc_script), _raw_uid],
+                        capture_output=True,
+                        text=True,
+                        timeout=2,
+                        check=False,
+                    )
+                    if _tc_proc.returncode == 0 and _tc_proc.stdout.strip():
+                        _tc_json = _tc_proc.stdout.strip()
+                        # Validate it's parseable; reject silently if not.
+                        json.loads(_tc_json)
+                        lines.append("")
+                        lines.append(
+                            "**User Time Context** (precomputed — use these "
+                            "values; do not compute durations from session "
+                            "memory or message history):"
+                        )
+                        lines.append("```json")
+                        lines.append(_tc_json)
+                        lines.append("```")
+                except (subprocess.TimeoutExpired, OSError,
+                        json.JSONDecodeError):
+                    pass
         elif _raw_uid:
             logger.warning(
                 "session: skipping per-user context inject — bad user_id format: %r",
