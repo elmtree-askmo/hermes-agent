@@ -179,6 +179,28 @@ _BRIEFING_MIDCONTENT_REASONING = (
     "looking at session",
     "looking at mem0",
     "looking at what the user",
+    # B-class voice violations: third-person-about-user narration inside
+    # briefing output. Added 2026-05-17 after Artemis B-0510-01 Phase 4
+    # reopen (Crystal 5/16 13:52 Executor brief + Amy 5/16 16:02 quiet-day
+    # briefing). These phrases mark the narrator addressing someone OTHER
+    # than the user (a Strategist / Coach-self reader) about the user —
+    # specifically incompatible with Coach's second-person voice contract.
+    "she requested",
+    "he requested",
+    "she reaches out",
+    "he reaches out",
+    "she reaches",
+    "he reaches",
+    "if she reacts",
+    "if he reacts",
+    "if they react",
+    "are already in your inbox",
+    "ready to deploy",
+    "loaded and ready",
+    "the user is",
+    "the user has",
+    "the user's profile",
+    "the user's strategy",
     # Bare "Wait —" / "Actually," opening a sentence — caught by regex
     # patterns below in addition to substring search.
 )
