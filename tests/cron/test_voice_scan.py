@@ -1,10 +1,9 @@
-"""Tests for the post-LLM voice-scan layer (Artemis B-0510-01 Phase 4b).
+"""Tests for the post-LLM voice-scan layer (Artemis B-0510-01 Phase 5).
 
-Voice-scan is a semantic enforcement layer: after the deterministic Phase 3
-anti-pattern guard passes, scheduler calls a small OpenRouter LLM to judge
-whether the briefing is in second-person voice or narrates the recipient in
-third person. On a confident FAIL verdict the scheduler substitutes the
-deterministic quiet-day fallback.
+Voice-scan is the last-resort semantic enforcement layer: after Phase 6
+two-step call runs (decide + write), voice-scan catches any residual
+voice violations or write-call failures. On a confident FAIL verdict the
+scheduler substitutes the deterministic quiet-day fallback.
 
 Tests monkeypatch the HTTP call — no real network. Two red cases drive the
 fail path (verdict=FAIL → substitution); two green cases drive the pass path

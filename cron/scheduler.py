@@ -96,172 +96,6 @@ def _validate_output_quality(text: str) -> tuple:
     return True, "ok"
 
 
-# ---------------------------------------------------------------------------
-# Briefing anti-pattern guard — Artemis B-0510-01 Phase 3
-# ---------------------------------------------------------------------------
-#
-# Coach's daily-briefing output occasionally leaks chain-of-thought into the
-# deliverable channel under input contradiction (e.g. strategy field vs.
-# profile mismatch).  Three observed sub-shapes:
-#   A   — quiet-day total replacement (reasoning instead of brief)
-#   A'  — content-path prefix pollution (reasoning then brief)
-#   A'' — template bypass (reasoning-only, no brief emitted)
-#
-# Prefix-level SKILL.md constraints (F template + Phase 2b paired examples)
-# enforce on inputs without competing priority but fail open when the model
-# treats input contradiction as a reconciliation sub-task.  This scanner
-# runs post-LLM, before delivery, and flags content carrying any of the
-# anti-pattern markers SKILL.md § Rules forbids.  On hit, the scheduler
-# substitutes a deterministic quiet-day fallback rather than delivering the
-# leak.  See docs/plans/investigations/coach-briefing-output-fidelity.md
-# (Artemis) § Phase 3 for the failure taxonomy and rationale.
-
-import re as _re
-
-# Phrases that are reasoning markers when they lead a sentence/clause.
-# Matched at the start of any line (after optional whitespace / list markers).
-#
-# Note: bare "looking at" is NOT here — briefing skill documents
-# "Looking at <topic>" as a legitimate opener pattern
-# (e.g. "Looking at Series B data science openings this morning").
-# Reasoning-shaped "looking at the strategy / the user / etc." variants
-# live in _BRIEFING_MIDCONTENT_REASONING below where they get caught as
-# mid-content fragments instead of false-tripping every topic-leading
-# opener. See Artemis S-0511-07 § Architecture for the rationale.
-_BRIEFING_LEADING_REASONING = (
-    "now let me",
-    "let me ",
-    "let's ",
-    "i'm looking at",
-    "i should ",
-    "i'll ",
-    "i will ",
-    "the strategy was last updated",
-    "the emotional context shows",
-    "the emotional context is",
-    "wait —",
-    "wait,",
-    "wait -",
-    "given:",
-    "here is the situation",
-    "here's the situation",
-    "actually,",
-    "actually let me",
-    "first, let me",
-    "scanning for",
-    "per strategy direction",
-)
-
-# Phrases that are reasoning markers anywhere in the body (mid-content
-# template-bypass signatures from the James 5/12 A'' fixture and the
-# Garwin 5/2 A' multi-line reasoning prefix).
-_BRIEFING_MIDCONTENT_REASONING = (
-    "let me check",
-    "let me write",
-    "let me reconsider",
-    "actually, let me",
-    "wait — actually",
-    "wait, actually",
-    "per strategy direction",
-    "i'll skip",
-    "i should send",
-    "i'll acknowledge",
-    "scanning for executive-level signals",
-    # "looking at <internal-state>" — narrowed from the previous leading
-    # marker so legitimate "Looking at <topic>" openers (Artemis briefing
-    # skill's documented form) pass layer 1, while these reasoning-shape
-    # variants still trip layer 2.
-    "looking at the strategy",
-    "looking at the user",
-    "looking at the user's",
-    "looking at the profile",
-    "looking at the emotional context",
-    "looking at session",
-    "looking at mem0",
-    "looking at what the user",
-    # B-class voice violations: third-person-about-user narration inside
-    # briefing output. Added 2026-05-17 after Artemis B-0510-01 Phase 4
-    # reopen (Crystal 5/16 13:52 Executor brief + Amy 5/16 16:02 quiet-day
-    # briefing). These phrases mark the narrator addressing someone OTHER
-    # than the user (a Strategist / Coach-self reader) about the user —
-    # specifically incompatible with Coach's second-person voice contract.
-    "she requested",
-    "he requested",
-    "she reaches out",
-    "he reaches out",
-    "she reaches",
-    "he reaches",
-    "if she reacts",
-    "if he reacts",
-    "if they react",
-    "are already in your inbox",
-    "ready to deploy",
-    "loaded and ready",
-    "the user is",
-    "the user has",
-    "the user's profile",
-    "the user's strategy",
-    # Bare "Wait —" / "Actually," opening a sentence — caught by regex
-    # patterns below in addition to substring search.
-)
-
-# Sentence-start mid-content patterns (after ".", "!", "?", or newline).
-_BRIEFING_SENTENCE_START_PATTERNS = (
-    _re.compile(r"(?:^|[.!?\n])\s*Wait\s*[—\-,]", _re.IGNORECASE),
-    _re.compile(r"(?:^|[.!?\n])\s*Actually,\s+(?:let me|the|user|user's)", _re.IGNORECASE),
-)
-
-
-def _scan_briefing_anti_patterns(text: str) -> tuple[bool, str]:
-    """Scan Coach briefing output for reasoning-leak / template-bypass markers.
-
-    Returns ``(True, "")`` when the output looks like a clean deliverable, or
-    ``(False, reason)`` when it carries an anti-pattern marker that SKILL.md
-    § Rules forbids.
-
-    Detection layers:
-      1. Leading-clause reasoning markers (first non-empty line).
-      2. Mid-content reasoning fragments anywhere in the body.
-      3. Sentence-start "Wait —" / "Actually, let me" patterns.
-
-    The check is conservative — false negatives degrade to current behavior
-    (delivery), false positives degrade to the deterministic fallback.  When
-    in doubt, prefer to pass — the upstream ``_validate_output_quality`` gate
-    already catches garbled output.
-    """
-    if not text or not text.strip():
-        return True, ""
-
-    # Layer 1: leading clause.
-    first_line = ""
-    for line in text.splitlines():
-        stripped = line.strip()
-        # Drop common list / quote markers so "- Let me…" still trips the guard.
-        stripped = _re.sub(r"^[-*>\d.)\s]+", "", stripped)
-        if stripped:
-            first_line = stripped
-            break
-
-    first_lc = first_line.lower()
-    for marker in _BRIEFING_LEADING_REASONING:
-        if first_lc.startswith(marker):
-            return False, f"leading reasoning marker: {marker!r}"
-
-    body_lc = text.lower()
-
-    # Layer 2: mid-content reasoning fragments.
-    for marker in _BRIEFING_MIDCONTENT_REASONING:
-        if marker in body_lc:
-            return False, f"mid-content reasoning fragment: {marker!r}"
-
-    # Layer 3: sentence-start regex patterns.
-    for pat in _BRIEFING_SENTENCE_START_PATTERNS:
-        if pat.search(text):
-            return False, f"sentence-start reasoning pattern: {pat.pattern!r}"
-
-    return True, ""
-
-
 def _quiet_day_fallback() -> str:
     """Deterministic quiet-day deliverable used when the anti-pattern guard
     suppresses Coach's output.
@@ -1660,23 +1494,6 @@ def tick(verbose: bool = True, adapters=None, loop=None) -> int:
                         )
                         should_deliver = False
 
-                # Artemis B-0510-01 Phase 3 — briefing anti-pattern guard.
-                # Catches reasoning-leak / template-bypass output that
-                # SKILL.md prefix constraints fail to prevent under input
-                # contradiction.  On hit, substitute a deterministic
-                # quiet-day fallback so the user receives a coherent
-                # deliverable instead of chain-of-thought.
-                if should_deliver and success:
-                    clean, ap_reason = _scan_briefing_anti_patterns(deliver_content)
-                    if not clean:
-                        logger.warning(
-                            "Job '%s': output tripped briefing anti-pattern guard (%s) — "
-                            "substituting deterministic quiet-day fallback. "
-                            "Original first 200 chars: %s",
-                            job["id"], ap_reason, deliver_content[:200],
-                        )
-                        deliver_content = _quiet_day_fallback()
-
                 # B-0510-01 Phase 6 — two-step briefing (decide + write).
                 # Unconditional for all briefing jobs. On any failure,
                 # _run_two_step_briefing returns None and deliver_content
@@ -1686,11 +1503,9 @@ def tick(verbose: bool = True, adapters=None, loop=None) -> int:
                     if two_step_result is not None:
                         deliver_content = two_step_result
 
-                # Artemis B-0510-01 Phase 4b — semantic voice-scan.
-                # Catches B-class voice violations (third-person narration
-                # about the recipient by name or pronoun) that Phase 3's
-                # literal-marker guard misses. Briefing-only, fail-open on
-                # any LLM/HTTP/parse error.
+                # Artemis B-0510-01 Phase 5 — semantic voice-scan.
+                # Last-resort catch for write-call drift or two-step failure.
+                # Briefing-only, fail-open on any LLM/HTTP/parse error.
                 if should_deliver and success and _is_briefing_job(job):
                     vs_clean, vs_reason = _voice_scan_check(deliver_content, job["id"])
                     if not vs_clean:
