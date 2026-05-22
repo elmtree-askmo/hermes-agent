@@ -476,6 +476,119 @@ def _voice_scan_check(text: str, job_id: str = "?") -> tuple[bool, str]:
 
 
 # ---------------------------------------------------------------------------
+# B-0510-01 Phase 6 — two-step briefing: decide + write
+# ---------------------------------------------------------------------------
+#
+# Root cause of all A/A'/A''/B failures: Coach's reasoning and its deliverable
+# share the same token stream. Two-step call makes the leak structurally
+# impossible: decide call outputs JSON only (reasoning stays in fields), write
+# call receives only the JSON package and has nothing to reason about.
+
+_BRIEFING_DECIDE_PROMPT = """You receive the raw output of a Coach LLM that wrote a daily career briefing.
+The raw output may contain reasoning leaks, planning narration, or third-person references.
+Your job: extract the SIGNAL — ignore all reasoning, extract only the user-facing content.
+
+Return a JSON object with EXACTLY these fields:
+{{
+  "briefing_type": "quiet_day" | "content",
+  "follow_ups": ["<item>", ...],
+  "coaches_take": "<first-person, second-person-addressed summary, no reasoning>",
+  "tone_signal": "low_pressure" | "neutral" | "urgent"
+}}
+
+Rules:
+- briefing_type: "quiet_day" if nothing actionable today; "content" if follow_ups or new roles present.
+- follow_ups: list of concrete actionable items from the briefing. Empty list [] if none.
+- coaches_take: the core judgment distilled to 1-3 sentences. MUST be first-person Coach voice ("I'll...", "The signal is...", "You've done..."). No recipient name. No third-person pronouns (she/he/they) referring to the user.
+- tone_signal: emotional register the Coach intended.
+
+Do NOT output any reasoning. Your entire response must be valid JSON and nothing else.
+
+RAW OUTPUT:
+{text}"""
+
+_BRIEFING_WRITE_PROMPT = """You are rendering a structured career briefing for delivery to a user via Slack.
+You have a decision package below. Render it as a concise Slack message.
+
+Rules:
+- Address the user in second person ("you", "your") ONLY. Never use their name. Never use she/he/they for the user.
+- Begin directly with the briefing content. No "Here is your briefing" preamble.
+- For quiet_day: one short paragraph, no follow-ups block needed unless follow_ups list is non-empty.
+- For content: use the \U0001f4cc Follow-ups block + \U0001f4ac Coach's Take format.
+- coaches_take goes into \U0001f4ac Coach's Take verbatim (you may lightly polish but preserve meaning).
+- No reasoning. No planning narration. Output the message and nothing else.
+
+DECISION PACKAGE:
+{package}"""
+
+
+def _briefing_decide_call(text: str, job_id: str = "?") -> dict | None:
+    """Phase 6 — Step 1: distil raw Coach output into a structured decision package.
+
+    Returns a dict with keys: briefing_type, follow_ups, coaches_take, tone_signal.
+    Returns None on any failure (caller falls back to Phase 5 path).
+    """
+    api_key = os.getenv("OPENROUTER_API_KEY")
+    if not api_key:
+        return None
+
+    model = os.getenv("BRIEFING_DECIDE_MODEL", "google/gemini-3-flash-preview")
+    prompt = _BRIEFING_DECIDE_PROMPT.format(text=text)
+
+    import urllib.request
+    import urllib.error
+
+    body = json.dumps({
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0,
+        "max_tokens": 600,
+        "response_format": {"type": "json_object"},
+    }).encode("utf-8")
+    req = urllib.request.Request(
+        "https://openrouter.ai/api/v1/chat/completions",
+        data=body,
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+            "HTTP-Referer": "https://github.com/elmtree-askmo/artemis",
+            "X-Title": "Artemis briefing-decide",
+        },
+    )
+
+    try:
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            payload = json.loads(resp.read().decode("utf-8"))
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError) as exc:
+        logger.warning("Job '%s': briefing_decide_call HTTP/parse error — %s", job_id, exc)
+        return None
+
+    try:
+        content = payload["choices"][0]["message"]["content"]
+        if content is None:
+            raise ValueError("content is None")
+    except (KeyError, IndexError, TypeError, ValueError) as exc:
+        logger.warning("Job '%s': briefing_decide_call no content — %s", job_id, exc)
+        return None
+
+    raw = content.strip()
+    if raw.startswith("```"):
+        raw = raw.strip("`").lstrip("json").strip()
+    try:
+        pkg = json.loads(raw)
+    except json.JSONDecodeError:
+        logger.warning("Job '%s': briefing_decide_call non-JSON — %s", job_id, raw[:200])
+        return None
+
+    required = {"briefing_type", "follow_ups", "coaches_take", "tone_signal"}
+    if not required.issubset(pkg.keys()):
+        logger.warning("Job '%s': briefing_decide_call missing keys — got %s", job_id, list(pkg.keys()))
+        return None
+
+    return pkg
+
+
+# ---------------------------------------------------------------------------
 # Artemis S-0511-07 — briefing-output persistence (scheduler-side write).
 # ---------------------------------------------------------------------------
 #
