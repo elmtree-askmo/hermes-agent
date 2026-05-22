@@ -137,3 +137,73 @@ def test_decide_call_returns_none_on_non_json(monkeypatch):
     monkeypatch.setattr(urllib.request, "urlopen", fake)
     result = _briefing_decide_call(JAMES_20260512_A_CLASS, "test-job-nonjson")
     assert result is None
+
+
+from cron.scheduler import _briefing_write_call
+
+# ---------------------------------------------------------------------------
+# Tests for _briefing_write_call
+# ---------------------------------------------------------------------------
+
+AMY_DECISION_PKG = {
+    "briefing_type": "quiet_day",
+    "follow_ups": [
+        "5/22: 48-hour response window closes — activate intake flow if she responds",
+        "5/27: Evaluation checkpoint — no reply → pause active engagement",
+    ],
+    "coaches_take": "Silence reads as founder delivery overload, not disinterest. You've done the move; now patience is the strategy. I'll keep monitoring until the window closes on 5/22.",
+    "tone_signal": "low_pressure",
+}
+
+GARWIN_DECISION_PKG = {
+    "briefing_type": "quiet_day",
+    "follow_ups": [
+        "May 26 Day 21 pipeline checkpoint — binary: any response or silence → direct CEO outreach",
+    ],
+    "coaches_take": "Four days until the Day 21 decision. Direct CEO outreach drafts are already prepared for New Oriental, TAL Education, and NetDragon. Until then, tracking stays quiet on your end.",
+    "tone_signal": "neutral",
+}
+
+
+def _fake_urlopen_write(text_output: str):
+    def fake(req, timeout=None):
+        return _FakeResponse({"choices": [{"message": {"content": text_output}}]})
+    return fake
+
+
+def test_write_call_produces_nonempty_text(monkeypatch):
+    """write call must return a non-empty string from a valid decision package."""
+    import urllib.request
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-test-fake")
+    monkeypatch.setattr(urllib.request, "urlopen",
+                        _fake_urlopen_write("Nothing urgent today. I'll keep monitoring."))
+    result = _briefing_write_call(AMY_DECISION_PKG, "test-write-amy")
+    assert result is not None
+    assert len(result.strip()) > 10
+
+
+def test_write_call_returns_none_on_http_error(monkeypatch):
+    """write call must return None on network failure."""
+    import urllib.request, urllib.error
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-test-fake")
+    monkeypatch.setattr(urllib.request, "urlopen",
+                        _fake_urlopen_error(urllib.error.URLError("timeout")))
+    result = _briefing_write_call(AMY_DECISION_PKG, "test-write-err")
+    assert result is None
+
+
+def test_write_call_handles_garwin_pkg(monkeypatch):
+    """write call must handle a content-type package with follow_ups."""
+    import urllib.request
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-test-fake")
+    rendered = (
+        "\U0001F4CC Follow-ups\n"
+        "───────\n"
+        "⭐ May 26   Day 21 pipeline checkpoint\n"
+        "\n"
+        "\U0001F4AC **Coach's Take:** Four days until the Day 21 decision."
+    )
+    monkeypatch.setattr(urllib.request, "urlopen", _fake_urlopen_write(rendered))
+    result = _briefing_write_call(GARWIN_DECISION_PKG, "test-write-garwin")
+    assert result is not None
+    assert len(result.strip()) > 10

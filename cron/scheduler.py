@@ -588,6 +588,60 @@ def _briefing_decide_call(text: str, job_id: str = "?") -> dict | None:
     return pkg
 
 
+def _briefing_write_call(decision_pkg: dict, job_id: str = "?") -> str | None:
+    """Phase 6 — Step 2: render decision package into final Slack message.
+
+    The write call sees ONLY the structured package — no raw strategy/profile/mem0.
+    Returns the rendered text string, or None on any failure (caller falls back to
+    Phase 5 voice-scan on the original output).
+    """
+    api_key = os.getenv("OPENROUTER_API_KEY")
+    if not api_key:
+        return None
+
+    model = os.getenv("BRIEFING_WRITE_MODEL", "google/gemini-3-flash-preview")
+    prompt = _BRIEFING_WRITE_PROMPT.format(package=json.dumps(decision_pkg, ensure_ascii=False))
+
+    import urllib.request
+    import urllib.error
+
+    body = json.dumps({
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0,
+        "max_tokens": 800,
+    }).encode("utf-8")
+    req = urllib.request.Request(
+        "https://openrouter.ai/api/v1/chat/completions",
+        data=body,
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+            "HTTP-Referer": "https://github.com/elmtree-askmo/artemis",
+            "X-Title": "Artemis briefing-write",
+        },
+    )
+
+    try:
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            payload = json.loads(resp.read().decode("utf-8"))
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError) as exc:
+        logger.warning("Job '%s': briefing_write_call HTTP/parse error — %s", job_id, exc)
+        return None
+
+    try:
+        content = payload["choices"][0]["message"]["content"]
+        if content is None:
+            raise ValueError("content is None")
+        text = content.strip()
+        if not text:
+            raise ValueError("empty content")
+        return text
+    except (KeyError, IndexError, TypeError, ValueError) as exc:
+        logger.warning("Job '%s': briefing_write_call no content — %s", job_id, exc)
+        return None
+
+
 # ---------------------------------------------------------------------------
 # Artemis S-0511-07 — briefing-output persistence (scheduler-side write).
 # ---------------------------------------------------------------------------
