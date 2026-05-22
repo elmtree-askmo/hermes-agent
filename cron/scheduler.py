@@ -642,6 +642,29 @@ def _briefing_write_call(decision_pkg: dict, job_id: str = "?") -> str | None:
         return None
 
 
+
+def _run_two_step_briefing(raw_output: str, job_id: str = "?") -> str | None:
+    """Phase 6 orchestrator — decide then write.
+
+    Returns the write-rendered text on success, or None if either call fails
+    (caller falls back to Phase 5 voice-scan on the original raw output).
+
+    Never raises — all exceptions are caught inside the called functions.
+    """
+    pkg = _briefing_decide_call(raw_output, job_id)
+    if pkg is None:
+        logger.info("Job '%s': two-step decide failed — falling back to Phase 5 path", job_id)
+        return None
+
+    rendered = _briefing_write_call(pkg, job_id)
+    if rendered is None:
+        logger.info("Job '%s': two-step write failed — falling back to Phase 5 path", job_id)
+        return None
+
+    logger.info("Job '%s': two-step briefing succeeded", job_id)
+    return rendered
+
+
 # ---------------------------------------------------------------------------
 # Artemis S-0511-07 — briefing-output persistence (scheduler-side write).
 # ---------------------------------------------------------------------------

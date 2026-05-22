@@ -207,3 +207,54 @@ def test_write_call_handles_garwin_pkg(monkeypatch):
     result = _briefing_write_call(GARWIN_DECISION_PKG, "test-write-garwin")
     assert result is not None
     assert len(result.strip()) > 10
+
+
+from cron.scheduler import _run_two_step_briefing
+
+# ---------------------------------------------------------------------------
+# Tests for _run_two_step_briefing
+# ---------------------------------------------------------------------------
+
+def _patched_decide(pkg_or_none):
+    def decide(text, job_id="?"):
+        return pkg_or_none
+    return decide
+
+
+def _patched_write(text_or_none):
+    def write(pkg, job_id="?"):
+        return text_or_none
+    return write
+
+
+def test_two_step_happy_path_returns_write_output(monkeypatch):
+    """When both calls succeed, return the write output."""
+    monkeypatch.setattr("cron.scheduler._briefing_decide_call", _patched_decide(AMY_DECISION_PKG))
+    clean_text = "Nothing urgent today. I'll keep monitoring."
+    monkeypatch.setattr("cron.scheduler._briefing_write_call", _patched_write(clean_text))
+    result = _run_two_step_briefing(AMY_20260521_RAW, "test-happy")
+    assert result == clean_text
+
+
+def test_two_step_decide_fail_returns_none(monkeypatch):
+    """When decide call returns None, orchestrator returns None."""
+    monkeypatch.setattr("cron.scheduler._briefing_decide_call", _patched_decide(None))
+    result = _run_two_step_briefing(AMY_20260521_RAW, "test-decide-fail")
+    assert result is None
+
+
+def test_two_step_write_fail_returns_none(monkeypatch):
+    """When write call returns None, orchestrator returns None."""
+    monkeypatch.setattr("cron.scheduler._briefing_decide_call", _patched_decide(AMY_DECISION_PKG))
+    monkeypatch.setattr("cron.scheduler._briefing_write_call", _patched_write(None))
+    result = _run_two_step_briefing(AMY_20260521_RAW, "test-write-fail")
+    assert result is None
+
+
+def test_two_step_garwin_happy_path(monkeypatch):
+    """Two-step happy path with Garwin's decision package."""
+    monkeypatch.setattr("cron.scheduler._briefing_decide_call", _patched_decide(GARWIN_DECISION_PKG))
+    rendered = "\U0001F4CC Follow-ups\n⭐ May 26 checkpoint\n\U0001F4AC **Coach's Take:** Four days to go."
+    monkeypatch.setattr("cron.scheduler._briefing_write_call", _patched_write(rendered))
+    result = _run_two_step_briefing(GARWIN_20260522_RAW, "test-garwin-happy")
+    assert result == rendered
