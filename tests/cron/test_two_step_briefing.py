@@ -258,3 +258,33 @@ def test_two_step_garwin_happy_path(monkeypatch):
     monkeypatch.setattr("cron.scheduler._briefing_write_call", _patched_write(rendered))
     result = _run_two_step_briefing(GARWIN_20260522_RAW, "test-garwin-happy")
     assert result == rendered
+
+
+# ---------------------------------------------------------------------------
+# Dispatch-level integration tests (verify orchestrator behaves as expected
+# from the call site — same as orchestrator tests but named clearly for
+# the dispatch-level contract)
+# ---------------------------------------------------------------------------
+
+def test_two_step_replaces_deliver_content_on_success(monkeypatch):
+    """When two-step succeeds, _run_two_step_briefing returns the write output."""
+    monkeypatch.setattr("cron.scheduler._briefing_decide_call", _patched_decide(AMY_DECISION_PKG))
+    clean = "Nothing urgent today."
+    monkeypatch.setattr("cron.scheduler._briefing_write_call", _patched_write(clean))
+    result = _run_two_step_briefing(AMY_20260521_RAW, "test-dispatch-success")
+    assert result == clean
+
+
+def test_two_step_passthrough_on_decide_failure(monkeypatch):
+    """When decide fails, returns None — caller keeps original."""
+    monkeypatch.setattr("cron.scheduler._briefing_decide_call", _patched_decide(None))
+    result = _run_two_step_briefing(AMY_20260521_RAW, "test-dispatch-decide-fail")
+    assert result is None
+
+
+def test_two_step_passthrough_on_write_failure(monkeypatch):
+    """When write fails, returns None — caller keeps original."""
+    monkeypatch.setattr("cron.scheduler._briefing_decide_call", _patched_decide(AMY_DECISION_PKG))
+    monkeypatch.setattr("cron.scheduler._briefing_write_call", _patched_write(None))
+    result = _run_two_step_briefing(AMY_20260521_RAW, "test-dispatch-write-fail")
+    assert result is None

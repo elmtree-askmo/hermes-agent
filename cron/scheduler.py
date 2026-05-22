@@ -1677,6 +1677,15 @@ def tick(verbose: bool = True, adapters=None, loop=None) -> int:
                         )
                         deliver_content = _quiet_day_fallback()
 
+                # B-0510-01 Phase 6 — two-step briefing (decide + write).
+                # Unconditional for all briefing jobs. On any failure,
+                # _run_two_step_briefing returns None and deliver_content
+                # flows through Phase 5 voice-scan unchanged.
+                if should_deliver and success and _is_briefing_job(job):
+                    two_step_result = _run_two_step_briefing(deliver_content, job["id"])
+                    if two_step_result is not None:
+                        deliver_content = two_step_result
+
                 # Artemis B-0510-01 Phase 4b — semantic voice-scan.
                 # Catches B-class voice violations (third-person narration
                 # about the recipient by name or pronoun) that Phase 3's
