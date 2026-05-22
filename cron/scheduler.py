@@ -499,7 +499,7 @@ Return a JSON object with EXACTLY these fields:
 Rules:
 - briefing_type: "quiet_day" if nothing actionable today; "content" if follow_ups or new roles present.
 - follow_ups: list of concrete actionable items from the briefing. Empty list [] if none.
-- coaches_take: the core judgment distilled to 1-3 sentences. MUST be first-person Coach voice ("I'll...", "The signal is...", "You've done..."). No recipient name. No third-person pronouns (she/he/they) referring to the user.
+- coaches_take: the core judgment distilled to 1-3 sentences. MUST be first-person Coach voice ("I'll...", "The signal is...", "You've done..."). NEVER include any person's name (first or last). No third-person pronouns (she/he/they) referring to the user. Replace any name with "they" or rephrase to second-person ("you").
 - tone_signal: emotional register the Coach intended.
 
 Do NOT output any reasoning. Your entire response must be valid JSON and nothing else.
@@ -511,7 +511,7 @@ _BRIEFING_WRITE_PROMPT = """You are rendering a structured career briefing for d
 You have a decision package below. Render it as a concise Slack message.
 
 Rules:
-- Address the user in second person ("you", "your") ONLY. Never use their name. Never use she/he/they for the user.
+- Address the user in second person ("you", "your") ONLY. NEVER include any person's name (first or last) anywhere in the output. Never use she/he/they for the user. If a name appears in a follow-up item (e.g. "Amy's check-in"), replace with "their" or rephrase without the name.
 - Begin directly with the briefing content. No "Here is your briefing" preamble.
 - For quiet_day: one short paragraph, no follow-ups block needed unless follow_ups list is non-empty.
 - For content: use the \U0001f4cc Follow-ups block + \U0001f4ac Coach's Take format.
