@@ -2385,7 +2385,27 @@ class GatewayRunner:
 
         # Build the context prompt to inject
         context_prompt = build_session_context_prompt(context, redact_pii=_redact_pii)
-        
+
+        # S-0518-01 direction B — turn intent detector. Runs auxiliary LLM
+        # synchronously to classify whether the user is asking for a
+        # saveable artifact (Type E). If yes, append a routing block to
+        # the system prompt so Coach has an unambiguous cue to enqueue +
+        # announce rather than inline the artifact. Failures are silent.
+        try:
+            from agent.turn_intent_detector import (
+                detect_turn_intent,
+                render_injection_block,
+                log_result as _log_turn_intent,
+            )
+            _user_text = getattr(event, "text", "") or ""
+            _detection = detect_turn_intent(_user_text)
+            _log_turn_intent(source.chat_id or "", _detection)
+            _block = render_injection_block(_detection)
+            if _block:
+                context_prompt = context_prompt + "\n" + _block
+        except Exception as _tid_err:  # noqa: BLE001
+            logger.debug("turn-intent detector failed: %s", _tid_err)
+
         # If the previous session expired and was auto-reset, prepend a notice
         # so the agent knows this is a fresh conversation (not an intentional /reset).
         if getattr(session_entry, 'was_auto_reset', False):
@@ -2978,21 +2998,6 @@ class GatewayRunner:
                 _platform_name, source.chat_id or "unknown",
                 _response_time, _api_calls, _resp_len,
             )
-
-            # S-0518-01 Phase G — Coach reply commitment validator
-            # (observe-only). Detects future-tense sub-agent commitments in
-            # Coach's outgoing reply that lack a matching enqueue_action
-            # tool call. Logs to agent.log so accuracy can be reviewed
-            # before promoting to a hard gate. Failures are silent.
-            try:
-                from agent.commitment_validator import check_unmet_commitment
-                check_unmet_commitment(
-                    reply_text=response,
-                    agent_messages=agent_messages,
-                    chat_id=source.chat_id or "",
-                )
-            except Exception as _cv_err:  # noqa: BLE001
-                logger.debug("commitment-check hook failed: %s", _cv_err)
 
             # Surface error details when the agent failed silently (final_response=None)
             if not response and agent_result.get("failed"):
