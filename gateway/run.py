@@ -2386,18 +2386,18 @@ class GatewayRunner:
         # Build the context prompt to inject
         context_prompt = build_session_context_prompt(context, redact_pii=_redact_pii)
 
-        # S-0518-01 direction B+C — turn intent detector.
+        # S-0518-01 directions B+C + Type F — turn intent detector.
         #
-        # Direction B (R22 partial / R23 failed): auxiliary LLM classifies
-        # the user turn; inject a fallback block telling Coach which tools
-        # to call. Coach occasionally leaked the suggested announcement
-        # text into reply prose instead of routing through announce_subagent.
+        # Auxiliary LLM classifies the user turn into dispatch_type:
+        #   - none    → no server intervention; Coach handles normally
+        #   - single  → Type E (one sub-agent artifact)
+        #   - multi   → Type F (2-3 sub-agents fan-out)
         #
-        # Direction C (architecture-level fix): when confidence is "high",
-        # the server pre-executes enqueue_action + announce_subagent via
-        # an Artemis helper script BEFORE Coach's turn starts, then
-        # injects a different block ("already executed — Coach voice
-        # reply only") so Coach physically cannot duplicate or leak.
+        # Direction C (architecture-level): when confidence is "high", the
+        # server pre-executes the dispatch (enqueue_action + announce, or
+        # for multi: enqueue_action × N + Coach-voice lead-in push) BEFORE
+        # Coach's turn starts, then injects an "already executed" block
+        # so Coach physically cannot duplicate or leak the dispatch text.
         #
         # Confirm-leg pending-announcement turns short-circuit the whole
         # detector — those go through consume_announcement.
@@ -2412,36 +2412,84 @@ class GatewayRunner:
                     detect_turn_intent,
                     render_injection_block,
                     render_already_executed_block,
+                    render_team_dispatch_executed_block,
                     execute_via_helper,
                     log_result as _log_turn_intent,
                 )
+
+                # Build last-4-message history (oldest first) from the
+                # session transcript that was loaded above. The history is
+                # context for Type F judgment (e.g. setback → dig-in).
+                _history_msgs: list[dict] = []
+                try:
+                    _hist_src = history or []
+                    for _m in _hist_src[-4:]:
+                        if not isinstance(_m, dict):
+                            continue
+                        _role = _m.get("role")
+                        if _role not in ("user", "assistant"):
+                            continue
+                        _content = _m.get("content")
+                        if not isinstance(_content, str):
+                            continue
+                        _history_msgs.append({"role": _role, "content": _content})
+                except Exception:
+                    _history_msgs = []
+
                 _user_text = getattr(event, "text", "") or ""
-                _detection = detect_turn_intent(_user_text)
+                _detection = detect_turn_intent(_user_text, history=_history_msgs)
                 _log_turn_intent(source.chat_id or "", _detection)
 
                 _chat = source.chat_id or "unknown"
                 _conf = (_detection.get("confidence") or "").lower()
-                _route = _detection.get("route_to_subagent")
+                _dispatch_type = _detection.get("dispatch_type")
+                _dispatches = _detection.get("dispatches") or []
                 _uid = getattr(source, "user_id", "") or ""
 
-                if _route and _conf == "high" and _uid:
+                _should_auto_execute = (
+                    _dispatch_type in ("single", "multi")
+                    and _conf == "high"
+                    and _uid
+                    and _dispatches
+                )
+
+                if _should_auto_execute:
                     # Direction C — server auto-execute path.
-                    _exec_result = execute_via_helper(_uid, _detection)
+                    _exec_result = execute_via_helper(
+                        _uid,
+                        _detection,
+                        push_lead_in=(_dispatch_type == "multi"),
+                    )
                     if _exec_result.get("ok"):
-                        _full_id = "coach-commit-" + _detection["id_slug"]
-                        _executed_block = render_already_executed_block(
-                            sub_agent=_detection["sub_agent"],
-                            action=_detection["suggested_action"],
-                            full_id=_full_id,
-                        )
+                        if _dispatch_type == "single":
+                            _d0 = _dispatches[0]
+                            _full_id = "coach-commit-" + _d0["id_slug"]
+                            _executed_block = render_already_executed_block(
+                                sub_agent=_d0["sub_agent"],
+                                action=_d0["action"],
+                                full_id=_full_id,
+                            )
+                            logger.info(
+                                "turn-intent: chat=%s auto_executed=single "
+                                "sub_agent=%s id=%s",
+                                _chat, _d0["sub_agent"], _full_id,
+                            )
+                        else:
+                            _executed_block = render_team_dispatch_executed_block(
+                                dispatches=_dispatches,
+                                lead_in_pushed=bool(
+                                    _exec_result.get("lead_in_pushed")
+                                ),
+                            )
+                            logger.info(
+                                "turn-intent: chat=%s auto_executed=multi "
+                                "n=%d sub_agents=%s lead_in_pushed=%s",
+                                _chat, len(_dispatches),
+                                ",".join(d["sub_agent"] for d in _dispatches),
+                                _exec_result.get("lead_in_pushed"),
+                            )
                         context_prompt = context_prompt + "\n" + _executed_block
-                        logger.info(
-                            "turn-intent: chat=%s auto_executed=True "
-                            "sub_agent=%s id=%s",
-                            _chat, _detection["sub_agent"], _full_id,
-                        )
                     else:
-                        # Executor failed — fall back to prompt-only block.
                         logger.warning(
                             "turn-intent: chat=%s auto_execute_failed "
                             "stage=%s err=%s — falling back to prompt block",
@@ -2452,14 +2500,16 @@ class GatewayRunner:
                         _block = render_injection_block(_detection)
                         if _block:
                             context_prompt = context_prompt + "\n" + _block
-                else:
-                    # Direction B fallback — Coach decides whether to call.
+                elif _dispatch_type in ("single", "multi"):
+                    # Lower-confidence dispatch — Coach decides whether to
+                    # follow the suggested calls.
                     _block = render_injection_block(_detection)
                     if _block:
                         context_prompt = context_prompt + "\n" + _block
                         logger.info(
-                            "turn-intent: chat=%s injected_block_len=%d",
-                            _chat, len(_block),
+                            "turn-intent: chat=%s injected_block_len=%d "
+                            "dispatch_type=%s",
+                            _chat, len(_block), _dispatch_type,
                         )
         except Exception as _tid_err:  # noqa: BLE001
             logger.debug("turn-intent detector failed: %s", _tid_err)
