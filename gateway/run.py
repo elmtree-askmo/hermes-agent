@@ -2369,9 +2369,26 @@ class GatewayRunner:
         
         # Build session context
         context = build_session_context(source, self.config, session_entry)
-        
+
         # Set environment variables for tools
         self._set_session_env(context)
+
+        # S-0518-01 (thread consistency): bind the asyncio-task-local thread_ts
+        # that out-of-band server pushes (MCP tools like announce_subagent /
+        # post_activity_log) will use to land in the same Slack thread Coach's
+        # main reply uses. Mirrors base.py:_thread_parent — when the user
+        # message is already inside a thread, use its parent; otherwise the
+        # user message itself becomes the thread root.
+        try:
+            from tools.session_context import set_thread_ts as _ctx_set_thread_ts
+            _thread_root = (
+                event.source.thread_id
+                if getattr(event.source, "thread_id", None)
+                else event.message_id
+            )
+            _ctx_set_thread_ts(_thread_root or None)
+        except Exception:
+            pass
         
         # Read privacy.redact_pii from config (re-read per message)
         _redact_pii = False

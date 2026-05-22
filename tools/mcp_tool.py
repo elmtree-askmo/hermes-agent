@@ -1275,7 +1275,23 @@ def _make_tool_handler(server_name: str, tool_name: str, tool_timeout: float):
                 _uid = None
             if not _uid:
                 _uid = os.environ.get("HERMES_SESSION_USER_ID", "").strip() or None
-            _call_meta = {"hermes_session_user_id": _uid} if _uid else None
+            # S-0518-01 (thread consistency): also inject Slack thread_ts so
+            # Artemis MCP server's _send_slack_dm can bind direct pushes to
+            # the same thread Coach's reply will use.
+            try:
+                from tools.session_context import get_thread_ts as _ctx_thread_ts
+                _tts = _ctx_thread_ts()
+            except Exception:
+                _tts = None
+            if not _tts:
+                _tts = os.environ.get("HERMES_SESSION_THREAD_TS", "").strip() or None
+            _call_meta: dict[str, str] | None = None
+            if _uid or _tts:
+                _call_meta = {}
+                if _uid:
+                    _call_meta["hermes_session_user_id"] = _uid
+                if _tts:
+                    _call_meta["hermes_session_thread_ts"] = _tts
             if _call_meta:
                 result = await server.session.call_tool(
                     tool_name, arguments=args, meta=_call_meta
