@@ -2435,11 +2435,15 @@ class GatewayRunner:
                 )
 
                 # Build last-4-message history (oldest first) from the
-                # session transcript that was loaded above. The history is
-                # context for Type F judgment (e.g. setback → dig-in).
+                # session transcript. The detector runs before the
+                # function-scope `history = ...` assignment, so load the
+                # transcript directly here. The history is context for
+                # Type F judgment (e.g. setback → dig-in).
                 _history_msgs: list[dict] = []
                 try:
-                    _hist_src = history or []
+                    _hist_src = self.session_store.load_transcript(
+                        session_entry.session_id
+                    ) or []
                     for _m in _hist_src[-4:]:
                         if not isinstance(_m, dict):
                             continue
@@ -2544,8 +2548,25 @@ class GatewayRunner:
                 import os as _csos
                 from pathlib import Path as _CSPath
                 _cs_hh = _csos.environ.get("HERMES_HOME") or str(_CSPath.home() / ".hermes")
-                _cs_flag = _CSPath(_cs_hh) / "artemis" / _csuid / "onboarding_pushed.flag"
-                if not _cs_flag.exists():
+                _cs_user_dir = _CSPath(_cs_hh) / "artemis" / _csuid
+                _cs_flag = _cs_user_dir / "onboarding_pushed.flag"
+                # Honor legacy profile field too — the post-reply detector
+                # short-circuits when profile["sub_agent_intros_pushed"] is
+                # set, so injecting the cold-start block solely on flag
+                # absence would loop forever for users with the legacy
+                # field but no flag file (e.g. pre-flag profiles, tests
+                # that seed only the profile).
+                _cs_legacy_pushed = False
+                try:
+                    _cs_pp = _cs_user_dir / "profile.json"
+                    if _cs_pp.exists():
+                        import json as _csjson
+                        _cs_profile = _csjson.loads(_cs_pp.read_text(encoding="utf-8"))
+                        if isinstance(_cs_profile, dict) and _cs_profile.get("sub_agent_intros_pushed"):
+                            _cs_legacy_pushed = True
+                except Exception:
+                    _cs_legacy_pushed = False
+                if not _cs_flag.exists() and not _cs_legacy_pushed:
                     _cs_block = (
                         "\n**Onboarding handoff turn — the team has not yet introduced itself to this user.** "
                         "Your reply must follow this shape:\n\n"
