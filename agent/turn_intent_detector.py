@@ -395,14 +395,21 @@ def render_injection_block(detection: dict[str, Any]) -> str | None:
     lines = ["", header]
     for d in dispatches:
         full_id = f"coach-commit-{d['id_slug']}"
+        # Use json.dumps for each value so embedded double-quotes and
+        # backslashes in classifier output don't break the rendered
+        # tool-call syntax (e.g. action='CEO said "ship it"').
+        _id_lit = json.dumps(full_id)
+        _action_lit = json.dumps(d["action"])
+        _sub_lit = json.dumps(d["sub_agent"])
+        _ann_lit = json.dumps(d["announcement"])
         lines.append(
-            f"  - Call `enqueue_action(id=\"{full_id}\", "
-            f"action=\"{d['action']}\", sub_agent=\"{d['sub_agent']}\")` "
+            f"  - Call `enqueue_action(id={_id_lit}, "
+            f"action={_action_lit}, sub_agent={_sub_lit})` "
             "to record the action."
         )
         lines.append(
-            f"  - Call `announce_subagent(sub_agent=\"{d['sub_agent']}\", "
-            f"text=\"{d['announcement']}\")` so the user sees the team "
+            f"  - Call `announce_subagent(sub_agent={_sub_lit}, "
+            f"text={_ann_lit})` so the user sees the team "
             "member taking the work."
         )
     lines.append(
@@ -436,14 +443,19 @@ def render_already_executed_block(
     before LLM sees the turn, leaving Coach with one job that doesn't
     require it to choose between tools.
     """
+    # json.dumps so embedded double-quotes / backslashes don't break the
+    # rendered pseudo tool-call syntax for Coach.
+    _id_lit = json.dumps(full_id)
+    _action_lit = json.dumps(action)
+    _sub_lit = json.dumps(sub_agent)
     return "\n".join([
         "",
         "**Sub-agent action already executed** "
         "(server pre-executed the Type-E routing for this turn — backend "
         "state and the user-visible Slack push are already done):",
-        f"  - `enqueue_action(id=\"{full_id}\", action=\"{action}\", "
-        f"sub_agent=\"{sub_agent}\")` — committed to action_queue.",
-        f"  - `announce_subagent(sub_agent=\"{sub_agent}\", ...)` — "
+        f"  - `enqueue_action(id={_id_lit}, action={_action_lit}, "
+        f"sub_agent={_sub_lit})` — committed to action_queue.",
+        f"  - `announce_subagent(sub_agent={_sub_lit}, ...)` — "
         "pushed to the user's Slack DM under the sub-agent prefix.",
         "",
         "**Do NOT call either tool again this turn** — both side effects "
@@ -480,9 +492,13 @@ def render_team_dispatch_executed_block(
         "multi-sub-agent fan-out for this turn — Type F):",
     ]
     for d in dispatches:
+        # json.dumps to keep embedded quotes/backslashes from breaking
+        # the pseudo tool-call syntax Coach sees.
+        _sub_lit = json.dumps(d["sub_agent"])
+        _action_lit = json.dumps(d["action"])
         lines.append(
-            f"  - `enqueue_action(sub_agent=\"{d['sub_agent']}\", "
-            f"action=\"{d['action']}\")` — committed to action_queue. "
+            f"  - `enqueue_action(sub_agent={_sub_lit}, "
+            f"action={_action_lit})` — committed to action_queue. "
             f"Executor will run it and report real findings via "
             f"`post_activity_log` when done."
         )

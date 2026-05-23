@@ -365,6 +365,27 @@ def execute_via_helper(
         except OSError as e:
             fail["error"] = f"helper spawn failed: {e}"
             return fail
+        # Write the onboarding flag here, immediately after spawn, so
+        # that a helper post-spawn crash (missing deps, runtime error
+        # after startup) doesn't leave the user stuck in the cold-start
+        # reply shape forever. The helper itself also writes this flag
+        # on successful dispatch — idempotent overwrite. The trade-off:
+        # if the helper crashes before posting intros, the user never
+        # sees the team self-intros, but Coach also stops being
+        # constrained to the cold-start shape on the next turn.
+        try:
+            from pathlib import Path as _Path
+            _hh = os.environ.get("HERMES_HOME") or str(_Path.home() / ".hermes")
+            _user_dir = _Path(_hh) / "artemis" / user_id
+            _user_dir.mkdir(parents=True, exist_ok=True)
+            _flag = _user_dir / "onboarding_pushed.flag"
+            if not _flag.exists():
+                _flag.write_text("dispatch_spawned")
+        except Exception:  # noqa: BLE001
+            # Flag-write failure is non-fatal; gateway's own fallback
+            # path (in the sync ok=False handler) will catch most
+            # remaining cases on later turns.
+            pass
         return {"ok": True, "mode": "fire_and_forget"}
 
     try:
