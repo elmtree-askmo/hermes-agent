@@ -2544,8 +2544,14 @@ class GatewayRunner:
         # post-reply detector, so Coach must not preempt them.
         try:
             _csuid = getattr(source, "user_id", "") or ""
-            if _csuid:
-                import os as _csos
+            # Artemis-only feature — gate on explicit deployment opt-in so
+            # non-Artemis forks of the gateway don't force every new user
+            # into the Scout/Analyst/Publicist reply shape.
+            import os as _csos
+            _cs_enabled = str(
+                _csos.environ.get("HERMES_ARTEMIS_ENABLED", "")
+            ).strip().lower() in ("1", "true", "yes", "on")
+            if _csuid and _cs_enabled:
                 from pathlib import Path as _CSPath
                 _cs_hh = _csos.environ.get("HERMES_HOME") or str(_CSPath.home() / ".hermes")
                 _cs_user_dir = _CSPath(_cs_hh) / "artemis" / _csuid
@@ -3235,6 +3241,31 @@ class GatewayRunner:
                                 _onb_result.get("stage"),
                                 _onb_result.get("error"),
                             )
+                            # Break the cold-start loop: without the flag,
+                            # every subsequent turn would re-inject the
+                            # constrained "briefing the team" reply shape
+                            # while dispatch keeps failing (helper missing,
+                            # spawn OSError, etc.). Mark the flag so Coach
+                            # returns to normal behavior even though the
+                            # team self-intros never landed. The user loses
+                            # the intros (which already failed) rather than
+                            # being permanently locked in onboarding mode.
+                            try:
+                                _onb_user_dir = _Path(_hh) / "artemis" / _uid
+                                _onb_user_dir.mkdir(parents=True, exist_ok=True)
+                                _onb_fallback_flag = _onb_user_dir / "onboarding_pushed.flag"
+                                if not _onb_fallback_flag.exists():
+                                    _onb_fallback_flag.write_text("dispatch_failed")
+                                    logger.warning(
+                                        "onboarding-complete: chat=%s wrote "
+                                        "fallback flag to exit cold-start loop",
+                                        source.chat_id or "unknown",
+                                    )
+                            except Exception as _flag_err:  # noqa: BLE001
+                                logger.debug(
+                                    "onboarding-complete: fallback flag write failed: %s",
+                                    _flag_err,
+                                )
             except Exception as _onb_err:  # noqa: BLE001
                 logger.debug(
                     "onboarding-complete hook failed: %s", _onb_err
