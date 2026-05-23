@@ -2488,7 +2488,13 @@ class GatewayRunner:
                 _log_turn_intent(source.chat_id or "", _detection)
 
                 _chat = source.chat_id or "unknown"
-                _conf = (_detection.get("confidence") or "").lower()
+                # Type-check before .lower() — if classifier returned a
+                # non-string confidence (bool / int / malformed), calling
+                # .lower() raises AttributeError and the surrounding
+                # except silently drops the entire turn-intent block,
+                # losing valid dispatch suggestions for the turn.
+                _raw_conf = _detection.get("confidence")
+                _conf = _raw_conf.lower() if isinstance(_raw_conf, str) else ""
                 _dispatch_type = _detection.get("dispatch_type")
                 _dispatches = _detection.get("dispatches") or []
                 _uid = getattr(source, "user_id", "") or ""

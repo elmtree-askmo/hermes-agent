@@ -268,7 +268,11 @@ def detect_onboarding_complete(
         out["skipped"] = "aux_parse_failed"
         return out
 
-    trigger = bool(parsed.get("trigger"))
+    # Require an actual JSON boolean `true` — strings like "false" / "no"
+    # / "0" are truthy under bool() and would incorrectly fire dispatch.
+    # We accept only Python `True`. Anything else (None, string, int,
+    # malformed) demotes to no-trigger.
+    trigger = parsed.get("trigger") is True
     intros = _normalize_intros(parsed.get("intros"))
     # If the LLM said trigger but failed to produce valid intros, demote
     # to no-trigger (don't dispatch malformed pushes).

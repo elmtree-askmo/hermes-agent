@@ -144,6 +144,34 @@ class TestDetectOnboardingComplete:
         assert result["trigger"] is False
         assert result["intros"] == []
 
+    def test_trigger_string_false_is_not_truthy(self, monkeypatch):
+        """Regression for codex round 7 P2 — strings like "false" / "no"
+        are truthy under bool(), so the old `bool(parsed.get("trigger"))`
+        would fire dispatch for a JSON response that meant NOT to trigger.
+        Strict identity check (`is True`) prevents this."""
+        bad_json = (
+            '{"trigger": "false", "confidence": "high", '
+            '"reasoning": "model returned a string by mistake", '
+            '"intros": ['
+            '{"sub_agent": "scout", "text": "Scout here."},'
+            '{"sub_agent": "analyst", "text": "Analyst here."},'
+            '{"sub_agent": "publicist", "text": "Publicist here."}'
+            ']}'
+        )
+        monkeypatch.setattr(
+            "agent.auxiliary_client.call_llm",
+            lambda **kw: _fake_response(bad_json),
+            raising=False,
+        )
+        result = ocd.detect_onboarding_complete(
+            "Long enough reply that mentions briefing the team now for the purposes of this length-check unit test.",
+            {},
+        )
+        assert result["checked"] is True
+        # String "false" must NOT fire dispatch.
+        assert result["trigger"] is False
+        assert result["intros"] == []
+
     def test_trigger_with_invalid_intros_demoted(self, monkeypatch):
         """If LLM says trigger=true but intros are malformed, demote to
         no-trigger to avoid dispatching half-baked self-intros."""

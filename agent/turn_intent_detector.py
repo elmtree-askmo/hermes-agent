@@ -225,8 +225,16 @@ def _normalize_dispatches(raw_dispatches: Any) -> list[dict[str, Any]]:
         slug = _sanitize_slug(item.get("id_slug"))
         if not slug:
             continue
-        action = (item.get("action") or "").strip()
-        announcement = (item.get("announcement") or "").strip()
+        # Type-check before .strip() — a non-string action / announcement
+        # (e.g., LLM returns a bool or number) would raise AttributeError
+        # and be swallowed by the outer except, dropping the whole turn-
+        # intent block. Drop the offending item instead.
+        _act = item.get("action")
+        _ann = item.get("announcement")
+        if not isinstance(_act, str) or not isinstance(_ann, str):
+            continue
+        action = _act.strip()
+        announcement = _ann.strip()
         if not action or not announcement:
             continue
         out.append({

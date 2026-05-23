@@ -593,9 +593,43 @@ class TestLogResult:
 # =========================================================================
 
 class TestNormalizeDispatches:
-    """Regression for codex round 6 P2 — `_normalize_dispatches` must
-    dedupe by `sub_agent` so two `analyst` entries can't masquerade as a
-    valid 2-way multi-dispatch."""
+    """Regression for codex round 6 P2 (dedupe) + round 7 P3
+    (type-checking LLM string fields)."""
+
+    def test_drops_item_with_non_string_action(self):
+        # Regression for codex round 7 — class B (str method on
+        # unchecked LLM value). Old impl called .strip() unconditionally
+        # and crashed on bool/int values, swallowed by outer except,
+        # dropping the entire dispatch.
+        raw = [
+            {
+                "sub_agent": "analyst",
+                "id_slug": "bad-one",
+                "action": True,  # not a string
+                "announcement": "Analyst on it.",
+            },
+            {
+                "sub_agent": "scout",
+                "id_slug": "good-one",
+                "action": "Scan PM roles",
+                "announcement": "Scout scanning.",
+            },
+        ]
+        out = tid._normalize_dispatches(raw)
+        # Bad item dropped, good one kept.
+        assert len(out) == 1
+        assert out[0]["sub_agent"] == "scout"
+
+    def test_drops_item_with_non_string_announcement(self):
+        raw = [
+            {
+                "sub_agent": "analyst",
+                "id_slug": "x",
+                "action": "x",
+                "announcement": 42,  # not a string
+            },
+        ]
+        assert tid._normalize_dispatches(raw) == []
 
     def test_dedupes_repeated_sub_agent(self):
         raw = [
