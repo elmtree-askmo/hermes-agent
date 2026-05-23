@@ -280,6 +280,15 @@ def _expand_whatsapp_auth_aliases(identifier: str) -> set:
 
 logger = logging.getLogger(__name__)
 
+
+class _ArtemisDisabled(Exception):
+    """Sentinel raised inside the Artemis turn-intent / onboarding-complete
+    detector blocks when ``HERMES_ARTEMIS_ENABLED`` is unset on this fork
+    deployment. Caught silently by the surrounding ``try/except`` so non-
+    Artemis traffic skips the auxiliary LLM calls and helper-script spawns
+    without producing log noise."""
+
+
 # Sentinel placed into _running_agents immediately when a session starts
 # processing, *before* any await.  Prevents a second message for the same
 # session from bypassing the "already running" guard during the async gap
@@ -2418,8 +2427,19 @@ class GatewayRunner:
         #
         # Confirm-leg pending-announcement turns short-circuit the whole
         # detector — those go through consume_announcement.
+        # Artemis-only feature — gate on explicit deployment opt-in so
+        # non-Artemis forks of the gateway don't run the auxiliary LLM
+        # classifier or inject Artemis-specific enqueue_action /
+        # announce_subagent instructions (and don't try to spawn the
+        # Artemis-only helper scripts).
+        import os as _ti_os
+        _ti_enabled = str(
+            _ti_os.environ.get("HERMES_ARTEMIS_ENABLED", "")
+        ).strip().lower() in ("1", "true", "yes", "on")
         try:
-            if "Pending sub-agent announcements" in context_prompt:
+            if not _ti_enabled:
+                pass  # Non-Artemis deployment — turn-intent detector disabled.
+            elif "Pending sub-agent announcements" in context_prompt:
                 logger.info(
                     "turn-intent: chat=%s skipped=pending_announcement_present",
                     source.chat_id or "unknown",
@@ -2532,6 +2552,8 @@ class GatewayRunner:
                             "dispatch_type=%s",
                             _chat, len(_block), _dispatch_type,
                         )
+        except _ArtemisDisabled:
+            pass  # Non-Artemis fork deployment — feature off by design.
         except Exception as _tid_err:  # noqa: BLE001
             logger.debug("turn-intent detector failed: %s", _tid_err)
 
@@ -3196,7 +3218,16 @@ class GatewayRunner:
             # in the same Slack thread. Side effect committed before
             # any subsequent Coach turn so the LLM can't double-fire.
             # Failures are silent.
+            # Artemis-only feature — gate on explicit deployment opt-in so
+            # non-Artemis forks don't run the auxiliary LLM check or
+            # attempt to spawn the Artemis self-intros helper.
+            import os as _onb_os
+            _onb_enabled = str(
+                _onb_os.environ.get("HERMES_ARTEMIS_ENABLED", "")
+            ).strip().lower() in ("1", "true", "yes", "on")
             try:
+                if not _onb_enabled:
+                    raise _ArtemisDisabled  # caught silently below
                 from agent.onboarding_complete_detector import (
                     detect_onboarding_complete,
                     execute_via_helper as _onb_execute,
@@ -3266,6 +3297,8 @@ class GatewayRunner:
                                     "onboarding-complete: fallback flag write failed: %s",
                                     _flag_err,
                                 )
+            except _ArtemisDisabled:
+                pass  # Non-Artemis fork deployment — feature off by design.
             except Exception as _onb_err:  # noqa: BLE001
                 logger.debug(
                     "onboarding-complete hook failed: %s", _onb_err
