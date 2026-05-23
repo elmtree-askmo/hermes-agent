@@ -280,6 +280,15 @@ def _expand_whatsapp_auth_aliases(identifier: str) -> set:
 
 logger = logging.getLogger(__name__)
 
+
+class _ArtemisDisabled(Exception):
+    """Sentinel raised inside the Artemis turn-intent / onboarding-complete
+    detector blocks when ``HERMES_ARTEMIS_ENABLED`` is unset on this fork
+    deployment. Caught silently by the surrounding ``try/except`` so non-
+    Artemis traffic skips the auxiliary LLM calls and helper-script spawns
+    without producing log noise."""
+
+
 # Sentinel placed into _running_agents immediately when a session starts
 # processing, *before* any await.  Prevents a second message for the same
 # session from bypassing the "already running" guard during the async gap
@@ -2369,9 +2378,26 @@ class GatewayRunner:
         
         # Build session context
         context = build_session_context(source, self.config, session_entry)
-        
+
         # Set environment variables for tools
         self._set_session_env(context)
+
+        # S-0518-01 (thread consistency): bind the asyncio-task-local thread_ts
+        # that out-of-band server pushes (MCP tools like announce_subagent /
+        # post_activity_log) will use to land in the same Slack thread Coach's
+        # main reply uses. Mirrors base.py:_thread_parent — when the user
+        # message is already inside a thread, use its parent; otherwise the
+        # user message itself becomes the thread root.
+        try:
+            from tools.session_context import set_thread_ts as _ctx_set_thread_ts
+            _thread_root = (
+                event.source.thread_id
+                if getattr(event.source, "thread_id", None)
+                else event.message_id
+            )
+            _ctx_set_thread_ts(_thread_root or None)
+        except Exception:
+            pass
         
         # Read privacy.redact_pii from config (re-read per message)
         _redact_pii = False
@@ -2385,7 +2411,234 @@ class GatewayRunner:
 
         # Build the context prompt to inject
         context_prompt = build_session_context_prompt(context, redact_pii=_redact_pii)
-        
+
+        # S-0518-01 directions B+C + Type F — turn intent detector.
+        #
+        # Auxiliary LLM classifies the user turn into dispatch_type:
+        #   - none    → no server intervention; Coach handles normally
+        #   - single  → Type E (one sub-agent artifact)
+        #   - multi   → Type F (2-3 sub-agents fan-out)
+        #
+        # Direction C (architecture-level): when confidence is "high", the
+        # server pre-executes the dispatch (enqueue_action + announce, or
+        # for multi: enqueue_action × N + Coach-voice lead-in push) BEFORE
+        # Coach's turn starts, then injects an "already executed" block
+        # so Coach physically cannot duplicate or leak the dispatch text.
+        #
+        # Confirm-leg pending-announcement turns short-circuit the whole
+        # detector — those go through consume_announcement.
+        #
+        # `_multi_lead_in_short_circuit` is set True when the multi
+        # auto-execute path successfully posts the Coach-voice lead-in to
+        # Slack itself — in that case we skip Coach inference entirely
+        # (Type F "lead-in-only" completion path).
+        _multi_lead_in_short_circuit = False
+        # Artemis-only feature — gate on explicit deployment opt-in so
+        # non-Artemis forks of the gateway don't run the auxiliary LLM
+        # classifier or inject Artemis-specific enqueue_action /
+        # announce_subagent instructions (and don't try to spawn the
+        # Artemis-only helper scripts).
+        import os as _ti_os
+        _ti_enabled = str(
+            _ti_os.environ.get("HERMES_ARTEMIS_ENABLED", "")
+        ).strip().lower() in ("1", "true", "yes", "on")
+        try:
+            if not _ti_enabled:
+                pass  # Non-Artemis deployment — turn-intent detector disabled.
+            elif "Pending sub-agent announcements" in context_prompt:
+                logger.info(
+                    "turn-intent: chat=%s skipped=pending_announcement_present",
+                    source.chat_id or "unknown",
+                )
+            else:
+                from agent.turn_intent_detector import (
+                    detect_turn_intent,
+                    render_injection_block,
+                    render_already_executed_block,
+                    render_team_dispatch_executed_block,
+                    execute_via_helper,
+                    log_result as _log_turn_intent,
+                )
+
+                # Build last-4-message history (oldest first) from the
+                # session transcript. The detector runs before the
+                # function-scope `history = ...` assignment, so load the
+                # transcript directly here. The history is context for
+                # Type F judgment (e.g. setback → dig-in).
+                _history_msgs: list[dict] = []
+                try:
+                    _hist_src = self.session_store.load_transcript(
+                        session_entry.session_id
+                    ) or []
+                    for _m in _hist_src[-4:]:
+                        if not isinstance(_m, dict):
+                            continue
+                        _role = _m.get("role")
+                        if _role not in ("user", "assistant"):
+                            continue
+                        _content = _m.get("content")
+                        if not isinstance(_content, str):
+                            continue
+                        _history_msgs.append({"role": _role, "content": _content})
+                except Exception:
+                    _history_msgs = []
+
+                _user_text = getattr(event, "text", "") or ""
+                _detection = detect_turn_intent(_user_text, history=_history_msgs)
+                _log_turn_intent(source.chat_id or "", _detection)
+
+                _chat = source.chat_id or "unknown"
+                # Type-check before .lower() — if classifier returned a
+                # non-string confidence (bool / int / malformed), calling
+                # .lower() raises AttributeError and the surrounding
+                # except silently drops the entire turn-intent block,
+                # losing valid dispatch suggestions for the turn.
+                _raw_conf = _detection.get("confidence")
+                _conf = _raw_conf.lower() if isinstance(_raw_conf, str) else ""
+                _dispatch_type = _detection.get("dispatch_type")
+                _dispatches = _detection.get("dispatches") or []
+                _uid = getattr(source, "user_id", "") or ""
+
+                _should_auto_execute = (
+                    _dispatch_type in ("single", "multi")
+                    and _conf == "high"
+                    and _uid
+                    and _dispatches
+                )
+
+                if _should_auto_execute:
+                    # Direction C — server auto-execute path.
+                    _exec_result = execute_via_helper(
+                        _uid,
+                        _detection,
+                        push_lead_in=(_dispatch_type == "multi"),
+                    )
+                    if _exec_result.get("ok"):
+                        if _dispatch_type == "single":
+                            _d0 = _dispatches[0]
+                            _full_id = "coach-commit-" + _d0["id_slug"]
+                            _executed_block = render_already_executed_block(
+                                sub_agent=_d0["sub_agent"],
+                                action=_d0["action"],
+                                full_id=_full_id,
+                            )
+                            logger.info(
+                                "turn-intent: chat=%s auto_executed=single "
+                                "sub_agent=%s id=%s",
+                                _chat, _d0["sub_agent"], _full_id,
+                            )
+                        else:
+                            _lead_in_pushed = bool(
+                                _exec_result.get("lead_in_pushed")
+                            )
+                            _executed_block = render_team_dispatch_executed_block(
+                                dispatches=_dispatches,
+                                lead_in_pushed=_lead_in_pushed,
+                            )
+                            logger.info(
+                                "turn-intent: chat=%s auto_executed=multi "
+                                "n=%d sub_agents=%s lead_in_pushed=%s",
+                                _chat, len(_dispatches),
+                                ",".join(d["sub_agent"] for d in _dispatches),
+                                _lead_in_pushed,
+                            )
+                            # Architecture-level enforcement of the
+                            # "lead-in-only" completion path for Type F
+                            # turns: when the server pushed the Coach-voice
+                            # lead-in itself, skip Coach inference entirely.
+                            # The render block's docstring documents this:
+                            # "Coach LLM is invoked only when
+                            # lead_in_pushed=False". Prompt rules alone
+                            # don't enforce it — server must short-circuit.
+                            if _lead_in_pushed:
+                                _multi_lead_in_short_circuit = True
+                        context_prompt = context_prompt + "\n" + _executed_block
+                    else:
+                        logger.warning(
+                            "turn-intent: chat=%s auto_execute_failed "
+                            "stage=%s err=%s — falling back to prompt block",
+                            _chat,
+                            _exec_result.get("stage"),
+                            _exec_result.get("error"),
+                        )
+                        _block = render_injection_block(_detection)
+                        if _block:
+                            context_prompt = context_prompt + "\n" + _block
+                elif _dispatch_type in ("single", "multi"):
+                    # Lower-confidence dispatch — Coach decides whether to
+                    # follow the suggested calls.
+                    _block = render_injection_block(_detection)
+                    if _block:
+                        context_prompt = context_prompt + "\n" + _block
+                        logger.info(
+                            "turn-intent: chat=%s injected_block_len=%d "
+                            "dispatch_type=%s",
+                            _chat, len(_block), _dispatch_type,
+                        )
+        except _ArtemisDisabled:
+            pass  # Non-Artemis fork deployment — feature off by design.
+        except Exception as _tid_err:  # noqa: BLE001
+            logger.debug("turn-intent detector failed: %s", _tid_err)
+
+        # S-0518-01 Type A — cold-start (pre-onboarding) prompt block.
+        # While the user has not yet seen the team introduce itself
+        # (onboarding_pushed.flag does not exist), Coach's reply must be
+        # the simulation-shaped handoff: mirror + handoff sentence +
+        # optional preference micro-question. The three sub-agent
+        # self-intros land 3-5 seconds after Coach's reply via the
+        # post-reply detector, so Coach must not preempt them.
+        try:
+            _csuid = getattr(source, "user_id", "") or ""
+            # Artemis-only feature — gate on explicit deployment opt-in so
+            # non-Artemis forks of the gateway don't force every new user
+            # into the Scout/Analyst/Publicist reply shape.
+            import os as _csos
+            _cs_enabled = str(
+                _csos.environ.get("HERMES_ARTEMIS_ENABLED", "")
+            ).strip().lower() in ("1", "true", "yes", "on")
+            if _csuid and _cs_enabled:
+                from pathlib import Path as _CSPath
+                _cs_hh = _csos.environ.get("HERMES_HOME") or str(_CSPath.home() / ".hermes")
+                _cs_user_dir = _CSPath(_cs_hh) / "artemis" / _csuid
+                _cs_flag = _cs_user_dir / "onboarding_pushed.flag"
+                # Honor legacy profile field too — the post-reply detector
+                # short-circuits when profile["sub_agent_intros_pushed"] is
+                # set, so injecting the cold-start block solely on flag
+                # absence would loop forever for users with the legacy
+                # field but no flag file (e.g. pre-flag profiles, tests
+                # that seed only the profile).
+                _cs_legacy_pushed = False
+                try:
+                    _cs_pp = _cs_user_dir / "profile.json"
+                    if _cs_pp.exists():
+                        import json as _csjson
+                        _cs_profile = _csjson.loads(_cs_pp.read_text(encoding="utf-8"))
+                        if isinstance(_cs_profile, dict) and _cs_profile.get("sub_agent_intros_pushed"):
+                            _cs_legacy_pushed = True
+                except Exception:
+                    _cs_legacy_pushed = False
+                if not _cs_flag.exists() and not _cs_legacy_pushed:
+                    _cs_block = (
+                        "\n**Onboarding handoff turn — the team has not yet introduced itself to this user.** "
+                        "Your reply must follow this shape:\n\n"
+                        "1. Mirror back what the user just told you in 1-2 short sentences. One normalizing line is fine "
+                        "(e.g. 'that's a clean pivot' / 'common starting point' — but only when it fits).\n"
+                        "2. One short handoff sentence — 'I'm briefing the team now', 'you'll hear from them in a minute', or similar. "
+                        "The three sub-agents (Scout, Analyst, Publicist) will introduce themselves in first person seconds after your reply lands.\n"
+                        "3. Optionally, one micro-question about *working preferences* — communication tone, cadence, channel. "
+                        "**Not** about work direction (do not ask which company / which role / what to prioritize / what to scan first).\n\n"
+                        "Do not list capabilities or what you can help with. Do not narrate what the sub-agents are doing — "
+                        "their introduction is their job. Do not propose work directions or pull together reads / scans / comparisons. "
+                        "Light shape per § Turn Weight, ~50-70 words. Recording facts the user just stated (silent save_user_profile) is fine."
+                    )
+                    context_prompt = context_prompt + "\n" + _cs_block
+                    logger.info(
+                        "cold-start onboarding block injected: chat=%s",
+                        source.chat_id or "unknown",
+                    )
+        except Exception as _cs_err:  # noqa: BLE001
+            logger.debug("cold-start block injection failed: %s", _cs_err)
+
         # If the previous session expired and was auto-reset, prepend a notice
         # so the agent knows this is a fresh conversation (not an intentional /reset).
         if getattr(session_entry, 'was_auto_reset', False):
@@ -2949,16 +3202,34 @@ class GatewayRunner:
                 except Exception as exc:
                     logger.debug("@ context reference expansion failed: %s", exc)
 
-            # Run the agent
-            agent_result = await self._run_agent(
-                message=message_text,
-                context_prompt=context_prompt,
-                history=history,
-                source=source,
-                session_id=session_entry.session_id,
-                session_key=session_key,
-                event_message_id=event.message_id,
-            )
+            # Run the agent — UNLESS the multi auto-dispatch path already
+            # posted a Coach-voice lead-in to Slack. In that case the turn
+            # is complete: any Coach reply now would land AFTER the lead-in
+            # and either duplicate it or contradict it. Save a full Coach
+            # inference + avoid the second-message failure mode.
+            if _multi_lead_in_short_circuit:
+                logger.info(
+                    "turn-intent: chat=%s skipped Coach inference — "
+                    "multi lead-in already pushed to Slack",
+                    source.chat_id or "unknown",
+                )
+                agent_result = {
+                    "final_response": "",
+                    "messages": [],
+                    "api_calls": 0,
+                    "failed": False,
+                    "skipped_reason": "multi_lead_in_short_circuit",
+                }
+            else:
+                agent_result = await self._run_agent(
+                    message=message_text,
+                    context_prompt=context_prompt,
+                    history=history,
+                    source=source,
+                    session_id=session_entry.session_id,
+                    session_key=session_key,
+                    event_message_id=event.message_id,
+                )
 
             # Stop persistent typing indicator now that the agent is done
             try:
@@ -2979,20 +3250,100 @@ class GatewayRunner:
                 _response_time, _api_calls, _resp_len,
             )
 
-            # S-0518-01 Phase G — Coach reply commitment validator
-            # (observe-only). Detects future-tense sub-agent commitments in
-            # Coach's outgoing reply that lack a matching enqueue_action
-            # tool call. Logs to agent.log so accuracy can be reviewed
-            # before promoting to a hard gate. Failures are silent.
+            # S-0518-01 Type A — onboarding-complete signal detector.
+            # Runs auxiliary LLM on Coach's outgoing reply; if it
+            # classifies the reply as the "briefing the team" moment AND
+            # the user's profile hasn't yet had sub_agent_intros_pushed
+            # set, server dispatches 3 announce_subagent (style="here")
+            # calls so the user sees the team's first-person self-intros
+            # in the same Slack thread. Side effect committed before
+            # any subsequent Coach turn so the LLM can't double-fire.
+            # Failures are silent.
+            # Artemis-only feature — gate on explicit deployment opt-in so
+            # non-Artemis forks don't run the auxiliary LLM check or
+            # attempt to spawn the Artemis self-intros helper.
+            import os as _onb_os
+            _onb_enabled = str(
+                _onb_os.environ.get("HERMES_ARTEMIS_ENABLED", "")
+            ).strip().lower() in ("1", "true", "yes", "on")
             try:
-                from agent.commitment_validator import check_unmet_commitment
-                check_unmet_commitment(
-                    reply_text=response,
-                    agent_messages=agent_messages,
-                    chat_id=source.chat_id or "",
+                if not _onb_enabled:
+                    raise _ArtemisDisabled  # caught silently below
+                from agent.onboarding_complete_detector import (
+                    detect_onboarding_complete,
+                    execute_via_helper as _onb_execute,
+                    log_result as _log_onb,
                 )
-            except Exception as _cv_err:  # noqa: BLE001
-                logger.debug("commitment-check hook failed: %s", _cv_err)
+                _uid = getattr(source, "user_id", "") or ""
+                _profile: dict | None = None
+                if _uid and response:
+                    # Read profile.json from disk for the detector's input.
+                    import os
+                    from pathlib import Path as _Path
+                    _hh = os.environ.get("HERMES_HOME") or str(_Path.home() / ".hermes")
+                    _pp = _Path(_hh) / "artemis" / _uid / "profile.json"
+                    try:
+                        if _pp.exists():
+                            import json as _json
+                            _profile = _json.loads(_pp.read_text(encoding="utf-8"))
+                    except Exception:
+                        _profile = None
+                    _onb = detect_onboarding_complete(response, _profile, _uid)
+                    _log_onb(source.chat_id or "", _onb)
+                    if _onb.get("trigger") and _uid:
+                        # Fire-and-forget: helper sleeps 3s before posting
+                        # so Coach's reply lands on Slack first, then
+                        # team self-intros follow. Gateway doesn't wait.
+                        _onb_result = _onb_execute(
+                            _uid, _onb["intros"],
+                            delay_seconds=3.0,
+                            fire_and_forget=True,
+                        )
+                        if _onb_result.get("ok"):
+                            logger.info(
+                                "onboarding-complete: chat=%s spawned (mode=%s)",
+                                source.chat_id or "unknown",
+                                _onb_result.get("mode", "sync"),
+                            )
+                        else:
+                            logger.warning(
+                                "onboarding-complete: chat=%s dispatch_failed "
+                                "stage=%s err=%s",
+                                source.chat_id or "unknown",
+                                _onb_result.get("stage"),
+                                _onb_result.get("error"),
+                            )
+                            # Break the cold-start loop: without the flag,
+                            # every subsequent turn would re-inject the
+                            # constrained "briefing the team" reply shape
+                            # while dispatch keeps failing (helper missing,
+                            # spawn OSError, etc.). Mark the flag so Coach
+                            # returns to normal behavior even though the
+                            # team self-intros never landed. The user loses
+                            # the intros (which already failed) rather than
+                            # being permanently locked in onboarding mode.
+                            try:
+                                _onb_user_dir = _Path(_hh) / "artemis" / _uid
+                                _onb_user_dir.mkdir(parents=True, exist_ok=True)
+                                _onb_fallback_flag = _onb_user_dir / "onboarding_pushed.flag"
+                                if not _onb_fallback_flag.exists():
+                                    _onb_fallback_flag.write_text("dispatch_failed")
+                                    logger.warning(
+                                        "onboarding-complete: chat=%s wrote "
+                                        "fallback flag to exit cold-start loop",
+                                        source.chat_id or "unknown",
+                                    )
+                            except Exception as _flag_err:  # noqa: BLE001
+                                logger.debug(
+                                    "onboarding-complete: fallback flag write failed: %s",
+                                    _flag_err,
+                                )
+            except _ArtemisDisabled:
+                pass  # Non-Artemis fork deployment — feature off by design.
+            except Exception as _onb_err:  # noqa: BLE001
+                logger.debug(
+                    "onboarding-complete hook failed: %s", _onb_err
+                )
 
             # Surface error details when the agent failed silently (final_response=None)
             if not response and agent_result.get("failed"):
