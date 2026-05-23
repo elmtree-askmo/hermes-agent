@@ -2427,6 +2427,12 @@ class GatewayRunner:
         #
         # Confirm-leg pending-announcement turns short-circuit the whole
         # detector — those go through consume_announcement.
+        #
+        # `_multi_lead_in_short_circuit` is set True when the multi
+        # auto-execute path successfully posts the Coach-voice lead-in to
+        # Slack itself — in that case we skip Coach inference entirely
+        # (Type F "lead-in-only" completion path).
+        _multi_lead_in_short_circuit = False
         # Artemis-only feature — gate on explicit deployment opt-in so
         # non-Artemis forks of the gateway don't run the auxiliary LLM
         # classifier or inject Artemis-specific enqueue_action /
@@ -2516,19 +2522,30 @@ class GatewayRunner:
                                 _chat, _d0["sub_agent"], _full_id,
                             )
                         else:
+                            _lead_in_pushed = bool(
+                                _exec_result.get("lead_in_pushed")
+                            )
                             _executed_block = render_team_dispatch_executed_block(
                                 dispatches=_dispatches,
-                                lead_in_pushed=bool(
-                                    _exec_result.get("lead_in_pushed")
-                                ),
+                                lead_in_pushed=_lead_in_pushed,
                             )
                             logger.info(
                                 "turn-intent: chat=%s auto_executed=multi "
                                 "n=%d sub_agents=%s lead_in_pushed=%s",
                                 _chat, len(_dispatches),
                                 ",".join(d["sub_agent"] for d in _dispatches),
-                                _exec_result.get("lead_in_pushed"),
+                                _lead_in_pushed,
                             )
+                            # Architecture-level enforcement of the
+                            # "lead-in-only" completion path for Type F
+                            # turns: when the server pushed the Coach-voice
+                            # lead-in itself, skip Coach inference entirely.
+                            # The render block's docstring documents this:
+                            # "Coach LLM is invoked only when
+                            # lead_in_pushed=False". Prompt rules alone
+                            # don't enforce it — server must short-circuit.
+                            if _lead_in_pushed:
+                                _multi_lead_in_short_circuit = True
                         context_prompt = context_prompt + "\n" + _executed_block
                     else:
                         logger.warning(
@@ -3179,16 +3196,34 @@ class GatewayRunner:
                 except Exception as exc:
                     logger.debug("@ context reference expansion failed: %s", exc)
 
-            # Run the agent
-            agent_result = await self._run_agent(
-                message=message_text,
-                context_prompt=context_prompt,
-                history=history,
-                source=source,
-                session_id=session_entry.session_id,
-                session_key=session_key,
-                event_message_id=event.message_id,
-            )
+            # Run the agent — UNLESS the multi auto-dispatch path already
+            # posted a Coach-voice lead-in to Slack. In that case the turn
+            # is complete: any Coach reply now would land AFTER the lead-in
+            # and either duplicate it or contradict it. Save a full Coach
+            # inference + avoid the second-message failure mode.
+            if _multi_lead_in_short_circuit:
+                logger.info(
+                    "turn-intent: chat=%s skipped Coach inference — "
+                    "multi lead-in already pushed to Slack",
+                    source.chat_id or "unknown",
+                )
+                agent_result = {
+                    "final_response": "",
+                    "messages": [],
+                    "api_calls": 0,
+                    "failed": False,
+                    "skipped_reason": "multi_lead_in_short_circuit",
+                }
+            else:
+                agent_result = await self._run_agent(
+                    message=message_text,
+                    context_prompt=context_prompt,
+                    history=history,
+                    source=source,
+                    session_id=session_entry.session_id,
+                    session_key=session_key,
+                    event_message_id=event.message_id,
+                )
 
             # Stop persistent typing indicator now that the agent is done
             try:

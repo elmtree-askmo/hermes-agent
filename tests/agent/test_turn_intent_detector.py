@@ -592,6 +592,64 @@ class TestLogResult:
 # _sanitize_slug
 # =========================================================================
 
+class TestNormalizeDispatches:
+    """Regression for codex round 6 P2 — `_normalize_dispatches` must
+    dedupe by `sub_agent` so two `analyst` entries can't masquerade as a
+    valid 2-way multi-dispatch."""
+
+    def test_dedupes_repeated_sub_agent(self):
+        raw = [
+            {
+                "sub_agent": "analyst",
+                "id_slug": "draft-one",
+                "action": "Draft thing A",
+                "announcement": "Analyst on A.",
+            },
+            {
+                "sub_agent": "analyst",
+                "id_slug": "draft-two",
+                "action": "Draft thing B",
+                "announcement": "Analyst on B.",
+            },
+            {
+                "sub_agent": "scout",
+                "id_slug": "scan-roles",
+                "action": "Scan PM roles",
+                "announcement": "Scout scanning.",
+            },
+        ]
+        out = tid._normalize_dispatches(raw)
+        assert len(out) == 2
+        assert [d["sub_agent"] for d in out] == ["analyst", "scout"]
+        # First analyst wins — second is dropped.
+        assert out[0]["id_slug"] == "draft-one"
+
+    def test_keeps_distinct_sub_agents(self):
+        raw = [
+            {
+                "sub_agent": "scout",
+                "id_slug": "a",
+                "action": "x",
+                "announcement": "y",
+            },
+            {
+                "sub_agent": "analyst",
+                "id_slug": "b",
+                "action": "x",
+                "announcement": "y",
+            },
+            {
+                "sub_agent": "publicist",
+                "id_slug": "c",
+                "action": "x",
+                "announcement": "y",
+            },
+        ]
+        out = tid._normalize_dispatches(raw)
+        assert len(out) == 3
+        assert {d["sub_agent"] for d in out} == {"scout", "analyst", "publicist"}
+
+
 class TestSanitizeSlug:
     def test_clean(self):
         assert tid._sanitize_slug("draft-cover-letter") == "draft-cover-letter"

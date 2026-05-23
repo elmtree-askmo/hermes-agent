@@ -209,11 +209,18 @@ def _normalize_dispatches(raw_dispatches: Any) -> list[dict[str, Any]]:
     if not isinstance(raw_dispatches, list):
         return []
     out: list[dict[str, Any]] = []
+    # Dedupe by sub_agent — keep the first valid item per sub_agent so an
+    # LLM output with two `analyst` entries doesn't masquerade as a 2-way
+    # multi-dispatch (which would enqueue redundant work for one agent
+    # while leaving the other two slots empty).
+    _seen_sub_agents: set[str] = set()
     for item in raw_dispatches:
         if not isinstance(item, dict):
             continue
         sub_agent = item.get("sub_agent")
         if sub_agent not in _VALID_SUB_AGENTS:
+            continue
+        if sub_agent in _seen_sub_agents:
             continue
         slug = _sanitize_slug(item.get("id_slug"))
         if not slug:
@@ -228,6 +235,7 @@ def _normalize_dispatches(raw_dispatches: Any) -> list[dict[str, Any]]:
             "action": action,
             "announcement": announcement,
         })
+        _seen_sub_agents.add(sub_agent)
     return out
 
 
