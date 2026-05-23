@@ -209,6 +209,71 @@ class TestDetectTurnIntent:
 
 
 # =========================================================================
+# Prompt substitution safety — regression for codex round 5 P2
+# (chained .replace re-templates injected content)
+# =========================================================================
+
+class TestPromptSubstitutionSafety:
+    """Verify the auxiliary prompt is built via single-pass substitution
+    so that history content containing the literal token `{user_message}`
+    is NOT rewritten with the actual user message. The previous chained
+    `.replace()` impl would corrupt classifier context this way."""
+
+    def test_history_containing_user_message_token_is_preserved(self, monkeypatch):
+        captured = {}
+
+        def _capture(**kw):
+            captured["messages"] = kw.get("messages")
+            return _fake_response(
+                '{"dispatch_type": "none", "dispatches": [], '
+                '"lead_in": null, "confidence": "high", "reasoning": ""}'
+            )
+
+        monkeypatch.setattr(
+            "agent.auxiliary_client.call_llm", _capture, raising=False,
+        )
+
+        booby_trap = "The literal token {user_message} should stay intact."
+        history = [{"role": "user", "content": booby_trap}]
+        tid.detect_turn_intent(
+            "what should I do today?",
+            history=history,
+        )
+
+        user_prompt = captured["messages"][1]["content"]
+        # The literal `{user_message}` token from history must not have
+        # been re-substituted with the actual user message.
+        assert "{user_message} should stay intact" in user_prompt
+        # The real user message still landed in its placeholder slot.
+        assert "what should I do today?" in user_prompt
+
+    def test_history_containing_conversation_history_token_is_preserved(
+        self, monkeypatch,
+    ):
+        captured = {}
+
+        def _capture(**kw):
+            captured["messages"] = kw.get("messages")
+            return _fake_response(
+                '{"dispatch_type": "none", "dispatches": [], '
+                '"lead_in": null, "confidence": "high", "reasoning": ""}'
+            )
+
+        monkeypatch.setattr(
+            "agent.auxiliary_client.call_llm", _capture, raising=False,
+        )
+
+        # User message itself contains the other placeholder token —
+        # single-pass substitution must not re-scan it for
+        # `{conversation_history}`.
+        booby = "Tell me about {conversation_history} please."
+        tid.detect_turn_intent(booby, history=None)
+
+        user_prompt = captured["messages"][1]["content"]
+        assert booby in user_prompt
+
+
+# =========================================================================
 # _format_history
 # =========================================================================
 

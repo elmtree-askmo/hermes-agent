@@ -239,6 +239,77 @@ class TestDetectOnboardingComplete:
         assert result["trigger"] is True
 
 
+class TestPromptSubstitutionSafety:
+    """Regression for codex round 5 P2 — chained `.replace()` would let a
+    profile field containing the literal `{coach_reply}` token get
+    rewritten with the actual coach reply, silently flipping the
+    onboarding-complete decision (and potentially spawning intros for
+    the wrong turn). Single-pass regex substitution must keep injected
+    content literal."""
+
+    def test_profile_containing_coach_reply_token_is_preserved(self, monkeypatch):
+        captured = {}
+
+        def _capture(**kw):
+            captured["messages"] = kw.get("messages")
+            return _fake_response(
+                '{"trigger": false, "confidence": "high", '
+                '"reasoning": "", "intros": []}'
+            )
+
+        monkeypatch.setattr(
+            "agent.auxiliary_client.call_llm", _capture, raising=False,
+        )
+
+        # Reply long enough to pass the _MIN_REPLY_LEN_FOR_CHECK gate
+        # (60 chars). Profile carries the literal token that the old
+        # chained-replace impl would have rewritten.
+        coach_reply = (
+            "I'm pulling the team in on this one — they'll introduce "
+            "themselves in a moment. Hang tight."
+        )
+        profile = {
+            "summary": "user once asked: {coach_reply} please",
+            "intro_complete": False,
+        }
+
+        ocd.detect_onboarding_complete(coach_reply, profile)
+
+        user_prompt = captured["messages"][1]["content"]
+        # The literal {coach_reply} token inside the profile JSON must
+        # survive substitution — it must NOT have been overwritten with
+        # the actual coach reply.
+        assert "{coach_reply} please" in user_prompt
+        # And the real coach reply still landed in its placeholder slot.
+        assert coach_reply in user_prompt
+
+    def test_reply_containing_user_profile_token_is_preserved(self, monkeypatch):
+        captured = {}
+
+        def _capture(**kw):
+            captured["messages"] = kw.get("messages")
+            return _fake_response(
+                '{"trigger": false, "confidence": "high", '
+                '"reasoning": "", "intros": []}'
+            )
+
+        monkeypatch.setattr(
+            "agent.auxiliary_client.call_llm", _capture, raising=False,
+        )
+
+        # Coach reply itself contains the OTHER placeholder token;
+        # single-pass substitution must not re-scan reply text for
+        # `{user_profile}`. Pad to clear the min-length gate (60 chars).
+        coach_reply = (
+            "I'll send {user_profile} updates over to the team shortly "
+            "and you'll hear from them in a moment."
+        )
+        profile = {"name": "Sam"}
+        ocd.detect_onboarding_complete(coach_reply, profile)
+        user_prompt = captured["messages"][1]["content"]
+        assert coach_reply in user_prompt
+
+
 class TestNormalizeIntros:
     def test_complete_valid(self):
         intros = ocd._normalize_intros([
