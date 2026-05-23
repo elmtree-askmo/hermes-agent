@@ -233,10 +233,19 @@ def detect_onboarding_complete(
         out["skipped"] = f"client_import_failed:{type(e).__name__}"
         return out
 
+    # Single-pass substitution so injected profile JSON / coach reply
+    # cannot be re-templated. Chained `.replace()` would re-scan the
+    # freshly inserted profile content for `{coach_reply}` and could
+    # overwrite literal placeholder text in profile fields with the
+    # current reply.
     profile_json = json.dumps(user_profile or {}, indent=2)
-    prompt = _DETECT_PROMPT.replace(
-        "{user_profile}", profile_json
-    ).replace("{coach_reply}", coach_reply)
+    _subs = {
+        "{user_profile}": profile_json,
+        "{coach_reply}": coach_reply,
+    }
+    import re as _re
+    _pat = _re.compile("|".join(_re.escape(k) for k in _subs))
+    prompt = _pat.sub(lambda m: _subs[m.group(0)], _DETECT_PROMPT)
 
     try:
         response = call_llm(

@@ -275,10 +275,18 @@ def detect_turn_intent(
         out["skipped"] = f"client_import_failed:{type(e).__name__}"
         return out
 
+    # Single-pass substitution so inserted history / user text cannot be
+    # re-templated. Chained `.replace()` would re-scan the freshly inserted
+    # history string for `{user_message}` and could overwrite literal
+    # placeholder text from prior turns with the current message.
     history_text = _format_history(history)
-    prompt = _DETECT_PROMPT.replace(
-        "{conversation_history}", history_text
-    ).replace("{user_message}", user_message)
+    _subs = {
+        "{conversation_history}": history_text,
+        "{user_message}": user_message,
+    }
+    import re as _re
+    _pat = _re.compile("|".join(_re.escape(k) for k in _subs))
+    prompt = _pat.sub(lambda m: _subs[m.group(0)], _DETECT_PROMPT)
     try:
         response = call_llm(
             task="compression",
