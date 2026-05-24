@@ -148,6 +148,8 @@ A voice violation is when the briefing uses THIRD PERSON to refer to the recipie
 
 Third-party names (events, companies, other people) are NOT violations even if they are proper nouns. Only the recipient being named/pronouned in third person counts.
 
+**Sub-agent names — Scout, Analyst, Publicist — are third-party entities, NOT the recipient.** They are the recipient's named coaching team. Third-person reference to them ("Scout is surfacing roles", "Analyst flagged the gap", "Publicist has the draft ready") is the canonical attribution form and does NOT count as a voice violation. Treat them the same as company / event / other-people names.
+
 Examples of voice violations:
 - "if Amy responds" (recipient=Amy)
 - "Crystal's positioning" (recipient=Crystal)
@@ -160,6 +162,9 @@ Examples of OK voice:
 - "Women in Tech SF on 5/21" (third-party event)
 - "AIET 2026 in Zagreb" (event name)
 - "Andiamo role" (company name)
+- "Scout is surfacing replacement roles" (sub-agent, third-party entity, NOT recipient)
+- "Analyst flagged the paid-social gap" (sub-agent attribution)
+- "Publicist has the metrics bullet rewritten" (sub-agent attribution)
 
 ================================================================
 AXIS 2 — STRUCTURE
