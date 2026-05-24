@@ -173,6 +173,8 @@ A structure violation is when the briefing contains:
 
 A quiet-day note counts as a valid deliverable as long as it stands alone without planning prefix. Example of acceptable quiet-day deliverable: "Nothing urgent on the board today — I'll keep scanning in the background."
 
+**Sub-agent team attribution paragraphs are NOT planning narration and NOT a structure violation.** A team attribution paragraph names what each named sub-agent (Scout, Analyst, Publicist) did or found in this briefing cycle. It is a user-facing deliverable surface — the user sees these as their named coaching team, not as internal model reasoning. Each line is prefixed with the agent's emoji and bold-italic name (🔍 *Scout*, 📊 *Analyst*, ✍️ *Publicist*) followed by a sentence describing the work surfaced this cycle. These lines pass structure even when they appear at the top of the briefing before Follow-ups / Coach's Take.
+
 Examples of structure violations:
 - "Now let me construct the briefing. Key facts: ..." (planning, not deliverable)
 - A briefing that opens with "The status is no_resume — no resume on file..." then later contains a clean quiet-day note (planning prefix before deliverable)
@@ -181,6 +183,7 @@ Examples of structure violations:
 Examples of OK structure:
 - Opens directly with a sentence addressed to the user, followed by Follow-ups block + Coach's Take.
 - Quiet-day note that addresses the user from the first word.
+- Opens with sub-agent team attribution lines (🔍 *Scout* / 📊 *Analyst* / ✍️ *Publicist*), followed by Follow-ups block and Coach's Take. The attribution lines are part of the deliverable, not planning narration.
 
 ================================================================
 

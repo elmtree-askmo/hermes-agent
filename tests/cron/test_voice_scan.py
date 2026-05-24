@@ -48,6 +48,23 @@ they're hiring 4 platform engineers. Reply with a yes and I'll draft the
 outreach."""
 
 
+# Sub-agent team attribution paragraph — must PASS (S-0518-01 Phase 2).
+# Voice-scan must recognize 🔍 *Scout* / 📊 *Analyst* / ✍️ *Publicist* lines
+# as part of the deliverable, not as planning narration about the model's
+# internal agents.
+MAYA_TEAM_ATTRIBUTION = """Keeping eyes on beauty marketing roles in NYC today.
+
+🔍 *Scout* is pulling replacement roles after Glossier.
+📊 *Analyst* flagged the paid-social gap from the post-mortem.
+✍️ *Publicist* has the metrics bullet rewritten across the active queue.
+
+📌 Follow-ups
+⭐ Glossier post-mortem review
+⏰ Topicals phone screen prep
+
+💬 *Coach's Take:* Your content strategy landed; the metrics question caught you flat. Fixing that gap before Topicals."""
+
+
 # -----------------------------------------------------------------------------
 # Helpers — monkeypatch urllib.request.urlopen to return a canned response.
 # -----------------------------------------------------------------------------
@@ -149,6 +166,24 @@ def test_voice_scan_passes_third_party_entities(monkeypatch):
     import urllib.request
     monkeypatch.setattr(urllib.request, "urlopen", _make_fake_urlopen())
     clean, reason = _voice_scan_check(CRYSTAL_THIRD_PARTY_ENTITIES, job_id="crystal-clean-test")
+    assert clean is True
+    assert reason == ""
+
+
+def test_voice_scan_passes_team_attribution_paragraph(monkeypatch):
+    """Sub-agent team attribution lines (🔍 *Scout* / 📊 *Analyst* / ✍️ *Publicist*)
+    are a legitimate deliverable surface, not planning narration. Voice-scan
+    prompt must recognize them and return PASS/PASS. (S-0518-01 Phase 2.)
+
+    Note: this test uses canned PASS/PASS, so it locks in the expected verdict
+    shape rather than testing the LLM's actual judgment. The live signal that
+    the prompt change works is captured in voice_scan.log on dev VPS — a HIT
+    on a team-attribution briefing would mean the prompt change regressed.
+    """
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    import urllib.request
+    monkeypatch.setattr(urllib.request, "urlopen", _make_fake_urlopen())
+    clean, reason = _voice_scan_check(MAYA_TEAM_ATTRIBUTION, job_id="maya-team-test")
     assert clean is True
     assert reason == ""
 
