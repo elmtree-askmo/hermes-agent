@@ -139,6 +139,82 @@ def test_decide_call_returns_none_on_non_json(monkeypatch):
     assert result is None
 
 
+# ---------------------------------------------------------------------------
+# team_work normalization (S-0518-01 Phase 2 — sub-agent attribution)
+# ---------------------------------------------------------------------------
+
+def test_decide_call_back_compat_missing_team_work(monkeypatch):
+    """Older decide outputs lacking team_work must be accepted and normalized to all-null."""
+    pkg = {
+        "briefing_type": "content",
+        "follow_ups": ["item 1"],
+        "coaches_take": "stay the course",
+        "tone_signal": "neutral",
+        # team_work intentionally omitted
+    }
+    import urllib.request
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-test-fake")
+    monkeypatch.setattr(urllib.request, "urlopen", _fake_urlopen_decide(pkg))
+    result = _briefing_decide_call("raw", "test-back-compat")
+    assert result is not None
+    assert result["team_work"] == {"scout": None, "analyst": None, "publicist": None}
+
+
+def test_decide_call_team_work_normalizes_partial(monkeypatch):
+    """team_work with only some sub-agents present must fill missing ones with null."""
+    pkg = {
+        "briefing_type": "content",
+        "follow_ups": ["item 1"],
+        "team_work": {"scout": "found 2 new roles"},
+        "coaches_take": "great progress",
+        "tone_signal": "neutral",
+    }
+    import urllib.request
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-test-fake")
+    monkeypatch.setattr(urllib.request, "urlopen", _fake_urlopen_decide(pkg))
+    result = _briefing_decide_call("raw", "test-partial")
+    assert result is not None
+    assert result["team_work"]["scout"] == "found 2 new roles"
+    assert result["team_work"]["analyst"] is None
+    assert result["team_work"]["publicist"] is None
+
+
+def test_decide_call_team_work_treats_empty_string_as_null(monkeypatch):
+    """team_work with empty-string values must be normalized to null."""
+    pkg = {
+        "briefing_type": "content",
+        "follow_ups": [],
+        "team_work": {"scout": "", "analyst": "  ", "publicist": "drafted letter"},
+        "coaches_take": "ok",
+        "tone_signal": "neutral",
+    }
+    import urllib.request
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-test-fake")
+    monkeypatch.setattr(urllib.request, "urlopen", _fake_urlopen_decide(pkg))
+    result = _briefing_decide_call("raw", "test-empty-string")
+    assert result is not None
+    assert result["team_work"]["scout"] is None
+    assert result["team_work"]["analyst"] is None
+    assert result["team_work"]["publicist"] == "drafted letter"
+
+
+def test_decide_call_team_work_rejects_non_dict(monkeypatch):
+    """team_work that is not a dict (e.g. list, string) must be normalized to all-null."""
+    pkg = {
+        "briefing_type": "content",
+        "follow_ups": [],
+        "team_work": ["scout did stuff"],  # wrong shape
+        "coaches_take": "ok",
+        "tone_signal": "neutral",
+    }
+    import urllib.request
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-test-fake")
+    monkeypatch.setattr(urllib.request, "urlopen", _fake_urlopen_decide(pkg))
+    result = _briefing_decide_call("raw", "test-non-dict")
+    assert result is not None
+    assert result["team_work"] == {"scout": None, "analyst": None, "publicist": None}
+
+
 from cron.scheduler import _briefing_write_call
 
 # ---------------------------------------------------------------------------

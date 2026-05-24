@@ -326,6 +326,11 @@ Return a JSON object with EXACTLY these fields:
 {{
   "briefing_type": "quiet_day" | "content",
   "follow_ups": ["<item>", ...],
+  "team_work": {{
+    "scout": "<one sentence describing what Scout did/found, or null>",
+    "analyst": "<one sentence describing what Analyst did/found, or null>",
+    "publicist": "<one sentence describing what Publicist did/produced, or null>"
+  }},
   "coaches_take": "<first-person, second-person-addressed summary, no reasoning>",
   "tone_signal": "low_pressure" | "neutral" | "urgent"
 }}
@@ -333,6 +338,11 @@ Return a JSON object with EXACTLY these fields:
 Rules:
 - briefing_type: "quiet_day" if nothing actionable today; "content" if follow_ups or new roles present.
 - follow_ups: list of concrete actionable items from the briefing. Empty list [] if none.
+- team_work: extract what each sub-agent did or found in this briefing cycle. Each field is a single sentence in second-person voice ("you") or impersonal ("Scout found...") — NO names. Set a field to null if that sub-agent has no work to surface this briefing.
+  - scout: new roles found, market signals, events identified, recruiting calendar items
+  - analyst: positioning recommendations, profile comparisons, strategy adjustments, cohort signals, gap analyses
+  - publicist: resumes tailored, cover letters drafted, outreach materials prepared, follow-up emails ready
+  Look at the raw output and any mention of work attributed to a sub-agent (by name, emoji, or by work type). When unsure, prefer null over guessing — better empty than fabricated.
 - coaches_take: the core judgment distilled to 1-3 sentences. MUST be first-person Coach voice ("I'll...", "The signal is...", "You've done..."). NEVER include any person's name (first or last). No third-person pronouns (she/he/they) referring to the user. Replace any name with "they" or rephrase to second-person ("you").
 - tone_signal: emotional register the Coach intended.
 
@@ -348,7 +358,12 @@ Rules:
 - Address the user in second person ("you", "your") ONLY. NEVER include any person's name (first or last) anywhere in the output. Never use she/he/they for the user. If a name appears in a follow-up item (e.g. "Amy's check-in"), replace with "their" or rephrase without the name.
 - Begin directly with the briefing content. No "Here is your briefing" preamble.
 - For quiet_day: one short paragraph, no follow-ups block needed unless follow_ups list is non-empty.
-- For content: use the \U0001f4cc Follow-ups block + \U0001f4ac Coach's Take format.
+- For content: include in this order — (1) team attribution paragraph if ≥2 sub-agents have content (see rule below); (2) \U0001f4cc Follow-ups block; (3) \U0001f4ac Coach's Take.
+- Team attribution paragraph: count non-null fields in team_work. If ≥2 non-null, render one sentence per non-null sub-agent in Scout → Analyst → Publicist order, each on its own line, prefixed by emoji + bold italic name + space. Format examples:
+  \U0001f50d *Scout* <sentence from team_work.scout>
+  \U0001f4ca *Analyst* <sentence from team_work.analyst>
+  ✍️ *Publicist* <sentence from team_work.publicist>
+  Place this paragraph BEFORE the Follow-ups block, separated by a blank line. If <2 non-null fields, skip the paragraph entirely (do not render single-sub-agent attribution).
 - coaches_take goes into \U0001f4ac Coach's Take verbatim (you may lightly polish but preserve meaning).
 - No reasoning. No planning narration. Output the message and nothing else.
 
@@ -418,6 +433,17 @@ def _briefing_decide_call(text: str, job_id: str = "?") -> dict | None:
     if not required.issubset(pkg.keys()):
         logger.warning("Job '%s': briefing_decide_call missing keys — got %s", job_id, list(pkg.keys()))
         return None
+
+    # team_work is optional for back-compat with older raw outputs / decide-call drift.
+    # Normalize: ensure dict with the three sub-agent keys, defaulting to null.
+    tw = pkg.get("team_work") or {}
+    if not isinstance(tw, dict):
+        tw = {}
+    pkg["team_work"] = {
+        "scout": tw.get("scout") if isinstance(tw.get("scout"), str) and tw.get("scout").strip() else None,
+        "analyst": tw.get("analyst") if isinstance(tw.get("analyst"), str) and tw.get("analyst").strip() else None,
+        "publicist": tw.get("publicist") if isinstance(tw.get("publicist"), str) and tw.get("publicist").strip() else None,
+    }
 
     return pkg
 
