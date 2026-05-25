@@ -877,7 +877,7 @@ def _load_persona_overlay(user_id: Optional[str]) -> str:
     if not user_id:
         return ""
     profile = _read_user_profile(user_id)
-    persona_name = profile.get("persona", "peer-mentor")
+    persona_name = profile.get("persona", "gentle")
     valid = _load_valid_personas()
     if not valid:
         # Registry missing or malformed — no overlay system in place; return ""

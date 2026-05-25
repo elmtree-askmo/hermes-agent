@@ -12,13 +12,13 @@ def hermes_home(tmp_path, monkeypatch):
     personas_dir = tmp_path / "personas"
     personas_dir.mkdir()
     (personas_dir / "registry.yaml").write_text(
-        "personas:\n  - peer-mentor\n  - senior-strategist\n"
+        "personas:\n  - gentle\n  - direct\n"
     )
-    (personas_dir / "peer-mentor.md").write_text(
-        "# Persona: peer-mentor\n\nPeer overlay content."
+    (personas_dir / "gentle.md").write_text(
+        "# Persona: gentle\n\nGentle overlay content."
     )
-    (personas_dir / "senior-strategist.md").write_text(
-        "# Persona: senior-strategist\n\nSenior overlay content."
+    (personas_dir / "direct.md").write_text(
+        "# Persona: direct\n\nDirect overlay content."
     )
     return tmp_path
 
@@ -26,35 +26,35 @@ def hermes_home(tmp_path, monkeypatch):
 def _stub_profile(user_id):
     """Fake profile lookup used in tests."""
     return {
-        "U0PEER": {"persona": "peer-mentor"},
-        "U0SENIOR": {"persona": "senior-strategist"},
+        "U0GENTLE": {"persona": "gentle"},
+        "U0DIRECT": {"persona": "direct"},
         "U0NOFIELD": {"goal": "x"},  # missing persona — defaults
         "U0BAD": {"persona": "nonexistent"},
     }.get(user_id, {})
 
 
-def test_load_soul_md_appends_peer_mentor_overlay(hermes_home):
+def test_load_soul_md_appends_gentle_overlay(hermes_home):
     from agent.prompt_builder import load_soul_md
     with patch("agent.prompt_builder._read_user_profile", side_effect=_stub_profile):
-        out = load_soul_md(user_id="U0PEER")
+        out = load_soul_md(user_id="U0GENTLE")
     assert "# Base SOUL" in out
-    assert "Peer overlay content." in out
-    assert "Senior overlay content." not in out
+    assert "Gentle overlay content." in out
+    assert "Direct overlay content." not in out
 
 
-def test_load_soul_md_appends_senior_strategist_overlay(hermes_home):
+def test_load_soul_md_appends_direct_overlay(hermes_home):
     from agent.prompt_builder import load_soul_md
     with patch("agent.prompt_builder._read_user_profile", side_effect=_stub_profile):
-        out = load_soul_md(user_id="U0SENIOR")
-    assert "Senior overlay content." in out
-    assert "Peer overlay content." not in out
+        out = load_soul_md(user_id="U0DIRECT")
+    assert "Direct overlay content." in out
+    assert "Gentle overlay content." not in out
 
 
-def test_load_soul_md_defaults_to_peer_mentor_when_field_missing(hermes_home):
+def test_load_soul_md_defaults_to_gentle_when_field_missing(hermes_home):
     from agent.prompt_builder import load_soul_md
     with patch("agent.prompt_builder._read_user_profile", side_effect=_stub_profile):
         out = load_soul_md(user_id="U0NOFIELD")
-    assert "Peer overlay content." in out
+    assert "Gentle overlay content." in out
 
 
 def test_load_soul_md_returns_base_only_when_no_user_id(hermes_home):
@@ -62,7 +62,7 @@ def test_load_soul_md_returns_base_only_when_no_user_id(hermes_home):
     from agent.prompt_builder import load_soul_md
     out = load_soul_md(user_id=None)
     assert "# Base SOUL" in out
-    assert "Peer overlay content." not in out
+    assert "Gentle overlay content." not in out
 
 
 def test_load_soul_md_raises_on_invalid_persona(hermes_home):
@@ -76,8 +76,8 @@ def test_load_soul_md_raises_on_invalid_persona(hermes_home):
 def test_load_soul_md_raises_on_missing_overlay_file(hermes_home):
     """Persona name in registry but file missing -> fail loudly."""
     # Remove the file but keep the registry entry
-    (hermes_home / "personas" / "peer-mentor.md").unlink()
+    (hermes_home / "personas" / "gentle.md").unlink()
     from agent.prompt_builder import load_soul_md
     with patch("agent.prompt_builder._read_user_profile", side_effect=_stub_profile):
         with pytest.raises(FileNotFoundError):
-            load_soul_md(user_id="U0PEER")
+            load_soul_md(user_id="U0GENTLE")
