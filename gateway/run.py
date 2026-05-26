@@ -2445,11 +2445,6 @@ class GatewayRunner:
         try:
             if not _ti_enabled:
                 pass  # Non-Artemis deployment — turn-intent detector disabled.
-            elif "Pending sub-agent announcements" in context_prompt:
-                logger.info(
-                    "turn-intent: chat=%s skipped=pending_announcement_present",
-                    source.chat_id or "unknown",
-                )
             else:
                 from agent.turn_intent_detector import (
                     detect_turn_intent,
@@ -2459,6 +2454,16 @@ class GatewayRunner:
                     render_team_dispatch_executed_block,
                     execute_via_helper,
                     log_result as _log_turn_intent,
+                )
+
+                # Dispatch suggestions are suppressed when a Pending
+                # sub-agent announcement is already in flight — adding a
+                # new dispatch while the user is mid-confirmation creates
+                # duplicate sub-agent work. Capability classification is
+                # independent of dispatch (it's about response shape, not
+                # routing) so it always runs.
+                _pending_announce = (
+                    "Pending sub-agent announcements" in context_prompt
                 )
 
                 # Build last-4-message history (oldest first) from the
@@ -2505,7 +2510,15 @@ class GatewayRunner:
                     and _conf == "high"
                     and _uid
                     and _dispatches
+                    and not _pending_announce
                 )
+
+                if _pending_announce and _dispatch_type in ("single", "multi"):
+                    logger.info(
+                        "turn-intent: chat=%s dispatch_suppressed="
+                        "pending_announcement_present dispatch_type=%s",
+                        _chat, _dispatch_type,
+                    )
 
                 if _should_auto_execute:
                     # Direction C — server auto-execute path.
@@ -2565,9 +2578,12 @@ class GatewayRunner:
                         _block = render_injection_block(_detection)
                         if _block:
                             context_prompt = context_prompt + "\n" + _block
-                elif _dispatch_type in ("single", "multi"):
+                elif _dispatch_type in ("single", "multi") and not _pending_announce:
                     # Lower-confidence dispatch — Coach decides whether to
-                    # follow the suggested calls.
+                    # follow the suggested calls. Suppressed entirely when a
+                    # pending announcement is in flight (see _pending_announce
+                    # rationale above — the suppression-logged branch covers
+                    # this case at info level).
                     _block = render_injection_block(_detection)
                     if _block:
                         context_prompt = context_prompt + "\n" + _block
