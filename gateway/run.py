@@ -2454,6 +2454,7 @@ class GatewayRunner:
                 from agent.turn_intent_detector import (
                     detect_turn_intent,
                     render_injection_block,
+                    render_capability_block,
                     render_already_executed_block,
                     render_team_dispatch_executed_block,
                     execute_via_helper,
@@ -2575,6 +2576,24 @@ class GatewayRunner:
                             "dispatch_type=%s",
                             _chat, len(_block), _dispatch_type,
                         )
+
+                # Capability bucket injection (A+ design) — independent of
+                # dispatch. Bucket 2/3/4 turns get natural-language guidance
+                # so Coach skips its own bucket classification (the failure
+                # mode behind "I can prep a flight shortlist" on a bucket 4
+                # off-domain ask). Buckets 1 / non_capability skip silently.
+                _cap_block = render_capability_block(_detection)
+                if _cap_block:
+                    context_prompt = context_prompt + "\n" + _cap_block
+                    logger.info(
+                        "turn-intent: chat=%s capability_block_len=%d "
+                        "bucket=%s user_action_required=%s "
+                        "off_domain_no_fallback=%s",
+                        _chat, len(_cap_block),
+                        _detection.get("capability_bucket"),
+                        _detection.get("user_action_required"),
+                        _detection.get("off_domain_no_fallback"),
+                    )
         except _ArtemisDisabled:
             pass  # Non-Artemis fork deployment — feature off by design.
         except Exception as _tid_err:  # noqa: BLE001

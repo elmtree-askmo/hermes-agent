@@ -209,6 +209,215 @@ class TestDetectTurnIntent:
 
 
 # =========================================================================
+# Capability bucket — A+ design: bucket + user_action_required +
+# off_domain_no_fallback parsing and cross-check
+# =========================================================================
+
+def _bucket_response(bucket, user_action_required=False, off_domain_no_fallback=False):
+    """Build a fake LLM response that's a 'none' dispatch but carries the
+    capability bucket fields. Lets tests focus on bucket schema without
+    coupling to dispatch shape."""
+    import json
+    bucket_lit = json.dumps(bucket)
+    return _fake_response(
+        '{"dispatch_type": "none", "dispatches": [], "lead_in": null, '
+        f'"capability_bucket": {bucket_lit}, '
+        f'"user_action_required": {str(user_action_required).lower()}, '
+        f'"off_domain_no_fallback": {str(off_domain_no_fallback).lower()}, '
+        '"confidence": "high", "reasoning": "stub"}'
+    )
+
+
+class TestCapabilityBucketSchema:
+    def test_default_fields_when_short_skip(self, monkeypatch):
+        # Short-message skip path must still expose the new fields with
+        # safe defaults so downstream consumers can read them unconditionally.
+        result = tid.detect_turn_intent("ok")
+        assert result["capability_bucket"] == "non_capability"
+        assert result["user_action_required"] is False
+        assert result["off_domain_no_fallback"] is False
+
+    def test_missing_bucket_defaults_to_non_capability(self, monkeypatch):
+        monkeypatch.setattr(
+            "agent.auxiliary_client.call_llm",
+            lambda **kw: _fake_response(
+                '{"dispatch_type": "none", "dispatches": [], "lead_in": null, '
+                '"confidence": "low", "reasoning": "no bucket field"}'
+            ),
+            raising=False,
+        )
+        result = tid.detect_turn_intent(
+            "i'm just feeling really stuck about all this honestly"
+        )
+        assert result["capability_bucket"] == "non_capability"
+        assert result["user_action_required"] is False
+        assert result["off_domain_no_fallback"] is False
+
+    @pytest.mark.parametrize("raw,expected", [
+        (1, 1), (2, 2), (3, 3), (4, 4),
+        ("1", 1), ("4", 4),
+        ("non_capability", "non_capability"),
+        ("bogus", "non_capability"),
+        (None, "non_capability"),
+        (5, "non_capability"),
+    ])
+    def test_bucket_parsing(self, monkeypatch, raw, expected):
+        monkeypatch.setattr(
+            "agent.auxiliary_client.call_llm",
+            lambda **kw: _bucket_response(raw),
+            raising=False,
+        )
+        result = tid.detect_turn_intent(
+            "can you call her on the phone for me please?"
+        )
+        assert result["capability_bucket"] == expected
+
+    def test_user_action_required_only_valid_for_bucket_3(self, monkeypatch):
+        # bucket=4 + user_action_required=true → flag cleared
+        monkeypatch.setattr(
+            "agent.auxiliary_client.call_llm",
+            lambda **kw: _bucket_response(4, user_action_required=True),
+            raising=False,
+        )
+        result = tid.detect_turn_intent(
+            "book me a flight to new york next thursday"
+        )
+        assert result["capability_bucket"] == 4
+        assert result["user_action_required"] is False
+
+    def test_user_action_required_kept_for_bucket_3(self, monkeypatch):
+        monkeypatch.setattr(
+            "agent.auxiliary_client.call_llm",
+            lambda **kw: _bucket_response(3, user_action_required=True),
+            raising=False,
+        )
+        result = tid.detect_turn_intent(
+            "can you apply to this job for me at https://example.com/jobs/123"
+        )
+        assert result["capability_bucket"] == 3
+        assert result["user_action_required"] is True
+
+    def test_off_domain_no_fallback_only_valid_for_bucket_4(self, monkeypatch):
+        # bucket=3 + off_domain_no_fallback=true → flag cleared
+        monkeypatch.setattr(
+            "agent.auxiliary_client.call_llm",
+            lambda **kw: _bucket_response(3, off_domain_no_fallback=True),
+            raising=False,
+        )
+        result = tid.detect_turn_intent(
+            "can you apply to this job for me please right now"
+        )
+        assert result["capability_bucket"] == 3
+        assert result["off_domain_no_fallback"] is False
+
+    def test_off_domain_no_fallback_kept_for_bucket_4(self, monkeypatch):
+        monkeypatch.setattr(
+            "agent.auxiliary_client.call_llm",
+            lambda **kw: _bucket_response(4, off_domain_no_fallback=True),
+            raising=False,
+        )
+        result = tid.detect_turn_intent(
+            "can you sign this NDA for me before tomorrow morning?"
+        )
+        assert result["capability_bucket"] == 4
+        assert result["off_domain_no_fallback"] is True
+
+    def test_non_strict_truthy_for_booleans(self, monkeypatch):
+        # The LLM may return 1 or "true" or other truthy non-bool values;
+        # we use `is True` semantics so anything not literally True is
+        # treated as False. Defends against accidental classification
+        # leakage when the LLM returns ambiguous output.
+        import json
+        raw = (
+            '{"dispatch_type": "none", "dispatches": [], "lead_in": null, '
+            '"capability_bucket": 3, "user_action_required": "yes", '
+            '"off_domain_no_fallback": 1, '
+            '"confidence": "high", "reasoning": "stub"}'
+        )
+        monkeypatch.setattr(
+            "agent.auxiliary_client.call_llm",
+            lambda **kw: _fake_response(raw),
+            raising=False,
+        )
+        result = tid.detect_turn_intent(
+            "can you apply to this job for me please right now"
+        )
+        assert result["user_action_required"] is False
+        assert result["off_domain_no_fallback"] is False
+
+
+class TestRenderCapabilityBlock:
+    def test_returns_none_when_not_checked(self):
+        assert tid.render_capability_block({"checked": False}) is None
+
+    def test_returns_none_for_non_capability(self):
+        block = tid.render_capability_block({
+            "checked": True,
+            "capability_bucket": "non_capability",
+        })
+        assert block is None
+
+    def test_returns_none_for_bucket_1(self):
+        block = tid.render_capability_block({
+            "checked": True,
+            "capability_bucket": 1,
+        })
+        assert block is None
+
+    def test_renders_for_bucket_2(self):
+        block = tid.render_capability_block({
+            "checked": True,
+            "capability_bucket": 2,
+        })
+        assert block is not None
+        assert "deliverable" in block.lower()
+        # No bucket disclosure in user-visible vocabulary.
+        assert "bucket" not in block.lower()
+
+    def test_renders_for_bucket_3_with_user_action_required(self):
+        block = tid.render_capability_block({
+            "checked": True,
+            "capability_bucket": 3,
+            "user_action_required": True,
+        })
+        assert block is not None
+        # Must instruct lead-with-user-step (the tool-call-regrade fix).
+        assert "lead" in block.lower()
+        assert "user's step" in block.lower()
+        assert "bucket" not in block.lower()
+
+    def test_renders_for_bucket_3_without_user_action_required(self):
+        block = tid.render_capability_block({
+            "checked": True,
+            "capability_bucket": 3,
+            "user_action_required": False,
+        })
+        assert block is not None
+        assert "user's step" in block.lower()
+        assert "bucket" not in block.lower()
+
+    def test_renders_for_bucket_4_with_off_domain_no_fallback(self):
+        block = tid.render_capability_block({
+            "checked": True,
+            "capability_bucket": 4,
+            "off_domain_no_fallback": True,
+        })
+        assert block is not None
+        assert "clean refusal" in block.lower()
+        assert "bucket" not in block.lower()
+
+    def test_renders_for_bucket_4_with_adjacent_capability(self):
+        block = tid.render_capability_block({
+            "checked": True,
+            "capability_bucket": 4,
+            "off_domain_no_fallback": False,
+        })
+        assert block is not None
+        assert "career-adjacent" in block.lower()
+        assert "bucket" not in block.lower()
+
+
+# =========================================================================
 # Prompt substitution safety — regression for codex round 5 P2
 # (chained .replace re-templates injected content)
 # =========================================================================

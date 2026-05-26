@@ -39,8 +39,14 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
-# Only consider messages above this length — short turns ("ok", "yes",
-# "thanks", "what") are not artifact requests.
+# Skip detection for short messages. Short turns ("ok", "yes", "thanks",
+# "what") are unlikely to need sub-agent dispatch AND are typically not
+# tool-triggered capability questions either — short capability asks
+# ("call her?", "apply for me?") carry no URL/attachment that would tempt
+# Coach into a tool-call silent-regrade, so SOUL.md's static Capability
+# Posture handles them adequately. Lowering the threshold would force a
+# detector LLM call on ~70% of turns for marginal capability-classification
+# benefit; revisit only if short capability questions show production drift.
 _MIN_USER_MSG_LEN = 20
 
 # Hard timeout — this runs synchronously on every user turn before Coach
@@ -125,6 +131,54 @@ exchanges, decide the **dispatch shape** this turn needs.
   it.", "Going to dig into this with the team."
 - None: must be null.
 
+**ALSO classify the user's turn against Coach's Capability Posture.**
+Coach is a career-coaching agent on Slack DM. Some user asks fall outside
+what Coach can do; some require the user themselves to act. Classify the
+turn as one of:
+
+- `"non_capability"` — the user is NOT asking whether Coach can do something
+  (e.g., emotional disclosure, status update, brainstorm prompt, follow-up
+  on prior work). Most turns are this. Use this when no capability frame
+  is present.
+
+- `1` (Can do now) — Coach can execute via a tool call in this turn or
+  session. Examples: "find me Series A health-tech jobs", "save this to
+  my profile", "draft a cover letter for Glossier", "what events are in
+  SF next week".
+
+- `2` (Can prepare) — Coach can produce a deliverable the user takes the
+  action with. Examples: "draft an outreach to Sarah I can send",
+  "interview prep for the Notion onsite", "help me write a LinkedIn About
+  I can paste".
+
+- `3` (Requires user action) — Only the user can perform this; Coach has
+  no executable path but can prep something adjacent. Examples: "apply to
+  this job for me" (portals only accept the user), "attend the meetup
+  for me", "have the conversation with my manager".
+
+- `4` (Not supported) — Coach can't do or meaningfully prepare for this.
+  Examples: place a live phone/video call, sign a legal document,
+  off-domain asks (book a flight, weather, medical advice, college essay,
+  generic non-career life-admin).
+
+**Two additional booleans (only meaningful for buckets 3 and 4):**
+
+- `user_action_required`: `true` when the turn is bucket 3 AND Coach
+  must lead the reply by naming the user's step ("submitting is your
+  step", "attending is your step") BEFORE any preparatory action or
+  tool call. This pre-empts the failure mode where Coach sees a URL and
+  fires `web_extract` to silently regrade the request to "let me tailor
+  your resume", skipping the "this is your step" disclosure. Set
+  `false` for buckets 1, 2, 4, and non_capability.
+
+- `off_domain_no_fallback`: `true` when the turn is bucket 4 AND there
+  is no honest career-adjacent capability to offer (e.g., "sign this
+  NDA" — clean refusal is the right shape, no stretched fallback).
+  Set `false` for bucket 4 asks that DO have an adjacent career
+  capability (e.g., "book me a flight" → if it's an interview trip,
+  there's interview prep; off_domain_no_fallback=false). Set `false`
+  for buckets 1, 2, 3, and non_capability.
+
 Return STRICT JSON, no prose, no markdown fence:
 
 {
@@ -139,6 +193,9 @@ Return STRICT JSON, no prose, no markdown fence:
     ... (1 item for single, 2-3 items for multi, empty list for none)
   ],
   "lead_in": "<short Coach-voice opener, or null>",
+  "capability_bucket": "non_capability" | 1 | 2 | 3 | 4,
+  "user_action_required": true | false,
+  "off_domain_no_fallback": true | false,
   "confidence": "high|medium|low",
   "reasoning": "<one short sentence>"
 }
@@ -277,6 +334,9 @@ def detect_turn_intent(
         "dispatch_type": "none",
         "dispatches": [],
         "lead_in": None,
+        "capability_bucket": "non_capability",
+        "user_action_required": False,
+        "off_domain_no_fallback": False,
         "confidence": None,
         "reasoning": None,
     }
@@ -356,10 +416,38 @@ def detect_turn_intent(
     if dispatch_type == "none":
         lead_in = None
 
+    # Capability bucket — accept either the string "non_capability" or one
+    # of the integers 1-4. Anything else defaults to "non_capability" so
+    # downstream injection logic stays silent (no false bucket disclosure).
+    raw_bucket = parsed.get("capability_bucket")
+    if raw_bucket in (1, 2, 3, 4):
+        capability_bucket: str | int = raw_bucket
+    elif raw_bucket in ("1", "2", "3", "4"):
+        capability_bucket = int(raw_bucket)
+    else:
+        capability_bucket = "non_capability"
+
+    # Booleans — coerce strictly. Only meaningful when paired with the
+    # right bucket; cross-check below.
+    raw_uar = parsed.get("user_action_required")
+    user_action_required = raw_uar is True
+    raw_odnf = parsed.get("off_domain_no_fallback")
+    off_domain_no_fallback = raw_odnf is True
+
+    # Cross-check: user_action_required only valid for bucket 3.
+    if user_action_required and capability_bucket != 3:
+        user_action_required = False
+    # Cross-check: off_domain_no_fallback only valid for bucket 4.
+    if off_domain_no_fallback and capability_bucket != 4:
+        off_domain_no_fallback = False
+
     out["checked"] = True
     out["dispatch_type"] = dispatch_type
     out["dispatches"] = dispatches
     out["lead_in"] = lead_in
+    out["capability_bucket"] = capability_bucket
+    out["user_action_required"] = user_action_required
+    out["off_domain_no_fallback"] = off_domain_no_fallback
     out["confidence"] = parsed.get("confidence") or None
     out["reasoning"] = parsed.get("reasoning") or None
     return out
@@ -391,6 +479,87 @@ def _sanitize_slug(raw: Any) -> str | None:
     if not cleaned or len(cleaned) > 60:
         return None
     return cleaned
+
+
+def render_capability_block(detection: dict[str, Any]) -> str | None:
+    """Render the capability-posture injection block (A+ design).
+
+    Auxiliary classifier already decided which Capability Posture bucket
+    this turn belongs to. We inject Coach-facing natural-language guidance
+    so Coach skips its own bucket classification and goes straight to the
+    response-shape for the determined bucket.
+
+    Returns None for `non_capability` and for `bucket=1` — both default to
+    Coach's existing behavior (do the thing, no injection needed). Returns
+    a guidance block for buckets 2, 3, 4 because those are the buckets
+    where Coach historically drifts (over-promising prep, skipping
+    user-step disclosure, stretching off-domain fallbacks).
+
+    The injection NEVER mentions "bucket" terminology — that's internal
+    classifier vocabulary and SOUL.md is explicit that bucket disclosure
+    in user-facing output is a bug. Phrasing is the natural-language
+    instruction Coach would have produced from SOUL.md's bucket→shape
+    map if it had classified correctly.
+    """
+    if not detection.get("checked"):
+        return None
+    bucket = detection.get("capability_bucket")
+    if bucket == "non_capability" or bucket == 1:
+        return None
+
+    lines = ["", "**Capability posture for this turn** (auxiliary classifier "
+             "determined the response shape — follow this guidance):"]
+
+    if bucket == 2:
+        lines.append(
+            "  - The user is asking for a deliverable they will take action "
+            "with. Prepare the deliverable proactively. Do not promise "
+            "future team work; either deliver inline this turn or enqueue "
+            "via the proper channel (see hermes.md § Engagement Channels)."
+        )
+    elif bucket == 3:
+        if detection.get("user_action_required"):
+            lines.append(
+                "  - This action can only be performed by the user. **Lead "
+                "the reply by naming the user's step in natural language** "
+                "(e.g., \"submitting is your step\", \"attending is your "
+                "step\", \"the conversation has to be you\") BEFORE any "
+                "preparatory action, tool call, or fallback offer. Do NOT "
+                "fire `web_extract` / `parse_pdf` / similar tools first "
+                "and then bury the user-step disclosure — that reads as if "
+                "you'll handle the action yourself. After the user-step "
+                "line, pair with the closest preparatory help you can "
+                "actually deliver."
+            )
+        else:
+            lines.append(
+                "  - This action can only be performed by the user. Name "
+                "that this is the user's step, then pair with the closest "
+                "preparatory help you can actually deliver."
+            )
+    elif bucket == 4:
+        if detection.get("off_domain_no_fallback"):
+            lines.append(
+                "  - This request is outside what Coach can do AND there "
+                "is no honest career-adjacent capability to offer. Give a "
+                "clean refusal — one sentence acknowledging the limit, no "
+                "invented stretch fallback. A bare \"anything else I can "
+                "help with?\" is fine; a wished-into-existence capability "
+                "is worse than a clean refusal."
+            )
+        else:
+            lines.append(
+                "  - This request is outside what Coach can do directly, "
+                "but a career-adjacent capability exists. Be honest about "
+                "the limit in one sentence, then pivot to the adjacent "
+                "capability (e.g., if the off-domain ask is travel for an "
+                "interview, pivot to interview prep). The fallback you "
+                "offer must itself be something Coach can do now or "
+                "prepare a deliverable for — never cascade into another "
+                "ask-of-the-user or another off-domain item."
+            )
+
+    return "\n".join(lines)
 
 
 def render_injection_block(detection: dict[str, Any]) -> str | None:
