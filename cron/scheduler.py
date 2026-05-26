@@ -373,6 +373,11 @@ Rules:
   ✍️ *Publicist* <sentence from team_work.publicist>
   Place this paragraph BEFORE the Follow-ups block, separated by a blank line. If <2 non-null fields, skip the paragraph entirely (do not render single-sub-agent attribution).
 - coaches_take goes into \U0001f4ac Coach's Take verbatim (you may lightly polish but preserve meaning).
+- SILENCE CHECK-IN: if the package contains a "silence_tier" field, the user has gone quiet for days and this is a low-key re-engagement message, NOT a normal briefing. Override the format above entirely — plain text only, no code block, no Follow-ups/New Roles sections, no team attribution, no "Coach's Take" header:
+  - "day1": one brief, warm line noting it's been quiet, plus at most ONE fresh lead drawn from follow_ups/team_work if present. 1-2 sentences total. Low-key, not a full briefing.
+  - "day5": 1-2 empathetic, no-agenda sentences checking in, and offer an explicit option to pause the daily updates. Do not list any follow-ups or roles.
+  - "day8": a single warm, lowest-bar re-entry line — invite them back with no pressure and the smallest possible action (a one-tap reply). No content, no agenda, nothing to do.
+  Address the user in second person, no names (the name rule above still holds). Phrase it naturally in your own words — do NOT output a fixed templated sentence.
 - No reasoning. No planning narration. Output the message and nothing else.
 
 DECISION PACKAGE:
@@ -511,18 +516,28 @@ def _briefing_write_call(decision_pkg: dict, job_id: str = "?") -> str | None:
 
 
 
-def _run_two_step_briefing(raw_output: str, job_id: str = "?") -> str | None:
+def _run_two_step_briefing(
+    raw_output: str, job_id: str = "?", silence_tier: str | None = None
+) -> str | None:
     """Phase 6 orchestrator — decide then write.
 
     Returns the write-rendered text on success, or None if either call fails
     (caller falls back to Phase 5 voice-scan on the original raw output).
 
     Never raises — all exceptions are caught inside the called functions.
+
+    S-0525-02 Domain 6: `silence_tier` (day1/day5/day8), when set, is injected
+    into the decide package deterministically so the write call branches the
+    briefing into a graduated silence check-in — the tier is computed by code,
+    never inferred by the decide LLM from raw output.
     """
     pkg = _briefing_decide_call(raw_output, job_id)
     if pkg is None:
         logger.info("Job '%s': two-step decide failed — falling back to Phase 5 path", job_id)
         return None
+
+    if silence_tier:
+        pkg["silence_tier"] = silence_tier
 
     rendered = _briefing_write_call(pkg, job_id)
     if rendered is None:
@@ -1031,6 +1046,68 @@ def _run_job_script(script_path: str) -> tuple[bool, str]:
         return False, f"Script execution failed: {exc}"
 
 
+def _briefing_silence(job: dict) -> tuple[str | None, bool]:
+    """S-0525-02 Domain 6: compute (tier, speak) for an artemis-briefing job.
+
+    Runs the Artemis helper ``scripts/compute-silence-tier.py`` (stdlib-only,
+    plain python3) the same way the gateway runs compute-pending-announcements.py,
+    keyed off ``job.origin.user_id``. Fail-open to (None, True) — an unreadable
+    silence clock never silences a user. tier ∈ {engaged, day1, day5, day8, None}.
+    """
+    user_id = (job.get("origin") or {}).get("user_id")
+    if not user_id:
+        return None, True
+    script = get_hermes_home() / "scripts" / "compute-silence-tier.py"
+    if not script.exists():
+        return None, True
+    try:
+        proc = subprocess.run(
+            ["python3", str(script), user_id],
+            capture_output=True, text=True, timeout=3, check=False,
+        )
+        if proc.returncode != 0 or not proc.stdout.strip():
+            return None, True
+        data = json.loads(proc.stdout.strip())
+    except (subprocess.SubprocessError, OSError, json.JSONDecodeError):
+        return None, True
+    return data.get("tier"), bool(data.get("speak", True))
+
+
+def _briefing_silence_directive(job: dict) -> str:
+    """Phase 1 raw-prompt directive derived from the silence tier ("" = engaged
+    / no change). Shapes the raw briefing toward the tier (and emits [SILENT] on
+    non-check-in silent days); the write call (Phase 2) does the reliable copy
+    branching via _run_two_step_briefing(silence_tier=...)."""
+    tier, speak = _briefing_silence(job)
+    if tier in (None, "engaged"):
+        return ""
+    if speak is False:
+        return (
+            "SILENCE_AWARENESS: This user has gone quiet for several days and "
+            "today is not a scheduled check-in day. Respond with exactly "
+            "\"[SILENT]\" (nothing else) — do not send a briefing today."
+        )
+    return {
+        "day1": (
+            "SILENCE_AWARENESS: This user just went quiet (~1 day). Keep today's "
+            "briefing to a brief, low-key check-in plus at most one fresh lead — "
+            "not a full multi-section briefing."
+        ),
+        "day5": (
+            "SILENCE_AWARENESS: This user has been quiet ~5 days. Make today's "
+            "briefing a short, empathetic, no-agenda check-in and offer an "
+            "explicit pause option (e.g. \"want me to ease off the daily updates? "
+            "just say the word\"). No content push."
+        ),
+        "day8": (
+            "SILENCE_AWARENESS: This user has been quiet ~8 days. Make today's "
+            "briefing the lowest-bar re-entry possible — one warm line inviting "
+            "them to pick back up whenever (e.g. \"just send a 👍 and we'll dive "
+            "back in\"). No content, no agenda."
+        ),
+    }.get(tier, "")
+
+
 def _build_job_prompt(job: dict) -> str:
     """Build the effective prompt for a cron job, optionally loading one or more skills first."""
     prompt = job.get("prompt", "")
@@ -1086,6 +1163,7 @@ def _build_job_prompt(job: dict) -> str:
     # to the first 3 briefing runs so new users discover the pause path.
     # Gated on skill=artemis-briefing to avoid leaking into other cron jobs.
     footer_line = ""
+    silence_directive = ""
     if "artemis-briefing" in skill_names:
         completed = (job.get("repeat") or {}).get("completed", 0) or 0
         if completed < 3:
@@ -1094,10 +1172,18 @@ def _build_job_prompt(job: dict) -> str:
                 "_(daily briefing — say \"pause\" anytime to stop)_ "
                 "as the absolute last line."
             )
+        # S-0525-02 Domain 6: tier the briefing by how long the user has been
+        # silent (or suppress it via [SILENT] on non-check-in silent days).
+        silence_directive = _briefing_silence_directive(job)
+
+    # Trailing directives, applied to both the no-skills and skills paths below.
+    # silence_directive goes last so its [SILENT] instruction (when present)
+    # dominates the footer.
+    trailers = [d for d in (footer_line, silence_directive) if d]
 
     if not skill_names:
-        if footer_line:
-            prompt = f"{prompt}\n\n{footer_line}"
+        if trailers:
+            prompt = f"{prompt}\n\n" + "\n\n".join(trailers)
         return prompt
 
     from tools.skills_tool import skill_view
@@ -1134,8 +1220,8 @@ def _build_job_prompt(job: dict) -> str:
 
     if prompt:
         parts.extend(["", f"The user has provided the following instruction alongside the skill invocation: {prompt}"])
-    if footer_line:
-        parts.extend(["", footer_line])
+    for trailer in trailers:
+        parts.extend(["", trailer])
     return "\n".join(parts)
 
 
@@ -1533,7 +1619,15 @@ def tick(verbose: bool = True, adapters=None, loop=None) -> int:
                 # _run_two_step_briefing returns None and deliver_content
                 # flows through Phase 5 voice-scan unchanged.
                 if should_deliver and success and _is_briefing_job(job):
-                    two_step_result = _run_two_step_briefing(deliver_content, job["id"])
+                    # S-0525-02 Domain 6: pass the silence tier so the write call
+                    # branches into a graduated check-in. speak=False days emit
+                    # [SILENT] at the raw stage (delivery already suppressed), so
+                    # only engaged/day1/day5/day8 speak-days reach here.
+                    _s_tier, _s_speak = _briefing_silence(job)
+                    _silence_tier = _s_tier if (_s_tier not in (None, "engaged") and _s_speak) else None
+                    two_step_result = _run_two_step_briefing(
+                        deliver_content, job["id"], silence_tier=_silence_tier
+                    )
                     if two_step_result is not None:
                         deliver_content = two_step_result
 
