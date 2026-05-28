@@ -1,0 +1,179 @@
+"""Briefing team attribution paragraph — server-side render + inject.
+
+Scheduler reads ~/.hermes/artemis/<user_id>/strategy.json before delivery
+and prepends a canonical 3-line attribution block when archive[] has
+recent sub-agent completions. See `_render_team_attribution_for_briefing`
+docstring for the LLM-prompt enforcement history that motivated this path.
+"""
+
+import json
+from datetime import datetime, timedelta, timezone
+from unittest.mock import patch
+
+import pytest
+
+from cron.scheduler import (
+    _inject_attribution_block,
+    _render_team_attribution_for_briefing,
+)
+
+pytestmark = pytest.mark.xdist_group("cron_scheduler")
+
+
+def _setup_strategy(tmp_path, user_id, archive_entries):
+    """Write a minimal strategy.json under tmp_path's artemis tree."""
+    user_dir = tmp_path / "artemis" / user_id
+    user_dir.mkdir(parents=True, exist_ok=True)
+    strategy = {
+        "user_id": user_id,
+        "archive": archive_entries,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    (user_dir / "strategy.json").write_text(json.dumps(strategy), encoding="utf-8")
+
+
+def _iso(now_offset_hours):
+    now = datetime.now(timezone.utc)
+    ts = now + timedelta(hours=now_offset_hours)
+    return ts.isoformat()
+
+
+# ---- _render_team_attribution_for_briefing ----------------------------------
+
+
+def test_three_sub_agents_render_in_canonical_order(tmp_path):
+    user_id = "U123"
+    _setup_strategy(tmp_path, user_id, [
+        {"id": "p1", "sub_agent": "publicist", "completed_at": _iso(-1),
+         "summary": "Drafted Glossier cover letter"},
+        {"id": "s1", "sub_agent": "scout", "completed_at": _iso(-3),
+         "summary": "Surfaced 3 consumer brand fits"},
+        {"id": "a1", "sub_agent": "analyst", "completed_at": _iso(-2),
+         "summary": "Rewrote internship bullet to lead with 40% engagement"},
+    ])
+    with patch("cron.scheduler.get_hermes_home", return_value=tmp_path):
+        out = _render_team_attribution_for_briefing(user_id)
+    lines = out.split("\n")
+    assert len(lines) == 3
+    assert lines[0].startswith("🔍 *Scout* — Surfaced 3 consumer brand fits.")
+    assert lines[1].startswith("📊 *Analyst* — Rewrote internship bullet")
+    assert lines[2].startswith("✍️ *Publicist* — Drafted Glossier cover letter.")
+
+
+def test_items_older_than_24h_excluded(tmp_path):
+    user_id = "U123"
+    _setup_strategy(tmp_path, user_id, [
+        {"id": "s_old", "sub_agent": "scout", "completed_at": _iso(-48),
+         "summary": "Stale scan"},
+        {"id": "p_recent", "sub_agent": "publicist", "completed_at": _iso(-1),
+         "summary": "Recent draft"},
+    ])
+    with patch("cron.scheduler.get_hermes_home", return_value=tmp_path):
+        out = _render_team_attribution_for_briefing(user_id)
+    assert "Stale scan" not in out
+    assert "Recent draft" in out
+    assert "Scout" not in out
+
+
+def test_only_most_recent_per_subagent(tmp_path):
+    user_id = "U123"
+    _setup_strategy(tmp_path, user_id, [
+        {"id": "s1", "sub_agent": "scout", "completed_at": _iso(-10),
+         "summary": "Earlier scout"},
+        {"id": "s2", "sub_agent": "scout", "completed_at": _iso(-2),
+         "summary": "Later scout"},
+    ])
+    with patch("cron.scheduler.get_hermes_home", return_value=tmp_path):
+        out = _render_team_attribution_for_briefing(user_id)
+    assert "Later scout" in out
+    assert "Earlier scout" not in out
+
+
+def test_single_sub_agent_still_renders(tmp_path):
+    user_id = "U123"
+    _setup_strategy(tmp_path, user_id, [
+        {"id": "s1", "sub_agent": "scout", "completed_at": _iso(-1),
+         "summary": "Solo scout overnight"},
+    ])
+    with patch("cron.scheduler.get_hermes_home", return_value=tmp_path):
+        out = _render_team_attribution_for_briefing(user_id)
+    assert out == "🔍 *Scout* — Solo scout overnight."
+
+
+def test_empty_archive_returns_empty(tmp_path):
+    _setup_strategy(tmp_path, "U123", [])
+    with patch("cron.scheduler.get_hermes_home", return_value=tmp_path):
+        out = _render_team_attribution_for_briefing("U123")
+    assert out == ""
+
+
+def test_missing_strategy_returns_empty(tmp_path):
+    # No strategy.json at all
+    with patch("cron.scheduler.get_hermes_home", return_value=tmp_path):
+        out = _render_team_attribution_for_briefing("U_NONE")
+    assert out == ""
+
+
+def test_corrupt_strategy_returns_empty(tmp_path):
+    user_dir = tmp_path / "artemis" / "U_BAD"
+    user_dir.mkdir(parents=True, exist_ok=True)
+    (user_dir / "strategy.json").write_text("{ not valid json", encoding="utf-8")
+    with patch("cron.scheduler.get_hermes_home", return_value=tmp_path):
+        out = _render_team_attribution_for_briefing("U_BAD")
+    assert out == ""
+
+
+def test_unknown_subagent_skipped(tmp_path):
+    user_id = "U123"
+    _setup_strategy(tmp_path, user_id, [
+        {"id": "x1", "sub_agent": "marketer", "completed_at": _iso(-1),
+         "summary": "Stranger"},
+    ])
+    with patch("cron.scheduler.get_hermes_home", return_value=tmp_path):
+        out = _render_team_attribution_for_briefing(user_id)
+    assert out == ""
+
+
+def test_missing_summary_skipped(tmp_path):
+    user_id = "U123"
+    _setup_strategy(tmp_path, user_id, [
+        {"id": "s1", "sub_agent": "scout", "completed_at": _iso(-1),
+         "summary": ""},
+    ])
+    with patch("cron.scheduler.get_hermes_home", return_value=tmp_path):
+        out = _render_team_attribution_for_briefing(user_id)
+    assert out == ""
+
+
+def test_trailing_period_normalized(tmp_path):
+    user_id = "U123"
+    _setup_strategy(tmp_path, user_id, [
+        {"id": "s1", "sub_agent": "scout", "completed_at": _iso(-1),
+         "summary": "Surfaced 4 roles."},
+    ])
+    with patch("cron.scheduler.get_hermes_home", return_value=tmp_path):
+        out = _render_team_attribution_for_briefing(user_id)
+    assert out.endswith("Surfaced 4 roles.")
+    assert "Surfaced 4 roles.." not in out
+
+
+# ---- _inject_attribution_block ---------------------------------------------
+
+
+def test_inject_prepends_with_blank_line_gap():
+    attribution = "🔍 *Scout* — Found 2 roles."
+    deliver = "Morning briefing content here."
+    out = _inject_attribution_block(deliver, attribution)
+    assert out == "🔍 *Scout* — Found 2 roles.\n\nMorning briefing content here."
+
+
+def test_inject_empty_attribution_returns_content_unchanged():
+    deliver = "Quiet day note."
+    out = _inject_attribution_block(deliver, "")
+    assert out == deliver
+
+
+def test_inject_empty_content_returns_attribution_alone():
+    attribution = "📊 *Analyst* — Did a thing."
+    out = _inject_attribution_block("", attribution)
+    assert out == attribution

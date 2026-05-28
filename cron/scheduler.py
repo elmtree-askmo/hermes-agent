@@ -25,7 +25,7 @@ except ImportError:
         import msvcrt
     except ImportError:
         msvcrt = None
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -579,6 +579,116 @@ def _is_briefing_job(job: dict) -> bool:
     if not isinstance(skills, (list, tuple)):
         return False
     return "artemis-briefing" in skills
+
+
+# ---------------------------------------------------------------------------
+# Artemis briefing — server-side team attribution paragraph (E path).
+# ---------------------------------------------------------------------------
+#
+# Five rounds of SKILL.md / Coach-side prompt tightening (v1.20.0 → v1.22.1)
+# failed to make Coach + the two-step decide+write LLMs render the canonical
+# 3-line `🔍 *Scout* / 📊 *Analyst* / ✍️ *Publicist*` attribution paragraph
+# when the user's archive[] had recent sub-agent completions. The LLM's
+# prose-collapse prior in "warm coach briefing" mode is strong enough that
+# even MCP-server-rendered, verbatim-paste instructions get rewritten.
+#
+# This block injects a deterministic Python-rendered attribution paragraph
+# at the top of the briefing deliver_content for any artemis-briefing job
+# whose user has ≥1 sub-agent completion in archive[] within the last 24h.
+# The LLM never sees this content; it is concatenated to the LLM output
+# just before Slack delivery. This decouples the format guarantee from
+# LLM compliance.
+
+_ATTRIBUTION_WINDOW_HOURS = 24
+_SUB_AGENT_ATTRIBUTION_REGISTRY = {
+    "scout": {"display_name": "Scout", "emoji": "🔍"},
+    "analyst": {"display_name": "Analyst", "emoji": "📊"},
+    "publicist": {"display_name": "Publicist", "emoji": "✍️"},
+}
+_SUB_AGENT_ATTRIBUTION_ORDER = ("scout", "analyst", "publicist")
+
+
+def _render_team_attribution_for_briefing(user_id: str) -> str:
+    """Render the briefing attribution paragraph from artemis strategy.json.
+
+    Reads ~/.hermes/artemis/<user_id>/strategy.json, picks completed
+    sub-agent items from archive[] whose completed_at is within the last 24h,
+    and renders one line per sub-agent in canonical Scout → Analyst →
+    Publicist order. Returns "" when no qualifying items exist.
+
+    Self-swallowing — any read / parse failure returns "" (briefing still
+    delivers without the attribution paragraph rather than failing the job).
+    """
+    try:
+        hermes_home_dyn = get_hermes_home()
+        strategy_path = hermes_home_dyn / "artemis" / user_id / "strategy.json"
+        if not strategy_path.exists():
+            return ""
+        strategy = json.loads(strategy_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        logger.warning("attribution render: strategy read failed user=%s err=%s", user_id, exc)
+        return ""
+
+    archive = strategy.get("archive") or []
+    if not isinstance(archive, list):
+        return ""
+
+    now = datetime.now(timezone.utc)
+    cutoff = now - timedelta(hours=_ATTRIBUTION_WINDOW_HOURS)
+
+    by_agent: dict[str, dict] = {}
+    for item in archive:
+        if not isinstance(item, dict):
+            continue
+        sub_agent = item.get("sub_agent")
+        if sub_agent not in _SUB_AGENT_ATTRIBUTION_REGISTRY:
+            continue
+        completed_at = item.get("completed_at")
+        if not isinstance(completed_at, str):
+            continue
+        try:
+            ts = datetime.fromisoformat(completed_at.replace("Z", "+00:00"))
+        except (ValueError, TypeError):
+            continue
+        if ts < cutoff:
+            continue
+        existing = by_agent.get(sub_agent)
+        if existing is None or ts > existing["_ts"]:
+            by_agent[sub_agent] = {**item, "_ts": ts}
+
+    if not by_agent:
+        return ""
+
+    lines: list[str] = []
+    for sub_agent in _SUB_AGENT_ATTRIBUTION_ORDER:
+        item = by_agent.get(sub_agent)
+        if not item:
+            continue
+        entry = _SUB_AGENT_ATTRIBUTION_REGISTRY[sub_agent]
+        summary = (item.get("summary") or "").strip()
+        if not summary:
+            continue
+        summary = summary.rstrip(".")
+        lines.append(f"{entry['emoji']} *{entry['display_name']}* — {summary}.")
+
+    return "\n".join(lines)
+
+
+def _inject_attribution_block(deliver_content: str, attribution: str) -> str:
+    """Prepend attribution block to briefing content with a blank-line gap.
+
+    If `attribution` is empty, returns content unchanged. The attribution
+    appears as its own paragraph at the top of the message, before any
+    LLM-written content. We do not attempt to strip duplicate LLM-rendered
+    attribution lines — Coach's text rarely matches the canonical format
+    closely enough to dedupe reliably, and a second prose mention reads
+    as natural narration after the canonical header.
+    """
+    if not attribution:
+        return deliver_content
+    if not deliver_content:
+        return attribution
+    return f"{attribution}\n\n{deliver_content}"
 
 
 def _persist_briefing_output(job: dict, delivered_text: str) -> None:
@@ -1644,6 +1754,29 @@ def tick(verbose: bool = True, adapters=None, loop=None) -> int:
                             job["id"], vs_reason, deliver_content[:200],
                         )
                         deliver_content = _quiet_day_fallback()
+
+                # Artemis briefing — deterministic team attribution paragraph.
+                # See _render_team_attribution_for_briefing docstring for why
+                # this is server-side: five rounds of LLM-prompt enforcement
+                # failed to force canonical 3-line format. Runs after all
+                # LLM steps and quality gates; skipped on quiet-day fallback
+                # (the fallback message reads complete on its own).
+                if (
+                    should_deliver
+                    and success
+                    and _is_briefing_job(job)
+                    and deliver_content != _quiet_day_fallback()
+                ):
+                    origin = _resolve_origin(job)
+                    user_id_for_attr = (origin or {}).get("user_id")
+                    if user_id_for_attr:
+                        attribution = _render_team_attribution_for_briefing(user_id_for_attr)
+                        if attribution:
+                            deliver_content = _inject_attribution_block(deliver_content, attribution)
+                            logger.info(
+                                "Job '%s': prepended team attribution block (%d lines) for user=%s",
+                                job["id"], attribution.count("\n") + 1, user_id_for_attr,
+                            )
 
                 delivery_error = None
                 if should_deliver:
