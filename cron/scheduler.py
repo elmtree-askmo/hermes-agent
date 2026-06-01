@@ -1218,6 +1218,52 @@ def _briefing_silence_directive(job: dict) -> str:
     }.get(tier, "")
 
 
+def _is_delivery_job(job: dict) -> bool:
+    """True for an Executor→Coach delivery cron (S-0429-02). Named
+    ``delivery-<user_id>-<ms>`` by ``_schedule_delivery_cron``."""
+    return str(job.get("name") or "").startswith("delivery-")
+
+
+def _delivery_hold_directive(job: dict) -> str:
+    """B-0601-01 fire-time gate: suppress a delivery push when the user is
+    mid-conversation or just messaged (Coach surfaces the work conversationally
+    instead, and the morning briefing carries it too) so a "packet ready, want
+    me to send it over?" pitch never lands on a live / emotional moment.
+
+    Runs the Artemis helper ``scripts/compute-delivery-hold.py`` (stdlib-only,
+    plain python3), keyed off ``job.origin.user_id`` — same subprocess pattern
+    as ``_briefing_silence``. Fail-open to "" (no hold → deliver) on any error,
+    so an unreadable clock never permanently swallows the team's progress push.
+    """
+    user_id = (job.get("origin") or {}).get("user_id")
+    if not user_id:
+        return ""
+    script = get_hermes_home() / "scripts" / "compute-delivery-hold.py"
+    if not script.exists():
+        return ""
+    try:
+        proc = subprocess.run(
+            ["python3", str(script), user_id],
+            capture_output=True, text=True, timeout=3, check=False,
+        )
+        if proc.returncode != 0 or not proc.stdout.strip():
+            return ""
+        data = json.loads(proc.stdout.strip())
+    except (subprocess.SubprocessError, OSError, json.JSONDecodeError):
+        return ""
+    if not data.get("hold"):
+        return ""
+    return (
+        "DELIVERY_HOLD: The user is mid-conversation or just messaged. Do NOT "
+        "post this delivery now — respond with exactly \"[SILENT]\" (nothing "
+        "else). This overrides any earlier instruction in this prompt to always "
+        "send a message. The completed work is not lost: you will surface it in "
+        "your next conversational reply (you read archive[] there) and the "
+        "morning briefing carries it too. Pushing it now would interrupt a live "
+        "moment."
+    )
+
+
 def _build_job_prompt(job: dict) -> str:
     """Build the effective prompt for a cron job, optionally loading one or more skills first."""
     prompt = job.get("prompt", "")
@@ -1286,10 +1332,16 @@ def _build_job_prompt(job: dict) -> str:
         # silent (or suppress it via [SILENT] on non-check-in silent days).
         silence_directive = _briefing_silence_directive(job)
 
+    # B-0601-01: a delivery push (S-0429-02) is suppressed at fire time when the
+    # user is mid-conversation / just messaged, so it never interrupts a live or
+    # emotional moment. Skill-less job, so this rides the no-skills trailer path.
+    delivery_directive = ""
+    if _is_delivery_job(job):
+        delivery_directive = _delivery_hold_directive(job)
+
     # Trailing directives, applied to both the no-skills and skills paths below.
-    # silence_directive goes last so its [SILENT] instruction (when present)
-    # dominates the footer.
-    trailers = [d for d in (footer_line, silence_directive) if d]
+    # The [SILENT] directives go last so they dominate the footer.
+    trailers = [d for d in (footer_line, silence_directive, delivery_directive) if d]
 
     if not skill_names:
         if trailers:
