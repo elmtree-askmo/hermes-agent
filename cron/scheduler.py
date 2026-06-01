@@ -340,6 +340,7 @@ Return a JSON object with EXACTLY these fields:
     "publicist": "<one sentence describing what Publicist did/produced, or null>"
   }},
   "coaches_take": "<first-person, second-person-addressed summary, no reasoning>",
+  "observation": "<if the Coach proactively named a recurring CROSS-SESSION pattern the user did NOT raise this turn, copy that WHOLE beat VERBATIM — the across-our-conversations framing + the substance/affect + its correction invitation; else null>",
   "tone_signal": "low_pressure" | "neutral" | "urgent"
 }}
 
@@ -351,7 +352,8 @@ Rules:
   - analyst: positioning recommendations, profile comparisons, strategy adjustments, cohort signals, gap analyses
   - publicist: resumes tailored, cover letters drafted, outreach materials prepared, follow-up emails ready
   Look at the raw output and any mention of work attributed to a sub-agent (by name, emoji, or by work type). When unsure, prefer null over guessing — better empty than fabricated.
-- coaches_take: the core judgment distilled to 1-3 sentences. MUST be first-person Coach voice ("I'll...", "The signal is...", "You've done..."). NEVER include any person's name (first or last). No third-person pronouns (she/he/they) referring to the user. Replace any name with "they" or rephrase to second-person ("you").
+- coaches_take: the core judgment distilled to 1-3 sentences. MUST be first-person Coach voice ("I'll...", "The signal is...", "You've done..."). NEVER include any person's name (first or last). No third-person pronouns (she/he/they) referring to the user. Replace any name with "they" or rephrase to second-person ("you"). Do NOT put the proactive cross-session observation here — that goes in `observation`, intact.
+- observation: if the raw output proactively surfaces a recurring CROSS-SESSION pattern (the Coach naming something the user did NOT raise this turn — e.g. "one thing I've noticed across our conversations…", a recurring emotional theme, a pattern in how the user talks about their work), copy that WHOLE beat VERBATIM into this field: the across-sessions framing, the substance/affect, AND its correction invitation ("tell me if I'm wrong" / "push back" / "flip it back"). null if absent. Do NOT distil, paraphrase, soften, or fold it into coaches_take — it is a Coach-initiated observation; its exact framing + correction handle must reach the user intact.
 - tone_signal: emotional register the Coach intended.
 
 Do NOT output any reasoning. Your entire response must be valid JSON and nothing else.
@@ -373,6 +375,7 @@ Rules:
   ✍️ *Publicist* <sentence from team_work.publicist>
   Place this paragraph BEFORE the Follow-ups block, separated by a blank line. If <2 non-null fields, skip the paragraph entirely (do not render single-sub-agent attribution).
 - coaches_take goes into \U0001f4ac Coach's Take verbatim (you may lightly polish but preserve meaning).
+- observation: if non-null, render it as its OWN beat (its own short paragraph inside the Coach's Take area), VERBATIM — preserve the across-our-conversations framing, the substance/affect, and the correction invitation exactly. Do NOT paraphrase, shorten, soften, or merge it into the rest of coaches_take. REQUIRED whenever present (it is a Coach-initiated observation and the user must get its exact framing + the handle to push back).
 - SILENCE CHECK-IN: if the package contains a "silence_tier" field, the user has gone quiet for days and this is a low-key re-engagement message, NOT a normal briefing. Override the format above entirely — plain text only, no code block, no Follow-ups/New Roles sections, no team attribution, no "Coach's Take" header:
   - "day1": one brief, warm line noting it's been quiet, plus at most ONE fresh lead drawn from follow_ups/team_work if present. 1-2 sentences total. Low-key, not a full briefing.
   - "day5": 1-2 empathetic, no-agenda sentences checking in, and offer an explicit option to pause the daily updates. Do not list any follow-ups or roles.
@@ -1264,6 +1267,42 @@ def _delivery_hold_directive(job: dict) -> str:
     )
 
 
+def _observation_directive(job: dict) -> str:
+    """S-0601-05: voice ONE eligible cross-session observation proactively in the
+    morning briefing (Coach speaks first, naming a recurring pattern). Runs the
+    Artemis helper ``scripts/compute-observation-surface.py`` (which selects +
+    records one observation), keyed off ``job.origin.user_id`` — same subprocess
+    pattern as ``_briefing_silence``. The caller gates on the silence tier (engaged
+    only). Fail-open to "" (no observation) on any error."""
+    user_id = (job.get("origin") or {}).get("user_id")
+    if not user_id:
+        return ""
+    script = get_hermes_home() / "scripts" / "compute-observation-surface.py"
+    if not script.exists():
+        return ""
+    try:
+        proc = subprocess.run(
+            ["python3", str(script), user_id],
+            capture_output=True, text=True, timeout=5, check=False,
+        )
+        if proc.returncode != 0 or not proc.stdout.strip():
+            return ""
+        data = json.loads(proc.stdout.strip())
+    except (subprocess.SubprocessError, OSError, json.JSONDecodeError):
+        return ""
+    obs = data.get("observation")
+    if not obs or not obs.get("text"):
+        return ""
+    return (
+        "OBSERVATION: Voice this cross-session observation as ONE hedged, "
+        "first-person beat, tied to a concrete next step, with a correct-out line "
+        "(the user did NOT raise it — invite them to push back or flip it). Do not "
+        "stack it onto the roles or follow-ups; one beat. Do NOT act on it or "
+        "change strategy — just name it.\n"
+        f"\"{obs['text']}\""
+    )
+
+
 def _build_job_prompt(job: dict) -> str:
     """Build the effective prompt for a cron job, optionally loading one or more skills first."""
     prompt = job.get("prompt", "")
@@ -1320,6 +1359,7 @@ def _build_job_prompt(job: dict) -> str:
     # Gated on skill=artemis-briefing to avoid leaking into other cron jobs.
     footer_line = ""
     silence_directive = ""
+    observation_directive = ""
     if "artemis-briefing" in skill_names:
         completed = (job.get("repeat") or {}).get("completed", 0) or 0
         if completed < 3:
@@ -1331,6 +1371,11 @@ def _build_job_prompt(job: dict) -> str:
         # S-0525-02 Domain 6: tier the briefing by how long the user has been
         # silent (or suppress it via [SILENT] on non-check-in silent days).
         silence_directive = _briefing_silence_directive(job)
+        # S-0601-05: on engaged days only (no silence directive), voice one
+        # eligible cross-session observation proactively. Never push an
+        # observation to a user who's gone quiet.
+        if not silence_directive:
+            observation_directive = _observation_directive(job)
 
     # B-0601-01: a delivery push (S-0429-02) is suppressed at fire time when the
     # user is mid-conversation / just messaged, so it never interrupts a live or
@@ -1341,7 +1386,7 @@ def _build_job_prompt(job: dict) -> str:
 
     # Trailing directives, applied to both the no-skills and skills paths below.
     # The [SILENT] directives go last so they dominate the footer.
-    trailers = [d for d in (footer_line, silence_directive, delivery_directive) if d]
+    trailers = [d for d in (footer_line, silence_directive, observation_directive, delivery_directive) if d]
 
     if not skill_names:
         if trailers:
