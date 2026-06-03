@@ -1326,3 +1326,68 @@ class TestProgressMessageThread:
             "so each @mention starts its own thread"
         )
         assert msg_event.message_id == "2000000000.000001"
+
+
+class TestThreadContextBotParent:
+    """B-0603-01 (ported from upstream c0d25df31): a cron-delivered message (e.g. a
+    briefing) is a bot message that is also the thread parent — the message a reply
+    is explicitly answering. The thread-context fetcher must carry it into context
+    (it never entered the conversation session). Per upstream semantics it skips
+    only *our own* prior bot replies (msg user == this workspace's bot user id);
+    the thread parent is kept even when bot-posted, and third-party bot children
+    are kept too."""
+
+    @pytest.mark.asyncio
+    async def test_bot_thread_parent_is_included(self, adapter):
+        # Our own cron bot posted the briefing (user == self bot uid) — still kept
+        # because it is the thread parent the user is replying to.
+        adapter._team_bot_user_ids = {"T1": "U_COACH"}
+        adapter._resolve_user_name = AsyncMock(return_value="Coach")
+        parent_ts, current_ts = "1780448450.276139", "1780451874.000100"
+        adapter._app.client.conversations_replies = AsyncMock(return_value={
+            "messages": [
+                {"ts": parent_ts, "bot_id": "B_COACH", "user": "U_COACH",
+                 "text": "It's been a bit quiet — one lead: PM, API Infrastructure at OpenAI."},
+                {"ts": current_ts, "user": "U_USER", "text": "send to me"},
+            ]
+        })
+        ctx = await adapter._fetch_thread_context("D_DM", parent_ts, current_ts, team_id="T1")
+        assert "OpenAI" in ctx          # the bot thread-parent (briefing) reached context
+        assert "thread parent" in ctx
+        assert ctx.startswith("[Thread context")
+
+    @pytest.mark.asyncio
+    async def test_own_bot_nonparent_reply_skipped(self, adapter):
+        # A non-parent message from OUR OWN bot is circular context — skipped.
+        adapter._team_bot_user_ids = {"T1": "U_COACH"}
+        adapter._resolve_user_name = AsyncMock(return_value="Howie")
+        parent_ts, mid_bot_ts, current_ts = "100.1", "100.5", "100.9"
+        adapter._app.client.conversations_replies = AsyncMock(return_value={
+            "messages": [
+                {"ts": parent_ts, "user": "U_USER", "text": "what roles are open?"},
+                {"ts": mid_bot_ts, "bot_id": "B_COACH", "user": "U_COACH",
+                 "text": "Here are 5 roles you might like."},
+                {"ts": current_ts, "user": "U_USER", "text": "send to me"},
+            ]
+        })
+        ctx = await adapter._fetch_thread_context("D_DM", parent_ts, current_ts, team_id="T1")
+        assert "5 roles" not in ctx                # our own non-parent bot reply skipped
+        assert "what roles are open?" in ctx       # user thread-parent still included
+
+    @pytest.mark.asyncio
+    async def test_third_party_bot_child_kept(self, adapter):
+        # A non-parent message from a DIFFERENT bot is useful third-party context — kept.
+        adapter._team_bot_user_ids = {"T1": "U_COACH"}
+        adapter._resolve_user_name = AsyncMock(return_value="Bot")
+        parent_ts, other_bot_ts, current_ts = "200.1", "200.5", "200.9"
+        adapter._app.client.conversations_replies = AsyncMock(return_value={
+            "messages": [
+                {"ts": parent_ts, "user": "U_USER", "text": "what roles are open?"},
+                {"ts": other_bot_ts, "bot_id": "B_GITHUB", "user": "U_GITHUB",
+                 "text": "GitHub: 3 new PRs need review."},
+                {"ts": current_ts, "user": "U_USER", "text": "anything else?"},
+            ]
+        })
+        ctx = await adapter._fetch_thread_context("D_DM", parent_ts, current_ts, team_id="T1")
+        assert "3 new PRs" in ctx                  # third-party bot child kept
+        assert "what roles are open?" in ctx

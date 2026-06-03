@@ -1415,11 +1415,31 @@ class SlackAdapter(BasePlatformAdapter):
                 # Skip the current message (the one that triggered this fetch)
                 if msg_ts == current_ts:
                     continue
-                # Skip bot messages from ourselves
-                if msg.get("bot_id") or msg.get("subtype") == "bot_message":
+
+                is_parent = msg_ts == thread_ts
+                is_bot = bool(msg.get("bot_id")) or msg.get("subtype") == "bot_message"
+                msg_user = msg.get("user", "")
+
+                # Identify "our own" bot for this workspace (multi-workspace safe).
+                msg_team = msg.get("team") or team_id
+                self_bot_uid = (
+                    self._team_bot_user_ids.get(msg_team) if msg_team else None
+                ) or self._bot_user_id
+
+                # Exclude only our own prior bot replies (circular context).
+                # Keep:
+                #   - the thread parent even if it was posted by a bot
+                #     (e.g. a cron job summary we are now replying to);
+                #   - other bots' child messages (useful third-party context).
+                # (B-0603-01; ported from upstream c0d25df31)
+                if (
+                    is_bot
+                    and not is_parent
+                    and self_bot_uid
+                    and msg_user == self_bot_uid
+                ):
                     continue
 
-                msg_user = msg.get("user", "unknown")
                 msg_text = msg.get("text", "").strip()
                 if not msg_text:
                     continue
@@ -1429,12 +1449,12 @@ class SlackAdapter(BasePlatformAdapter):
                 if bot_uid:
                     msg_text = msg_text.replace(f"<@{bot_uid}>", "").strip()
 
-                # Mark the thread parent
-                is_parent = msg_ts == thread_ts
                 prefix = "[thread parent] " if is_parent else ""
-
-                # Resolve user name (cached)
-                name = await self._resolve_user_name(msg_user, chat_id=channel_id)
+                display_user = msg_user or "unknown"
+                # Prefer the bot's own name when the message is a bot post.
+                if is_bot and not display_user:
+                    display_user = msg.get("username") or "bot"
+                name = await self._resolve_user_name(display_user, chat_id=channel_id)
                 context_parts.append(f"{prefix}{name}: {msg_text}")
 
             if not context_parts:
