@@ -276,12 +276,17 @@ class TestSlackThreadContext:
 
     @pytest.mark.asyncio
     async def test_skips_bot_messages(self):
+        # Post-B-0603-01 the fetcher skips only *our own* prior bot replies
+        # (msg user == this workspace's bot uid). A non-parent message from our
+        # own bot (U_BOT) is circular context and must be skipped; the thread
+        # parent and third-party bots are kept (covered in test_slack.py).
         adapter = _make_adapter()
         mock_client = adapter._team_clients["T1"]
         mock_client.conversations_replies = AsyncMock(return_value={
             "messages": [
                 {"ts": "1000.0", "user": "U1", "text": "Parent"},
-                {"ts": "1000.1", "bot_id": "B1", "text": "Bot reply (should be skipped)"},
+                {"ts": "1000.1", "bot_id": "B1", "user": "U_BOT",
+                 "text": "Bot reply (should be skipped)"},
                 {"ts": "1000.2", "user": "U1", "text": "Current"},
             ]
         })
