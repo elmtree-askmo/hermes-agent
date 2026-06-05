@@ -916,6 +916,7 @@ class SlackAdapter(BasePlatformAdapter):
                     channel_id=channel_id,
                     thread_ts=event_thread_ts,
                     user_id=user_id,
+                    is_dm=is_dm,
                 )
             )
             if not reply_to_bot_thread and not in_mentioned_thread and not has_session:
@@ -938,6 +939,7 @@ class SlackAdapter(BasePlatformAdapter):
             channel_id=channel_id,
             thread_ts=event_thread_ts,
             user_id=user_id,
+            is_dm=is_dm,
         ):
             thread_context = await self._fetch_thread_context(
                 channel_id=channel_id,
@@ -1515,6 +1517,7 @@ class SlackAdapter(BasePlatformAdapter):
         channel_id: str,
         thread_ts: str,
         user_id: str,
+        is_dm: bool = False,
     ) -> bool:
         """Check if there's an active session for a thread.
 
@@ -1525,6 +1528,11 @@ class SlackAdapter(BasePlatformAdapter):
         construction — avoids the bug where manual key building didn't
         respect ``thread_sessions_per_user`` and ``group_sessions_per_user``
         settings correctly.
+
+        ``is_dm`` must reflect the channel type: DM thread sessions are keyed
+        under the ``dm`` branch (``agent:main:slack:dm:<chat>:<thread>``), so a
+        hardcoded ``group`` chat type would never match a stored DM thread
+        session — making the lookup always miss for DMs.
         """
         session_store = getattr(self, "_session_store", None)
         if not session_store:
@@ -1536,7 +1544,7 @@ class SlackAdapter(BasePlatformAdapter):
             source = SessionSource(
                 platform=Platform.SLACK,
                 chat_id=channel_id,
-                chat_type="group",
+                chat_type="dm" if is_dm else "group",
                 user_id=user_id,
                 thread_id=thread_ts,
             )

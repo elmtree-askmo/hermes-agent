@@ -839,6 +839,41 @@ class TestThreadReplyHandling:
         await adapter._handle_slack_message(event)
         adapter.handle_message.assert_not_called()
 
+    @pytest.mark.asyncio
+    async def test_dm_thread_reply_with_session_skips_context_refetch(
+        self, adapter_with_session_store, mock_session_store
+    ):
+        """A DM thread reply must NOT re-fetch/re-inject thread context once a
+        DM thread session already exists (B-0603-02).
+
+        DM thread sessions are keyed under the ``dm`` branch
+        (``agent:main:slack:dm:<chat>:<thread>``).  ``_has_active_session_for_thread``
+        used to hardcode ``chat_type="group"``, so its lookup key never matched the
+        stored ``dm`` key → the Gate-B trigger fired on every DM thread reply and
+        re-prepended a growing ``[Thread context]`` block into the session.
+        """
+        session_key = "agent:main:slack:dm:D_DM:100.000"
+        mock_session_store._entries = {session_key: MagicMock()}
+        adapter_with_session_store._fetch_thread_context = AsyncMock(
+            return_value="[Thread context ...] "
+        )
+
+        event = {
+            "text": "follow up",
+            "user": "U_USER",
+            "channel": "D_DM",
+            "ts": "100.456",
+            "thread_ts": "100.000",  # reply in DM thread 100.000
+            "channel_type": "im",
+            "team": "T_TEAM",
+        }
+        await adapter_with_session_store._handle_slack_message(event)
+
+        # Session exists → no re-fetch, no re-injection.
+        adapter_with_session_store._fetch_thread_context.assert_not_called()
+        msg_event = adapter_with_session_store.handle_message.call_args[0][0]
+        assert msg_event.text == "follow up"
+
 
 # ---------------------------------------------------------------------------
 # TestUserNameResolution
