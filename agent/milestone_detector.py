@@ -91,14 +91,43 @@ def render_milestone_block(milestone: dict[str, Any] | None) -> str:
     )
 
 
+# Completion-report signal words. The affirm only fires on a turn where the user
+# is reporting that a milestone just landed (they submitted / sent an application).
+# On a generic turn ("what's next") we neither inject nor mark, so the tier waits
+# for the turn where crediting it is natural — instead of being burned silently.
+# Deterministic word-list, not an LLM: routing is a closed classification, kept
+# off the prompt-compliance path (the affirm voicing is the only LLM-judged part).
+_COMPLETION_SIGNALS = (
+    "submitted", "submit", "sent it", "sent the", "sent off", "just sent",
+    "applied", "application in", "fired off", "shipped it", "put it in",
+    "got it in", "out the door", "hit submit",
+)
+
+
+def user_reported_completion(text: str | None) -> bool:
+    """True when the user's turn reads as reporting a just-completed application.
+
+    Deterministic substring match against ``_COMPLETION_SIGNALS`` (case-insensitive).
+    Gates the milestone affirm injection: only a completion-report turn injects +
+    marks, so a generic turn never burns an un-voiced tier. Conservative — an
+    ambiguous turn returns False (the affirm waits for a clearer report), matching
+    the "over-affirm fails safe toward silence" stance.
+    """
+    if not text or not isinstance(text, str):
+        return False
+    low = text.lower()
+    return any(sig in low for sig in _COMPLETION_SIGNALS)
+
+
 def mark_milestone_affirmed(user_dir: Path, tier: str) -> None:
     """Append ``tier`` to the persisted ``milestones_affirmed[]`` ledger.
 
-    Optimistic dedup mark — written before Coach replies so the milestone fires
-    exactly once per tier whether or not Coach voices it. Idempotent. Best-effort:
-    a write/parse failure is swallowed (a missed mark costs at most one re-affirm,
-    far less bad than raising inside the gateway turn). Writes the full strategy
-    back, so it never truncates the archive.
+    Dedup mark — written on a completion-report turn (the gateway gates the whole
+    inject+mark on ``user_reported_completion``), so the tier is consumed only when
+    the affirm is actually due, not on an unrelated generic turn. Idempotent.
+    Best-effort: a write/parse failure is swallowed (a missed mark costs at most one
+    re-affirm, far less bad than raising inside the gateway turn). Writes the full
+    strategy back, so it never truncates the archive.
     """
     strategy_path = Path(user_dir) / "strategy.json"
     try:

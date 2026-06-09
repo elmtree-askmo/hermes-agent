@@ -2707,23 +2707,34 @@ class GatewayRunner:
                             )
                     except Exception:
                         _ms_onboarded = False
+                # Only on a turn where the user reports the milestone just landed
+                # ("just submitted the Oakwell one"). On a generic turn ("what's
+                # next") Coach naturally answers the ask and the affirm would have
+                # to wedge in front of it — so we neither inject nor mark, letting
+                # the tier wait for the completion-report turn where crediting is
+                # natural. Gating on the user's own message (deterministic input)
+                # rather than post-hoc judging Coach's reply keeps the dedup mark
+                # aligned with when the affirm actually fires.
+                _ms_user_text = getattr(event, "text", "") or ""
                 if _ms_onboarded:
                     from agent.milestone_detector import (
                         detect_milestone,
                         render_milestone_block,
                         mark_milestone_affirmed,
+                        user_reported_completion,
                     )
-                    _ms = detect_milestone(_ms_user_dir)
-                    if _ms:
-                        _ms_block = render_milestone_block(_ms)
-                        if _ms_block:
-                            context_prompt = context_prompt + "\n" + _ms_block
-                            mark_milestone_affirmed(_ms_user_dir, _ms["tier"])
-                            logger.info(
-                                "milestone affirm injected: chat=%s tier=%s count=%s",
-                                source.chat_id or "unknown",
-                                _ms["tier"], _ms["count"],
-                            )
+                    if user_reported_completion(_ms_user_text):
+                        _ms = detect_milestone(_ms_user_dir)
+                        if _ms:
+                            _ms_block = render_milestone_block(_ms)
+                            if _ms_block:
+                                context_prompt = context_prompt + "\n" + _ms_block
+                                mark_milestone_affirmed(_ms_user_dir, _ms["tier"])
+                                logger.info(
+                                    "milestone affirm injected: chat=%s tier=%s count=%s",
+                                    source.chat_id or "unknown",
+                                    _ms["tier"], _ms["count"],
+                                )
         except Exception as _ms_err:  # noqa: BLE001
             logger.debug("milestone block injection failed: %s", _ms_err)
 

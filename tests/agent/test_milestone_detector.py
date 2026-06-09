@@ -16,6 +16,7 @@ from agent.milestone_detector import (
     detect_milestone,
     render_milestone_block,
     mark_milestone_affirmed,
+    user_reported_completion,
 )
 
 
@@ -139,3 +140,35 @@ class TestMark:
         assert m["tier"] == "apps_3"
         mark_milestone_affirmed(ud, "apps_3")
         assert detect_milestone(ud) is None
+
+
+class TestUserReportedCompletion:
+    """The affirm injection is gated on the user's turn reporting a completion,
+    so a generic 'what's next' turn never burns an un-voiced tier."""
+
+    @pytest.mark.parametrize("text", [
+        "just submitted the warby parker one",
+        "ok submitted it",
+        "I applied to glossier",
+        "sent it",
+        "sent the topicals app",
+        "just sent off the linnea one",
+        "ok cool, hit submit on that",
+        "got it in before the deadline",
+        "SUBMITTED THE OAKWELL ROLE",  # case-insensitive
+    ])
+    def test_completion_reports_detected(self, text):
+        assert user_reported_completion(text) is True
+
+    @pytest.mark.parametrize("text", [
+        "ok what's next",
+        "cool. what should I focus on now",
+        "show me the pipeline",
+        "how's it looking",
+        "let's do the widening scan",
+        "thanks",
+        "",
+        None,
+    ])
+    def test_generic_turns_not_detected(self, text):
+        assert user_reported_completion(text) is False
