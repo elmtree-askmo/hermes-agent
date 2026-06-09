@@ -2676,6 +2676,57 @@ class GatewayRunner:
         except Exception as _cs_err:  # noqa: BLE001
             logger.debug("cold-start block injection failed: %s", _cs_err)
 
+        # Artemis S-0601-03 — positive milestone affirm injection.
+        # When the user has crossed an un-affirmed application-count tier, inject
+        # a state-reminder so Coach voices a grounded crediting sentence. This is
+        # deterministic (server counts typed archive events) and does NOT depend
+        # on Coach choosing to call get_strategy — the affirm fires reliably on
+        # any turn after the crossing. Marked optimistically (once per tier).
+        # Skipped for cold-start users (no milestones before onboarding).
+        try:
+            import os as _msos
+            _ms_enabled = str(
+                _msos.environ.get("HERMES_ARTEMIS_ENABLED", "")
+            ).strip().lower() in ("1", "true", "yes", "on")
+            _msuid = getattr(source, "user_id", "") or ""
+            if _ms_enabled and _msuid:
+                from pathlib import Path as _MSPath
+                _ms_hh = _msos.environ.get("HERMES_HOME") or str(_MSPath.home() / ".hermes")
+                _ms_user_dir = _MSPath(_ms_hh) / "artemis" / _msuid
+                # Only for onboarded users — a cold-start user has no milestones.
+                _ms_onboarded = (_ms_user_dir / "onboarding_pushed.flag").exists()
+                if not _ms_onboarded:
+                    try:
+                        _ms_pp = _ms_user_dir / "profile.json"
+                        if _ms_pp.exists():
+                            import json as _msjson
+                            _ms_prof = _msjson.loads(_ms_pp.read_text(encoding="utf-8"))
+                            _ms_onboarded = bool(
+                                isinstance(_ms_prof, dict)
+                                and _ms_prof.get("sub_agent_intros_pushed")
+                            )
+                    except Exception:
+                        _ms_onboarded = False
+                if _ms_onboarded:
+                    from agent.milestone_detector import (
+                        detect_milestone,
+                        render_milestone_block,
+                        mark_milestone_affirmed,
+                    )
+                    _ms = detect_milestone(_ms_user_dir)
+                    if _ms:
+                        _ms_block = render_milestone_block(_ms)
+                        if _ms_block:
+                            context_prompt = context_prompt + "\n" + _ms_block
+                            mark_milestone_affirmed(_ms_user_dir, _ms["tier"])
+                            logger.info(
+                                "milestone affirm injected: chat=%s tier=%s count=%s",
+                                source.chat_id or "unknown",
+                                _ms["tier"], _ms["count"],
+                            )
+        except Exception as _ms_err:  # noqa: BLE001
+            logger.debug("milestone block injection failed: %s", _ms_err)
+
         # If the previous session expired and was auto-reset, prepend a notice
         # so the agent knows this is a fresh conversation (not an intentional /reset).
         if getattr(session_entry, 'was_auto_reset', False):
