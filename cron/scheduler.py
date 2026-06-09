@@ -610,6 +610,12 @@ _SUB_AGENT_ATTRIBUTION_REGISTRY = {
 }
 _SUB_AGENT_ATTRIBUTION_ORDER = ("scout", "analyst", "publicist")
 
+# Artemis S-0601-04 — N-day milestone briefing marks, ascending. The simulation
+# anchors 30 days; 60/90 are sparse continuations so the milestone isn't a
+# one-time event for users who stay past a month. Fixed (not configurable) —
+# no current driver needs per-user N-day config.
+_MILESTONE_DAY_MARKS = ((90, "90d"), (60, "60d"), (30, "30d"))
+
 
 def _render_team_attribution_for_briefing(user_id: str) -> str:
     """Render the briefing attribution paragraph from artemis strategy.json.
@@ -692,6 +698,110 @@ def _inject_attribution_block(deliver_content: str, attribution: str) -> str:
     if not deliver_content:
         return attribution
     return f"{attribution}\n\n{deliver_content}"
+
+
+def _render_milestone_block(user_id: str) -> str:
+    """Render the N-day milestone summary block for a briefing (Artemis S-0601-04).
+
+    At 30/60/90 days since signup, returns a counts-only milestone summary
+    (cumulative application_submitted count + a crediting closer) and marks the
+    mark in strategy.json `milestones_emitted[]` so it fires once per mark.
+    Returns "" when no mark is due, the mark already fired, the user has zero
+    applications, or any read/parse step fails (fail-open — the briefing still
+    delivers without the block).
+
+    Days-since-signup is read from the `onboarding_pushed.flag` mtime (written
+    once when onboarding completes). Counts are derived directly from the typed
+    archive (S-0601-02 `event_type == "application_submitted"`) — same direct-count
+    approach as the conversational sibling (agent/milestone_detector.py, S-0601-03);
+    no server-persisted milestone_stats field.
+
+    Counts-only this round: the "when we started, your resume had no metrics"
+    contrast clause is deferred — no start-state capture exists yet (see
+    docs/specs/milestone-briefing.md § Out of Scope).
+    """
+    try:
+        hermes_home_dyn = get_hermes_home()
+        user_dir = hermes_home_dyn / "artemis" / user_id
+        flag_path = user_dir / "onboarding_pushed.flag"
+        strategy_path = user_dir / "strategy.json"
+        if not flag_path.exists() or not strategy_path.exists():
+            return ""
+        signup_ts = datetime.fromtimestamp(flag_path.stat().st_mtime, tz=timezone.utc)
+        strategy = json.loads(strategy_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        logger.warning("milestone render: read failed user=%s err=%s", user_id, exc)
+        return ""
+    if not isinstance(strategy, dict):
+        return ""
+
+    days_since = (datetime.now(timezone.utc) - signup_ts).days
+    emitted = set(strategy.get("milestones_emitted") or [])
+
+    # Highest due, un-emitted mark — lower marks for an aged user are implicitly past.
+    due_mark = None
+    for mark_days, mark_id in _MILESTONE_DAY_MARKS:
+        if days_since >= mark_days and mark_id not in emitted:
+            due_mark = (mark_days, mark_id)
+            break
+    if due_mark is None:
+        return ""
+    mark_days, mark_id = due_mark
+
+    archive = strategy.get("archive") or []
+    app_count = sum(
+        1 for a in archive
+        if isinstance(a, dict) and a.get("event_type") == "application_submitted"
+    )
+
+    # The mark is time-based, so record it now even when there's nothing to voice
+    # (zero apps) — otherwise it would re-evaluate (and stay empty) every briefing.
+    _mark_milestone_emitted(strategy_path, strategy, mark_id)
+
+    if app_count == 0:
+        return ""
+
+    noun = "application" if app_count == 1 else "applications"
+    return (
+        f"{mark_days} days in. You've sent {app_count} tailored {noun}. "
+        "That's all you — we just made sure nobody missed it."
+    )
+
+
+def _mark_milestone_emitted(strategy_path, strategy: dict, mark_id: str) -> None:
+    """Append `mark_id` to strategy.json `milestones_emitted[]` and persist.
+
+    Best-effort, idempotent. A write failure is swallowed (a missed mark costs at
+    most one re-render next briefing, far less bad than failing the cron job).
+    Writes the full strategy back so the archive is never truncated.
+
+    `milestones_emitted[]` is a distinct ledger from S-0601-03's
+    `milestones_affirmed[]` (conversational tiers) — different surface, different
+    trigger vocabulary (day marks vs. app-count tiers), different writer.
+    """
+    try:
+        emitted = list(strategy.get("milestones_emitted") or [])
+        if mark_id in emitted:
+            return
+        emitted.append(mark_id)
+        strategy["milestones_emitted"] = emitted
+        strategy_path.write_text(json.dumps(strategy, indent=2), encoding="utf-8")
+    except (OSError, TypeError) as exc:
+        logger.warning("milestone mark: write failed mark=%s err=%s", mark_id, exc)
+
+
+def _inject_milestone_block(deliver_content: str, milestone: str) -> str:
+    """Prepend the milestone block to briefing content, ahead of attribution.
+
+    Empty milestone → content unchanged. The milestone is the first paragraph
+    of the message; the caller injects attribution after, so order is
+    milestone → attribution → briefing body.
+    """
+    if not milestone:
+        return deliver_content
+    if not deliver_content:
+        return milestone
+    return f"{milestone}\n\n{deliver_content}"
 
 
 def _persist_briefing_output(job: dict, delivered_text: str) -> None:
@@ -1873,6 +1983,18 @@ def tick(verbose: bool = True, adapters=None, loop=None) -> int:
                             logger.info(
                                 "Job '%s': prepended team attribution block (%d lines) for user=%s",
                                 job["id"], attribution.count("\n") + 1, user_id_for_attr,
+                            )
+                        # Artemis S-0601-04 — N-day milestone summary. Prepended
+                        # AFTER attribution so it lands ahead of it (milestone is
+                        # the first paragraph, then attribution, then body). Same
+                        # deterministic-render rationale as attribution; fires at
+                        # most once per 30/60/90-day mark (milestones_emitted[]).
+                        milestone = _render_milestone_block(user_id_for_attr)
+                        if milestone:
+                            deliver_content = _inject_milestone_block(deliver_content, milestone)
+                            logger.info(
+                                "Job '%s': prepended milestone block for user=%s",
+                                job["id"], user_id_for_attr,
                             )
 
                 delivery_error = None
