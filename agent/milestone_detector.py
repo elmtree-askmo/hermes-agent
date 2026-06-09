@@ -47,9 +47,16 @@ def detect_milestone(user_dir: Path) -> dict[str, Any] | None:
     )
     affirmed = set(strategy.get("milestones_affirmed") or [])
 
+    # An affirmed tier covers every LOWER tier — they were implicitly crossed at
+    # the same time, so a lower tier must never re-fire once a higher one is
+    # affirmed (the dev 2026-06-09 double-inject was apps_2 re-firing after only
+    # apps_3 had been marked). Floor candidate thresholds at the highest affirmed.
+    affirmed_thresholds = [t for tier, t in _APP_TIERS if tier in affirmed]
+    floor = max(affirmed_thresholds) if affirmed_thresholds else 0
+
     chosen = None
     for tier, threshold in _APP_TIERS:
-        if app_count >= threshold and tier not in affirmed:
+        if app_count >= threshold and tier not in affirmed and threshold > floor:
             chosen = tier
     if chosen is None:
         return None

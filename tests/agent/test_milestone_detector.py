@@ -58,6 +58,13 @@ class TestDetect:
         ud = _setup(tmp_path, n_apps=3, affirmed=["apps_2", "apps_3"])
         assert detect_milestone(ud) is None
 
+    def test_lower_tier_not_refired_when_higher_already_affirmed(self, tmp_path):
+        # 3 apps, only apps_3 marked (apps_2 was implicitly crossed at the same
+        # time). apps_2 must NOT re-fire — a higher affirmed tier covers every
+        # lower tier. Regression for the dev 2026-06-09 double-inject.
+        ud = _setup(tmp_path, n_apps=3, affirmed=["apps_3"])
+        assert detect_milestone(ud) is None
+
     def test_fourth_app_no_tier_returns_none(self, tmp_path):
         ud = _setup(tmp_path, n_apps=4, affirmed=["apps_2", "apps_3"])
         assert detect_milestone(ud) is None
