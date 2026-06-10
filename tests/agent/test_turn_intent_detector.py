@@ -925,3 +925,35 @@ class TestParseResponse:
 
     def test_array(self):
         assert tid._parse_response("[1,2]") is None
+
+
+# =========================================================================
+# Prompt-rule guard — emotional event-report with no explicit work request
+# must route to `none` so Coach handles the affect check-in inline, not a
+# premature multi-dispatch (Artemis Scene 4 #1 / Maya post-interview debrief).
+#
+# This is an A-layer guard: it asserts the classification rule survives in
+# the prompt text. The behavioral red-green for this rule is verified on the
+# dev VPS via state-injection (the LLM is mocked out in every unit test
+# here, so a mocked dispatch_type assertion would be tautological).
+# =========================================================================
+
+class TestEmotionalReportRoutesNonePromptRule:
+    def test_prompt_states_report_without_request_is_none(self):
+        prompt = tid._DETECT_PROMPT.lower()
+        # The rule must tie three things together: reporting an outcome/event,
+        # affect being present, and the ABSENCE of an explicit analysis/
+        # review/action request → none (Coach handles inline).
+        assert "report" in prompt
+        assert "none" in prompt
+        # Load-bearing phrase: a report+affect turn with no explicit ask is
+        # NOT a dispatch trigger. Guards against the rule being silently
+        # dropped in a future prompt edit.
+        assert "explicit" in prompt and "request" in prompt
+
+    def test_prompt_distinguishes_report_from_dig_in(self):
+        # The fix must NOT break the real dig-in trigger: an explicit
+        # "dig in" / "walk me through what happened" AFTER a setback still
+        # routes to multi. The prompt must keep that example.
+        prompt = tid._DETECT_PROMPT.lower()
+        assert "dig in" in prompt
