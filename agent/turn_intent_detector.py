@@ -198,6 +198,18 @@ turn as one of:
   there's interview prep; off_domain_no_fallback=false). Set `false`
   for buckets 1, 2, 3, and non_capability.
 
+**ALSO set `affect_report`** (boolean). Set `true` ONLY when ALL hold:
+(a) dispatch_type is `none`, (b) the user is REPORTING an event/outcome
+(an interview, a screen, a recruiter call, a rejection, news), and (c)
+the message carries a FEELING about it (nervous, relieved, "think it
+went ok??", "ugh", excited, deflated) WITHOUT an explicit request for
+analysis / review / a deliverable. These are the turns where Coach
+should lead with ONE affect check-in beat ("how'd it feel?") BEFORE any
+debrief. Set `false` for: pure status updates with no feeling, explicit
+work requests, confirmations, capability questions, and anything that
+dispatches. When unsure, set `false` — a missed check-in beat is milder
+than a forced one on a turn that didn't carry feeling.
+
 Return STRICT JSON, no prose, no markdown fence:
 
 {
@@ -215,6 +227,7 @@ Return STRICT JSON, no prose, no markdown fence:
   "capability_bucket": "non_capability" | 1 | 2 | 3 | 4,
   "user_action_required": true | false,
   "off_domain_no_fallback": true | false,
+  "affect_report": true | false,
   "confidence": "high|medium|low",
   "reasoning": "<one short sentence>"
 }
@@ -356,6 +369,7 @@ def detect_turn_intent(
         "capability_bucket": "non_capability",
         "user_action_required": False,
         "off_domain_no_fallback": False,
+        "affect_report": False,
         "confidence": None,
         "reasoning": None,
     }
@@ -460,6 +474,14 @@ def detect_turn_intent(
     if off_domain_no_fallback and capability_bucket != 4:
         off_domain_no_fallback = False
 
+    # affect_report — strict-true only, so a stringy / numeric LLM value
+    # can't misfire the check-in injection. Only meaningful on a non-
+    # dispatch turn: if the turn dispatches, Coach is acting on it, not
+    # holding affect, so clear the flag.
+    affect_report = parsed.get("affect_report") is True
+    if dispatch_type != "none":
+        affect_report = False
+
     out["checked"] = True
     out["dispatch_type"] = dispatch_type
     out["dispatches"] = dispatches
@@ -467,6 +489,7 @@ def detect_turn_intent(
     out["capability_bucket"] = capability_bucket
     out["user_action_required"] = user_action_required
     out["off_domain_no_fallback"] = off_domain_no_fallback
+    out["affect_report"] = affect_report
     out["confidence"] = parsed.get("confidence") or None
     out["reasoning"] = parsed.get("reasoning") or None
     return out
@@ -579,6 +602,43 @@ def render_capability_block(detection: dict[str, Any]) -> str | None:
             )
 
     return "\n".join(lines)
+
+
+def render_affect_report_block(detection: dict[str, Any]) -> str | None:
+    """Render the affect-report check-in block (Scene 4 #1, second layer).
+
+    Fires when the auxiliary classifier flagged the turn as an emotional
+    event-report with no explicit work request (`affect_report=True`,
+    which the detector only sets on `dispatch_type=none`). It tells Coach
+    to lead with ONE affect check-in beat before any debrief — the prompt-
+    layer half of Scene 4 #1, paired with the routing-layer fix that keeps
+    these turns from being swallowed by a premature multi-dispatch.
+
+    Returns None when not checked or the flag is false (silent — most
+    turns). The block is deliberately light: it asks for one check-in
+    beat, NOT the full strong-affect emotional-posture lockdown (no
+    "forbid all action" — the user reported a concrete event and will
+    want the debrief on the next turn).
+    """
+    if not detection.get("checked"):
+        return None
+    if detection.get("affect_report") is not True:
+        return None
+    return "\n".join([
+        "",
+        "**Affect check-in for this turn** (auxiliary classifier flagged "
+        "this as an emotional event-report — the user is processing how "
+        "something went, not asking for work yet):",
+        "  - Lead with ONE short affect check-in beat — name or invite "
+        "their feeling (e.g., \"how'd it feel overall?\", \"oh nice — how "
+        "are you sitting with it?\") BEFORE any debrief, analysis, "
+        "reframe, or A/B action prompt.",
+        "  - Hold the substantive debrief for the NEXT turn, after they "
+        "answer the check-in. Do not stack analysis + action onto this "
+        "turn. This is one beat, not the full slow-down: the user reported "
+        "a concrete event and will want the debrief shortly — just let "
+        "them tell you how it landed first.",
+    ])
 
 
 def render_injection_block(detection: dict[str, Any]) -> str | None:

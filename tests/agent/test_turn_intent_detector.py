@@ -418,6 +418,117 @@ class TestRenderCapabilityBlock:
 
 
 # =========================================================================
+# affect_report — second-layer signal for Scene 4 #1.
+# When the turn is an emotional event-report with no explicit work request
+# (dispatch_type=none + affect present), the detector flags affect_report so
+# the server can inject a "lead with one affect check-in beat" block. This
+# is the prompt-layer half of Scene 4 #1; the routing half (none vs multi)
+# is the dispatch_type fix above.
+# =========================================================================
+
+def _affect_response(affect_report, dispatch_type="none"):
+    """Stub detector response carrying an affect_report flag.
+
+    For dispatch_type != none, supplies a valid dispatches list so the
+    normalize/cross-check step keeps the dispatch_type (an empty list
+    would demote multi → none and defeat the cross-check under test).
+    """
+    val = "true" if affect_report is True else (
+        "false" if affect_report is False else json.dumps(affect_report)
+    )
+    if dispatch_type == "multi":
+        dispatches = (
+            '[{"sub_agent": "analyst", "id_slug": "diagnose", '
+            '"action": "Diagnose", "announcement": "Analyst is on it."}, '
+            '{"sub_agent": "scout", "id_slug": "find-roles", '
+            '"action": "Find roles", "announcement": "Scout is on it."}]'
+        )
+    elif dispatch_type == "single":
+        dispatches = (
+            '[{"sub_agent": "publicist", "id_slug": "draft", '
+            '"action": "Draft", "announcement": "Publicist is on it."}]'
+        )
+    else:
+        dispatches = "[]"
+    return _fake_response(
+        '{"dispatch_type": "%s", "dispatches": %s, "lead_in": null, '
+        '"capability_bucket": "non_capability", '
+        '"affect_report": %s, '
+        '"confidence": "high", "reasoning": "report with affect"}'
+        % (dispatch_type, dispatches, val)
+    )
+
+
+class TestAffectReportSchema:
+    def test_default_false_on_short_skip(self):
+        result = tid.detect_turn_intent("ok")
+        assert result["affect_report"] is False
+
+    def test_parsed_true(self, monkeypatch):
+        monkeypatch.setattr(
+            "agent.auxiliary_client.call_llm",
+            lambda **kw: _affect_response(True),
+            raising=False,
+        )
+        result = tid.detect_turn_intent(
+            "just got out of the screen, think it went ok?? blanked ugh"
+        )
+        assert result["affect_report"] is True
+
+    @pytest.mark.parametrize("raw", [False, "true", "yes", 1, None, "bogus"])
+    def test_only_strict_true_counts(self, monkeypatch, raw):
+        # Only a JSON boolean true sets the flag — strings / ints / null
+        # must coerce to False so a sloppy LLM output can't misfire the
+        # injection.
+        monkeypatch.setattr(
+            "agent.auxiliary_client.call_llm",
+            lambda **kw: _affect_response(raw),
+            raising=False,
+        )
+        result = tid.detect_turn_intent(
+            "just got out of the screen, think it went ok?? blanked ugh"
+        )
+        assert result["affect_report"] is False
+
+    def test_cleared_when_dispatch_not_none(self, monkeypatch):
+        # affect_report only meaningful on dispatch_type=none — a turn that
+        # dispatches is being acted on, not affect-held. Cross-check clears it.
+        monkeypatch.setattr(
+            "agent.auxiliary_client.call_llm",
+            lambda **kw: _affect_response(True, dispatch_type="multi"),
+            raising=False,
+        )
+        result = tid.detect_turn_intent(
+            "dig in and rewrite my materials and find me three more roles"
+        )
+        # dispatch wins; affect_report must not ride along on a dispatch turn
+        assert result["affect_report"] is False
+
+
+class TestAffectReportBlock:
+    def test_returns_none_when_not_checked(self):
+        assert tid.render_affect_report_block({"checked": False}) is None
+
+    def test_returns_none_when_flag_false(self):
+        assert tid.render_affect_report_block({
+            "checked": True,
+            "affect_report": False,
+        }) is None
+
+    def test_renders_when_flag_true(self):
+        block = tid.render_affect_report_block({
+            "checked": True,
+            "affect_report": True,
+        })
+        assert block is not None
+        # Load-bearing instruction: lead with a one-beat affect check before
+        # any analysis / debrief / action.
+        low = block.lower()
+        assert "check" in low or "feel" in low
+        assert "before" in low
+
+
+# =========================================================================
 # Prompt substitution safety — regression for codex round 5 P2
 # (chained .replace re-templates injected content)
 # =========================================================================

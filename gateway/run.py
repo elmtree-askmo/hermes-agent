@@ -2450,6 +2450,7 @@ class GatewayRunner:
                     detect_turn_intent,
                     render_injection_block,
                     render_capability_block,
+                    render_affect_report_block,
                     render_already_executed_block,
                     render_team_dispatch_executed_block,
                     execute_via_helper,
@@ -2609,6 +2610,18 @@ class GatewayRunner:
                         _detection.get("capability_bucket"),
                         _detection.get("user_action_required"),
                         _detection.get("off_domain_no_fallback"),
+                    )
+
+                # Affect check-in injection (Scene 4 #1, second layer) —
+                # independent of dispatch. When the turn is an emotional
+                # event-report with no explicit work request, ask Coach to
+                # lead with one affect check-in beat before any debrief.
+                _affect_block = render_affect_report_block(_detection)
+                if _affect_block:
+                    context_prompt = context_prompt + "\n" + _affect_block
+                    logger.info(
+                        "turn-intent: chat=%s affect_report_block_len=%d",
+                        _chat, len(_affect_block),
                     )
         except _ArtemisDisabled:
             pass  # Non-Artemis fork deployment — feature off by design.
