@@ -643,6 +643,12 @@ def _render_team_attribution_for_briefing(user_id: str) -> str:
     for item in archive:
         if not isinstance(item, dict):
             continue
+        # Daily job-match completions are excluded: the briefing's New-Roles
+        # section is their single rendering surface, and the most-recent-per-
+        # agent selection below would otherwise let the daily match monopolize
+        # the Scout line every day, masking Scout's other work (rechecks).
+        if str(item.get("id", "")).startswith("job-match-"):
+            continue
         sub_agent = item.get("sub_agent")
         if sub_agent not in _SUB_AGENT_ATTRIBUTION_REGISTRY:
             continue

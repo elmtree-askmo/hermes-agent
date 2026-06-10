@@ -157,6 +157,34 @@ def test_trailing_period_normalized(tmp_path):
     assert "Surfaced 4 roles.." not in out
 
 
+def test_job_match_completion_excluded(tmp_path):
+    # Daily job-match items render in the briefing's New-Roles section instead;
+    # they must not appear here, nor mask older non-match Scout work via the
+    # most-recent-per-agent pick.
+    user_id = "U123"
+    _setup_strategy(tmp_path, user_id, [
+        {"id": "job-match-20260610", "sub_agent": "scout", "completed_at": _iso(-1),
+         "summary": "8 ranked matches — Snowflake PM 84%"},
+        {"id": "scout-recheck-notion", "sub_agent": "scout", "completed_at": _iso(-5),
+         "summary": "Notion still hiring 2 PM roles"},
+    ])
+    with patch("cron.scheduler.get_hermes_home", return_value=tmp_path):
+        out = _render_team_attribution_for_briefing(user_id)
+    assert "ranked matches" not in out
+    assert "Notion still hiring 2 PM roles" in out
+
+
+def test_job_match_only_archive_renders_empty(tmp_path):
+    user_id = "U123"
+    _setup_strategy(tmp_path, user_id, [
+        {"id": "job-match-20260610", "sub_agent": "scout", "completed_at": _iso(-1),
+         "summary": "8 ranked matches"},
+    ])
+    with patch("cron.scheduler.get_hermes_home", return_value=tmp_path):
+        out = _render_team_attribution_for_briefing(user_id)
+    assert out == ""
+
+
 # ---- _inject_attribution_block ---------------------------------------------
 
 
