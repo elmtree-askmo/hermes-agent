@@ -700,6 +700,123 @@ def _inject_attribution_block(deliver_content: str, attribution: str) -> str:
     return f"{attribution}\n\n{deliver_content}"
 
 
+# ---------------------------------------------------------------------------
+# Artemis S-0604-01 Phase B — New Roles delivered as a Block Kit card message,
+# bypassing Phase 6.
+#
+# The briefing's structured roles cannot survive the Phase 6 decide/write
+# distillation (no roles field → collapsed to a prose scout line, apply URLs
+# dropped). So instead of rendering roles in the briefing TEXT, the scheduler
+# reads the persisted job-match artifact (produced by Phase A) and posts the
+# roles as a SEPARATE Block Kit card message to the same chat — identical shape
+# to the conversational send_jobs cards, reusing the globally-registered
+# job_save / job_skip action handlers (gateway/platforms/slack.py).
+# ---------------------------------------------------------------------------
+
+def _match_bar(pct: int, width: int = 10) -> str:
+    pct = max(0, min(100, int(pct)))
+    filled = round(pct * width / 100)
+    return "▓" * filled + "░" * (width - filled)
+
+
+def _build_job_card_blocks(jobs: list) -> list:
+    """Block Kit job cards — mirrors the Artemis send-jobs hook so a briefing
+    card looks identical to a conversational one and reuses the same
+    job_save / job_skip action handlers."""
+    import json as _json
+    blocks: list = []
+    for i, job in enumerate(jobs):
+        if i > 0:
+            blocks.append({"type": "divider"})
+        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": f"*{job['title']}*"}})
+        blocks.append({"type": "context", "elements": [{"type": "mrkdwn", "text": f"{job['company']} · {job['location']}"}]})
+        pct = job.get("match_pct")
+        if isinstance(pct, int) and 0 <= pct <= 100:
+            blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": f"Match: `{_match_bar(pct)}` {pct}%"}})
+        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": f"_Why it fits:_ {job['why']}"}})
+        if job.get("salary"):
+            blocks.append({"type": "context", "elements": [{"type": "mrkdwn", "text": f"Salary: {job['salary']}"}]})
+        blocks.append({"type": "actions", "elements": [
+            {"type": "button", "text": {"type": "plain_text", "text": "View posting"}, "style": "primary", "url": job["url"]},
+            {"type": "button", "text": {"type": "plain_text", "text": "Save"}, "action_id": "job_save",
+             "value": _json.dumps({"job_id": job["job_id"], "title": job["title"],
+                                   "company": job["company"], "location": job["location"], "url": job["url"]})},
+            {"type": "button", "text": {"type": "plain_text", "text": "Skip"}, "action_id": "job_skip", "value": job["job_id"]},
+        ]})
+    return blocks
+
+
+def _render_job_cards_for_briefing(user_id: str) -> list | None:
+    """Read TODAY's job-match artifact and render Block Kit cards.
+
+    job-match is a per-day overwrite artifact (`job-match-<date>.json`): each
+    strategist refresh overwrites the day's file, a new day gets a new file.
+    So the briefing card reads exactly today's file — if it exists, it's the
+    most recent scan that day; if it doesn't (user paused / scan not run), the
+    briefing simply has no card. Reading today's date (not a rolling window)
+    means a stale prior-day artifact is never surfaced. Self-swallowing — any
+    read/parse failure returns None so the briefing text still delivers."""
+    try:
+        today = datetime.now(timezone.utc).strftime("%Y%m%d")
+        artifact_path = (
+            get_hermes_home() / "artemis" / user_id / "jobs" / f"job-match-{today}.json"
+        )
+        if not artifact_path.exists():
+            return None
+        jobs = (json.loads(artifact_path.read_text(encoding="utf-8")).get("jobs")) or []
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(jobs, list):
+        return None
+    valid = [j for j in jobs
+             if isinstance(j, dict) and j.get("title") and j.get("company") and j.get("url")]
+    if not valid:
+        return None
+    # Slack caps one message at 50 blocks. Each job renders up to 7 blocks
+    # (divider + title + company + match + why + salary + actions), so 7 jobs
+    # is the safe ceiling (7*7-1 = 48 ≤ 50). The briefing card is a top-N
+    # snapshot anyway; the user pulls the full set via "send me those" → send_jobs.
+    return _build_job_card_blocks(valid[:7])
+
+
+def _deliver_job_cards(job: dict, blocks: list, loop=None) -> None:
+    """Post the New Roles Block Kit cards as a separate Slack message to the
+    job's origin chat. Best-effort — logs + swallows on any failure (the
+    briefing text already delivered; a card-post failure must not fail the
+    job). Mirrors _deliver_result's async-run handling (run_coroutine_threadsafe
+    when the gateway loop is live, else asyncio.run)."""
+    try:
+        target = _resolve_delivery_target(job)
+        if not target or target.get("platform") != "slack":
+            return
+        chat_id = target.get("chat_id")
+        token = os.environ.get("SLACK_BOT_TOKEN")
+        if not chat_id or not token:
+            logger.warning("Job '%s': New Roles card skipped — chat_id/token missing.", job["id"])
+            return
+        from slack_sdk.web.async_client import AsyncWebClient
+        client = AsyncWebClient(token=token)
+        post_kwargs = {
+            "channel": chat_id,
+            "text": "New roles matched to your resume",  # notification + a11y fallback
+            "blocks": blocks,
+        }
+        # Thread the card under the briefing message (S-0604-01 Phase B) so it
+        # reads as a reply to today's briefing, not a separate top-level post.
+        # Falls back to the origin thread_id, else top-level.
+        thread_ts = job.get("_briefing_msg_ts") or target.get("thread_id")
+        if thread_ts:
+            post_kwargs["thread_ts"] = thread_ts
+        coro = client.chat_postMessage(**post_kwargs)
+        if loop is not None:
+            asyncio.run_coroutine_threadsafe(coro, loop).result(timeout=30)
+        else:
+            asyncio.run(coro)
+        logger.info("Job '%s': delivered New Roles card.", job["id"])
+    except Exception as e:
+        logger.warning("Job '%s': New Roles card delivery failed: %s", job["id"], e)
+
+
 def _render_milestone_block(user_id: str) -> str:
     """Render the N-day milestone summary block for a briefing (Artemis S-0601-04).
 
@@ -1133,6 +1250,7 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
             # Send cleaned text (MEDIA tags stripped) — not the raw content
             text_to_send = cleaned_delivery_content.strip()
             adapter_ok = True
+            send_result = None
             if text_to_send:
                 future = asyncio.run_coroutine_threadsafe(
                     runtime_adapter.send(chat_id, text_to_send, metadata=send_metadata),
@@ -1152,6 +1270,9 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
                 _send_media_via_adapter(runtime_adapter, chat_id, media_files, send_metadata, loop, job)
 
             if adapter_ok:
+                # S-0604-01 Phase B: stash the delivered message ts so the New
+                # Roles card can thread under the briefing (best-effort).
+                job["_briefing_msg_ts"] = getattr(send_result, "message_id", None)
                 logger.info("Job '%s': delivered to %s:%s via live adapter", job["id"], platform_name, chat_id)
                 return None
         except Exception as e:
@@ -1184,6 +1305,8 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
         logger.error("Job '%s': %s", job["id"], msg)
         return msg
 
+    # S-0604-01 Phase B: stash delivered message ts for the New Roles card to thread under.
+    job["_briefing_msg_ts"] = (result or {}).get("message_id")
     logger.info("Job '%s': delivered to %s:%s", job["id"], platform_name, chat_id)
     return None
 
@@ -2005,14 +2128,17 @@ def tick(verbose: bool = True, adapters=None, loop=None) -> int:
                         delivery_error = str(de)
                         logger.error("Delivery failed for job %s: %s", job["id"], de)
 
-                # Artemis S-0511-07 — persist the exact delivered text for
-                # briefing jobs so Coach S2 can replay sections later. Only
-                # fires on successful delivery; helper is self-swallowing on
-                # any failure (logs WARN, never raises). Runs BEFORE
-                # mark_job_run so a persistence raise still wouldn't get here,
-                # but the try/except inside the helper guarantees it.
+                # Artemis S-0511-07 — persist the delivered text (Coach S2 replay)
+                # and S-0604-01 Phase B — post the New Roles card as a separate
+                # Block Kit message (bypasses Phase 6). Both fire only on a
+                # successful briefing delivery; same gate, one block.
                 if should_deliver and delivery_error is None and _is_briefing_job(job):
                     _persist_briefing_output(job, deliver_content)
+                    _origin = _resolve_origin(job)
+                    _card_uid = (_origin or {}).get("user_id")
+                    _cards = _render_job_cards_for_briefing(_card_uid) if _card_uid else None
+                    if _cards:
+                        _deliver_job_cards(job, _cards, loop=loop)
 
                 mark_job_run(job["id"], success, error, delivery_error=delivery_error)
                 executed += 1
