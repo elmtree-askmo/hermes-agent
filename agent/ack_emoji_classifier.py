@@ -1,0 +1,171 @@
+"""Acknowledgment-reaction emoji classifier (Artemis Maya Scene 1 #8).
+
+A narrow auxiliary LLM that picks ONE warmth-reaction emoji to add to the
+user's message, mirroring the PM simulation's 👍/🙌/🔥/💪 reactions on
+user answers. Runs in the gateway's ``on_processing_complete`` hook —
+AFTER Coach's reply is already sent, off the critical path — so its
+latency is invisible to the user.
+
+Design choices (settled during S-... design discussion):
+
+- **Closed-set output.** The LLM returns exactly one of
+  ``fire`` / ``muscle`` / ``raised_hands`` / ``thumbsup`` / ``null``.
+  Anything else is rejected to null (server-side enforcement, not
+  prompt-trust). This is the warmth signal varying by the user's tone;
+  null means "no clear signal — fall back to the mechanical ✅".
+
+- **User text only.** The simulation's emoji choice depends almost
+  entirely on the user's *answer* (9/9 samples), not on what Coach asked.
+  The orthogonal question — "is this turn even a response to Coach?" — is
+  gated deterministically in the Slack adapter (it only invokes this
+  classifier for response turns), so the prior Coach message is neither
+  needed here nor read from the session store (which the adapter has no
+  clean hook-time access to anyway).
+
+- **Separate from turn_intent_detector.** Emoji tone and dispatch routing
+  are two different judgments; bolting an ``ack_emoji`` field onto the
+  detector would (a) couple two jobs into one schema and (b) inherit the
+  detector's 20-char short-message skip — and the sim's reactions land
+  *most* on short answers ("tomorrow", "role fit"). A dedicated narrow
+  classifier sidesteps both, at the cost of one free-model call per turn
+  in the background hook.
+
+**Failures are silent.** Import error / call timeout / parse failure /
+out-of-set value → ``ack_emoji=None``; the gateway falls back to ✅.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+from typing import Any
+
+logger = logging.getLogger(__name__)
+
+# Hard timeout — runs in the background completion hook, but still bounded
+# so a hung auxiliary never leaks a dangling task.
+_DETECT_TIMEOUT_S = 6.0
+
+# Closed set of emoji the classifier may choose. The value is the Slack
+# reaction short-name (what reactions.add expects).
+_VALID_EMOJI = {"fire", "muscle", "raised_hands", "thumbsup"}
+
+_DETECT_PROMPT = """\
+You pick ONE emoji reaction for a career coach ("Coach") to add to the
+user's latest message — the small warmth signal a person leaves on a good
+reply. You are NOT writing text; you only choose the emoji.
+
+User's latest message:
+{user_message}
+
+Choose exactly one, by the TONE of the user's message:
+
+- **fire** — a sharp, vivid take: a strong like/dislike, a decisive
+  exclusion ("the worst job would be X"), an emphatic agreement
+  ("I love it"), or a "doing it right now" follow-through.
+- **muscle** — a let's-go, I'm-in burst of forward energy and commitment
+  ("ok let's go", "I'm in", "ready").
+- **raised_hands** — warm positive feeling or a concrete preference shared
+  ("honestly really good", "thanks", "chicago but open to nyc or la").
+- **thumbsup** — a crisp, plain answer or pick to Coach's question
+  ("tomorrow", "role fit", "yeah", "sounds good").
+- **null** — none of the above. The message is NOT a warm/decisive
+  response to Coach: it's a question, a vent, a report of bad news, neutral
+  logistics, or the user opening a brand-new topic. When unsure, choose
+  null — a missing reaction is fine; a wrong one is not.
+
+Return STRICT JSON, no prose, no markdown fence:
+{
+  "ack_emoji": "fire" | "muscle" | "raised_hands" | "thumbsup" | null
+}
+"""
+
+
+def _parse_response(raw: str) -> dict[str, Any] | None:
+    """Tolerant JSON parse — strips markdown fence, returns None on failure."""
+    if not raw:
+        return None
+    s = raw.strip()
+    if s.startswith("```"):
+        lines = s.splitlines()
+        s = "\n".join(lines[1:-1]) if len(lines) >= 2 else s
+        if s.startswith("json\n"):
+            s = s[5:]
+    try:
+        data = json.loads(s)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(data, dict):
+        return None
+    return data
+
+
+def detect_ack_emoji(user_message: str) -> dict[str, Any]:
+    """Pick a warmth-reaction emoji for the user's turn.
+
+    Args:
+      user_message: The user's most recent message text.
+
+    Returns a uniform schema:
+      {
+        "checked": bool,         # auxiliary LLM call attempted + parsed
+        "skipped": str|None,     # skip reason if not checked
+        "ack_emoji": str|None,   # one of _VALID_EMOJI, or None
+      }
+    """
+    out: dict[str, Any] = {
+        "checked": False,
+        "skipped": None,
+        "ack_emoji": None,
+    }
+
+    if not user_message or not user_message.strip():
+        out["skipped"] = "empty_message"
+        return out
+
+    try:
+        from agent.auxiliary_client import call_llm  # noqa: WPS433
+    except Exception as e:  # noqa: BLE001
+        out["skipped"] = f"client_import_failed:{type(e).__name__}"
+        return out
+
+    # Single substitution; user text inserted as a literal (no re-templating).
+    prompt = _DETECT_PROMPT.replace("{user_message}", user_message)
+
+    try:
+        response = call_llm(
+            task="compression",
+            messages=[
+                {"role": "system", "content": "You return only strict JSON."},
+                {"role": "user", "content": prompt},
+            ],
+            max_tokens=40,
+            temperature=0.0,
+            timeout=_DETECT_TIMEOUT_S,
+        )
+        raw = (response.choices[0].message.content or "").strip()
+    except Exception as e:  # noqa: BLE001
+        out["skipped"] = f"aux_call_failed:{type(e).__name__}"
+        return out
+
+    parsed = _parse_response(raw)
+    if parsed is None:
+        out["skipped"] = "aux_parse_failed"
+        return out
+
+    out["checked"] = True
+    emoji = parsed.get("ack_emoji")
+    out["ack_emoji"] = emoji if emoji in _VALID_EMOJI else None
+    return out
+
+
+def slack_reaction_name(emoji: str | None) -> str | None:
+    """Map a classifier emoji name to its Slack reactions.add short-name.
+
+    The classifier already emits Slack short-names, so this is an identity
+    map gated on the closed set — its job is to reject anything off-set
+    before it reaches reactions.add.
+    """
+    if emoji in _VALID_EMOJI:
+        return emoji
+    return None

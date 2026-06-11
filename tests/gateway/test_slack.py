@@ -672,8 +672,14 @@ class TestReactions:
         assert result is True
 
     @pytest.mark.asyncio
-    async def test_reactions_in_message_flow(self, adapter):
-        """Reactions should be added on receipt and swapped on completion."""
+    async def test_reactions_in_message_flow_non_artemis(self, adapter, monkeypatch):
+        """Non-Artemis (upstream) flow: 👀 on receipt, swapped to ✅ on done.
+
+        This is the generic Hermes lifecycle indicator. Artemis mode
+        (HERMES_ARTEMIS_ENABLED) replaces it with content-aware reactions —
+        see test_ack_emoji_reactions.py. Pin the flag OFF so this asserts
+        the upstream path regardless of ambient env."""
+        monkeypatch.delenv("HERMES_ARTEMIS_ENABLED", raising=False)
         adapter._app.client.reactions_add = AsyncMock()
         adapter._app.client.reactions_remove = AsyncMock()
         adapter._app.client.users_info = AsyncMock(return_value={

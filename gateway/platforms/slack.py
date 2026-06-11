@@ -44,6 +44,19 @@ from gateway.platforms.base import (
 
 logger = logging.getLogger(__name__)
 
+
+def _artemis_enabled() -> bool:
+    """True when this fork runs as Artemis (HERMES_ARTEMIS_ENABLED set).
+
+    Gates Artemis-only reaction behaviour (content-aware warmth emojis in
+    place of the generic 👀/✅ lifecycle reactions). Same flag the
+    turn-intent detector uses in gateway/run.py.
+    """
+    return str(
+        os.environ.get("HERMES_ARTEMIS_ENABLED", "")
+    ).strip().lower() in ("1", "true", "yes", "on")
+
+
 # G3 (S-0429-01 / audit M-8): gateway-side format guard for Slack user IDs.
 # ``U…`` covers normal Slack workspaces; ``W…`` covers Enterprise Grid users.
 # Bot IDs (``B…``) are intentionally excluded — bots are not isolated user
@@ -1062,14 +1075,54 @@ class SlackAdapter(BasePlatformAdapter):
             reply_to_message_id=thread_ts if thread_ts != ts else None,
         )
 
-        # Add 👀 reaction to acknowledge receipt
-        await self._add_reaction(channel_id, ts, "eyes")
+        # Generic Hermes lifecycle reactions (👀 receipt → ✅ done). In
+        # Artemis mode these are suppressed in favour of content-aware warmth
+        # reactions added in on_processing_complete (Maya Scene 1 #8) — the
+        # simulation has no 👀/✅ and only reacts to the user's decisive
+        # answers.
+        if _artemis_enabled():
+            await self.handle_message(msg_event)
+        else:
+            # Add 👀 reaction to acknowledge receipt
+            await self._add_reaction(channel_id, ts, "eyes")
 
-        await self.handle_message(msg_event)
+            await self.handle_message(msg_event)
 
-        # Replace 👀 with ✅ when done
-        await self._remove_reaction(channel_id, ts, "eyes")
-        await self._add_reaction(channel_id, ts, "white_check_mark")
+            # Replace 👀 with ✅ when done
+            await self._remove_reaction(channel_id, ts, "eyes")
+            await self._add_reaction(channel_id, ts, "white_check_mark")
+
+    async def on_processing_complete(
+        self, event: "MessageEvent", success: bool
+    ) -> None:
+        """Artemis: add one content-aware warmth reaction to the user turn.
+
+        Fires after Coach's reply is delivered (off the user's critical
+        path). Suppressed entirely outside Artemis mode, where the generic
+        👀/✅ flow in _handle_slack_message owns reactions.
+
+        The classifier is synchronous; run it in a thread so a slow/hung
+        auxiliary LLM never blocks the event loop. All failures are silent —
+        a missing reaction is fine, a wrong one is not.
+        """
+        if not _artemis_enabled():
+            return
+        ts = event.message_id
+        channel = event.source.chat_id if event.source else None
+        user_text = event.text or ""
+        if not ts or not channel or not user_text.strip():
+            return
+        try:
+            from agent.ack_emoji_classifier import (
+                detect_ack_emoji,
+                slack_reaction_name,
+            )
+            result = await asyncio.to_thread(detect_ack_emoji, user_text)
+            name = slack_reaction_name(result.get("ack_emoji"))
+            if name:
+                await self._add_reaction(channel, ts, name)
+        except Exception as e:  # noqa: BLE001 — never let a reaction break the turn
+            logger.debug("[Slack] ack-emoji reaction skipped: %s", e)
 
     # ----- Approval button support (Block Kit) -----
 
