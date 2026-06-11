@@ -2748,6 +2748,29 @@ class GatewayRunner:
                                     source.chat_id or "unknown",
                                     _ms["tier"], _ms["count"],
                                 )
+                        # Artemis P-0609-01 — post-submission bridge injection.
+                        # Same completion-report gate as the milestone affirm:
+                        # a past-tense submit report is a casual turn for Coach,
+                        # so it skips get_strategy and never sees the next queued
+                        # role. Inject deterministically off the user's message so
+                        # the bridge fires regardless of Coach's tool choice. No
+                        # dedup mark — the offer is harmless to repeat and the item
+                        # leaves the queue once acted on. Ordering (affirm first,
+                        # then bridge) is Coach's per SOUL.md § Juncture A/B/Pause.
+                        from agent.post_submission_bridge import (
+                            detect_next_queued_role,
+                            render_post_submission_bridge_block,
+                        )
+                        _psb_role = detect_next_queued_role(_ms_user_dir)
+                        if _psb_role:
+                            _psb_block = render_post_submission_bridge_block(_psb_role)
+                            if _psb_block:
+                                context_prompt = context_prompt + "\n" + _psb_block
+                                logger.info(
+                                    "post-submission bridge injected: chat=%s role=%s",
+                                    source.chat_id or "unknown",
+                                    _psb_role["id"],
+                                )
         except Exception as _ms_err:  # noqa: BLE001
             logger.debug("milestone block injection failed: %s", _ms_err)
 
