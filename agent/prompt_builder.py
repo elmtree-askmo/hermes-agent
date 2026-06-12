@@ -357,6 +357,13 @@ CONTEXT_FILE_MAX_CHARS = 20_000
 CONTEXT_TRUNCATE_HEAD_RATIO = 0.7
 CONTEXT_TRUNCATE_TAIL_RATIO = 0.2
 
+# Operator-owned agent prompt files (SOUL.md, .hermes.md) are authored by
+# whoever runs the agent, not picked up from arbitrary repos — the 20K
+# defensive limit for repo context files (CLAUDE.md, AGENTS.md, .cursorrules)
+# does not apply to them. A much larger cap still guards against pathological
+# sizes; truncation always logs a WARNING.
+OPERATOR_FILE_MAX_CHARS = 500_000
+
 
 # =========================================================================
 # Skills prompt cache
@@ -830,6 +837,11 @@ def _truncate_content(content: str, filename: str, max_chars: int = CONTEXT_FILE
         return content
     head_chars = int(max_chars * CONTEXT_TRUNCATE_HEAD_RATIO)
     tail_chars = int(max_chars * CONTEXT_TRUNCATE_TAIL_RATIO)
+    logger.warning(
+        "Context file %s exceeds %d chars (%d) — truncating to head %d + tail %d; "
+        "the middle is DROPPED from the system prompt.",
+        filename, max_chars, len(content), head_chars, tail_chars,
+    )
     head = content[:head_chars]
     tail = content[-tail_chars:]
     marker = f"\n\n[...truncated {filename}: kept {head_chars}+{tail_chars} of {len(content)} chars. Use file tools to read the full file.]\n\n"
@@ -912,7 +924,9 @@ def load_soul_md(user_id: Optional[str] = None) -> Optional[str]:
         if not content:
             return None
         content = _scan_context_content(content, "SOUL.md")
-        content = _truncate_content(content, "SOUL.md")
+        # Operator-owned identity file: exempt from the 20K repo-context
+        # limit (see OPERATOR_FILE_MAX_CHARS).
+        content = _truncate_content(content, "SOUL.md", max_chars=OPERATOR_FILE_MAX_CHARS)
     except Exception as e:
         logger.debug("Could not read SOUL.md from %s: %s", soul_path, e)
         return None
@@ -941,7 +955,9 @@ def _load_hermes_md(cwd_path: Path) -> str:
             pass
         content = _scan_context_content(content, rel)
         result = f"## {rel}\n\n{content}"
-        return _truncate_content(result, ".hermes.md")
+        # Operator-owned agent config: exempt from the 20K repo-context
+        # limit (see OPERATOR_FILE_MAX_CHARS).
+        return _truncate_content(result, ".hermes.md", max_chars=OPERATOR_FILE_MAX_CHARS)
     except Exception as e:
         logger.debug("Could not read %s: %s", hermes_md_path, e)
         return ""

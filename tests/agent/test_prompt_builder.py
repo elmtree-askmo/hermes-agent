@@ -138,6 +138,67 @@ class TestTruncateContent:
         result = _truncate_content(content, "exact.md")
         assert result == content
 
+    def test_truncation_emits_warning(self, caplog):
+        content = "x" * (CONTEXT_FILE_MAX_CHARS + 5000)
+        with caplog.at_level(logging.WARNING, logger="agent.prompt_builder"):
+            _truncate_content(content, "AGENTS.md")
+        warnings = [r for r in caplog.records if "AGENTS.md" in r.getMessage()]
+        assert warnings, "truncation must emit a WARNING naming the file"
+
+
+class TestOperatorFileExemption:
+    """SOUL.md and .hermes.md are operator-owned agent prompt files — they
+    must not be subject to the 20K repo-context-file truncation. A much
+    larger pathological cap still applies (with the same marker)."""
+
+    def _big_content(self, total_chars: int) -> str:
+        # Unique marker placed in the middle band that the 14000+4000
+        # head/tail truncation would drop.
+        head = "HEAD " + "a" * 13000
+        middle = "m" * (total_chars - 20000) + " MIDDLE_BAND_MARKER "
+        tail = "b" * 5000 + " TAIL"
+        return head + middle + tail
+
+    def test_soul_md_over_default_limit_not_truncated(self, tmp_path, monkeypatch):
+        from agent.prompt_builder import load_soul_md
+
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        (tmp_path / "SOUL.md").write_text(self._big_content(30000), encoding="utf-8")
+        result = load_soul_md()
+        assert result is not None
+        assert "MIDDLE_BAND_MARKER" in result
+        assert "[...truncated" not in result
+
+    def test_hermes_md_over_default_limit_not_truncated(self, tmp_path):
+        from agent.prompt_builder import _load_hermes_md
+
+        (tmp_path / ".hermes.md").write_text(self._big_content(30000), encoding="utf-8")
+        result = _load_hermes_md(tmp_path)
+        assert "MIDDLE_BAND_MARKER" in result
+        assert "[...truncated" not in result
+
+    def test_soul_md_pathological_cap_still_truncates(self, tmp_path, monkeypatch):
+        from agent.prompt_builder import OPERATOR_FILE_MAX_CHARS, load_soul_md
+
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        (tmp_path / "SOUL.md").write_text(
+            self._big_content(OPERATOR_FILE_MAX_CHARS + 50000), encoding="utf-8"
+        )
+        result = load_soul_md()
+        assert result is not None
+        assert "[...truncated" in result
+        assert len(result) < OPERATOR_FILE_MAX_CHARS + 50000
+
+    def test_agents_md_still_truncated_at_default(self, tmp_path):
+        # Repo-context files keep the 20K defensive limit — the exemption
+        # must not leak beyond the operator-owned files.
+        from agent.prompt_builder import _load_agents_md
+
+        (tmp_path / "AGENTS.md").write_text(self._big_content(30000), encoding="utf-8")
+        result = _load_agents_md(tmp_path)
+        assert "[...truncated" in result
+        assert "MIDDLE_BAND_MARKER" not in result
+
 
 # =========================================================================
 # _parse_skill_file — single-pass skill file reading
