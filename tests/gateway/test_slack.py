@@ -590,6 +590,57 @@ class TestSendTyping:
 
 
 # ---------------------------------------------------------------------------
+# TestStopTyping — clear the assistant.threads.setStatus thinking indicator
+# ---------------------------------------------------------------------------
+
+
+class TestStopTyping:
+    """Slack overrides stop_typing to CLEAR the assistant thinking status.
+
+    The status set by send_typing ("is thinking...") auto-clears only when
+    the bot sends a thread reply. On short-circuit turns (surface_existing /
+    multi-dispatch) the server pushes messages out-of-band and Coach sends
+    no reply, so the status would hang forever. stop_typing must clear it
+    explicitly with setStatus(status="").
+    """
+
+    @pytest.mark.asyncio
+    async def test_clears_status_in_thread(self, adapter):
+        adapter._app.client.assistant_threads_setStatus = AsyncMock()
+        await adapter.stop_typing("C123", metadata={"thread_id": "parent_ts"})
+        adapter._app.client.assistant_threads_setStatus.assert_called_once_with(
+            channel_id="C123",
+            thread_ts="parent_ts",
+            status="",
+        )
+
+    @pytest.mark.asyncio
+    async def test_noop_without_thread(self, adapter):
+        # No thread context → can't target a status; do nothing (don't raise).
+        adapter._app.client.assistant_threads_setStatus = AsyncMock()
+        await adapter.stop_typing("C123")
+        adapter._app.client.assistant_threads_setStatus.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_handles_missing_scope_gracefully(self, adapter):
+        adapter._app.client.assistant_threads_setStatus = AsyncMock(
+            side_effect=Exception("missing_scope")
+        )
+        # Must not raise — clearing is best-effort.
+        await adapter.stop_typing("C123", metadata={"thread_id": "ts1"})
+
+    @pytest.mark.asyncio
+    async def test_uses_thread_ts_fallback(self, adapter):
+        adapter._app.client.assistant_threads_setStatus = AsyncMock()
+        await adapter.stop_typing("C123", metadata={"thread_ts": "fallback_ts"})
+        adapter._app.client.assistant_threads_setStatus.assert_called_once_with(
+            channel_id="C123",
+            thread_ts="fallback_ts",
+            status="",
+        )
+
+
+# ---------------------------------------------------------------------------
 # TestFormatMessage — Markdown → mrkdwn conversion
 # ---------------------------------------------------------------------------
 

@@ -3419,7 +3419,13 @@ class GatewayRunner:
                     event_message_id=event.message_id,
                 )
 
-            # Stop persistent typing indicator now that the agent is done
+            # Stop persistent typing indicator now that the agent is done.
+            # NOTE: the authoritative status teardown (incl. clearing Slack's
+            # assistant status on short-circuit turns) happens in
+            # base.py _process_message_background's finally block, AFTER the
+            # typing loop is cancelled — that is the last writer. This call is
+            # the in-flow stop; it may be re-set by a trailing _keep_typing
+            # tick, which the finally teardown then clears.
             try:
                 _typing_adapter = self.adapters.get(source.platform)
                 if _typing_adapter and hasattr(_typing_adapter, "stop_typing"):
@@ -3708,7 +3714,8 @@ class GatewayRunner:
             return response
             
         except Exception as e:
-            # Stop typing indicator on error too
+            # Stop typing indicator on error too. (Slack status teardown is
+            # handled by base.py's finally block; this is the in-flow stop.)
             try:
                 _err_adapter = self.adapters.get(source.platform)
                 if _err_adapter and hasattr(_err_adapter, "stop_typing"):

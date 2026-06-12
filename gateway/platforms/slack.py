@@ -383,6 +383,33 @@ class SlackAdapter(BasePlatformAdapter):
             # in an assistant-enabled context. Falls back to reactions.
             logger.debug("[Slack] assistant.threads.setStatus failed: %s", e)
 
+    async def stop_typing(self, chat_id: str, metadata=None) -> None:
+        """Clear the assistant thinking status set by send_typing.
+
+        The "is thinking..." status set via assistant.threads.setStatus
+        auto-clears only when the bot sends a thread reply. On short-circuit
+        turns (surface_existing / multi-dispatch) the server pushes messages
+        out-of-band and Coach sends no reply through the adapter, so the
+        status would hang and Slack keeps cycling its placeholder text. Clear
+        it explicitly with an empty status. Best-effort — no thread context
+        or a missing scope just means nothing to clear.
+        """
+        if not self._app:
+            return
+        thread_ts = None
+        if metadata:
+            thread_ts = metadata.get("thread_id") or metadata.get("thread_ts")
+        if not thread_ts:
+            return
+        try:
+            await self._get_client(chat_id).assistant_threads_setStatus(
+                channel_id=chat_id,
+                thread_ts=thread_ts,
+                status="",
+            )
+        except Exception as e:
+            logger.debug("[Slack] assistant.threads.setStatus clear failed: %s", e)
+
     def _resolve_thread_ts(
         self,
         reply_to: Optional[str] = None,

@@ -653,11 +653,14 @@ class BasePlatformAdapter(ABC):
         """
         pass
 
-    async def stop_typing(self, chat_id: str) -> None:
-        """Stop a persistent typing indicator (if the platform uses one).
+    async def stop_typing(self, chat_id: str, metadata=None) -> None:
+        """Stop / clear a typing or status indicator (if the platform uses one).
 
-        Override in subclasses that start background typing loops.
-        Default is a no-op for platforms with one-shot typing indicators.
+        Override in subclasses that start background typing loops or set a
+        thread status that does not auto-clear. `metadata` carries thread
+        context (thread_id / thread_ts) for platforms whose indicator is
+        thread-scoped (e.g. Slack's assistant status). Default is a no-op
+        for platforms with one-shot typing indicators.
         """
         pass
     
@@ -978,9 +981,13 @@ class BasePlatformAdapter(ABC):
             # _keep_typing may have called send_typing() after an outer
             # stop_typing() cleared the task dict, recreating the loop.
             # Cancelling _keep_typing alone won't clean that up.
+            # Pass metadata so thread-scoped status indicators (Slack's
+            # assistant status) can be cleared here — this teardown runs
+            # AFTER the typing loop is cancelled, so it's the last writer
+            # and won't be re-set by another send_typing tick.
             if hasattr(self, "stop_typing"):
                 try:
-                    await self.stop_typing(chat_id)
+                    await self.stop_typing(chat_id, metadata=metadata)
                 except Exception:
                     pass
             self._typing_paused.discard(chat_id)
@@ -1501,10 +1508,16 @@ class BasePlatformAdapter(ABC):
             except asyncio.CancelledError:
                 pass
             # Also cancel any platform-level persistent typing tasks (e.g. Discord)
-            # that may have been recreated by _keep_typing after the last stop_typing()
+            # that may have been recreated by _keep_typing after the last stop_typing().
+            # Pass thread metadata so Slack's assistant status is cleared here —
+            # this runs after typing_task is cancelled, so it is the final
+            # writer and won't be re-set by another send_typing tick (the cause
+            # of the hung "thinking..." indicator on short-circuit turns).
             try:
                 if hasattr(self, "stop_typing"):
-                    await self.stop_typing(event.source.chat_id)
+                    await self.stop_typing(
+                        event.source.chat_id, metadata=_thread_metadata
+                    )
             except Exception:
                 pass
             # Clean up session tracking

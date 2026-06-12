@@ -1412,7 +1412,7 @@ class DiscordAdapter(BasePlatformAdapter):
 
         self._typing_tasks[chat_id] = asyncio.create_task(_typing_loop())
 
-    async def stop_typing(self, chat_id: str) -> None:
+    async def stop_typing(self, chat_id: str, metadata=None) -> None:
         """Stop the persistent typing indicator for a channel."""
         task = self._typing_tasks.pop(chat_id, None)
         if task:
