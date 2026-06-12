@@ -67,7 +67,7 @@ works with three backend sub-agents:
 A user just sent a new message. Given the message + the last few
 exchanges, decide the **dispatch shape** this turn needs.
 
-**Three shapes:**
+**Four shapes:**
 
 - **none** — Coach handles in its own voice. No sub-agent work needed.
   Use for: emotional moments, single conceptual questions Coach can
@@ -103,6 +103,37 @@ exchanges, decide the **dispatch shape** this turn needs.
   - Decision points needing both market data AND strategic synthesis AND
     a concrete deliverable → 2-3 sub-agents
   - Choose 2 sub-agents when only 2 work-types apply; 3 when all 3 do.
+
+- **surface_existing** — the user is pulling work the team has ALREADY
+  produced, asking to see / hear / be walked through artifacts that
+  already exist in the backend (a drafted cover letter, a resume the
+  Publicist tailored, an analysis the Analyst ran, roles the Scout
+  found). This creates NO new work — the deliverable is already done and
+  sitting in the archive; the user just wants it surfaced. The server
+  reads the existing items and replays them as standalone sub-agent
+  messages (Scout / Analyst / Publicist each speak their own part).
+  Examples:
+  - "walk me through what the team did" / "walk me through what changed"
+  - "what did scout and the publicist actually find?"
+  - "show me the docs" / "lets see the resume" / "lets see the topicals
+    stuff" / "ok yeah show me"
+  - "can you show me the cover letter again?"
+
+  **surface_existing vs multi — the load-bearing distinction:** both can
+  start with "walk me through", so judge by whether the work EXISTS yet.
+  - "walk me through what HAPPENED" right after a rejection / bad outcome
+    → the diagnosis does NOT exist yet; it needs Analyst to run it now →
+    **multi**.
+  - "walk me through what the TEAM DID" / "what did you find" / "show me
+    the docs" → the materials ALREADY exist from prior cron / Executor
+    runs; surface them → **surface_existing**.
+  Ask: is the user asking the team to DO something new, or to SHOW
+  something already done? New → single/multi. Already done → surface_existing.
+
+  **surface_existing has NO dispatches** (there is no new action to
+  enqueue). Return an empty `dispatches` list. It MAY carry a `lead_in`
+  (a short Coach-voice opener like "Here's what the team put together."
+  before the sub-agent messages appear).
 
 **How to judge multi vs single:**
 
@@ -213,7 +244,7 @@ than a forced one on a turn that didn't carry feeling.
 Return STRICT JSON, no prose, no markdown fence:
 
 {
-  "dispatch_type": "none" | "single" | "multi",
+  "dispatch_type": "none" | "single" | "multi" | "surface_existing",
   "dispatches": [
     {
       "sub_agent": "scout|analyst|publicist",
@@ -221,7 +252,8 @@ Return STRICT JSON, no prose, no markdown fence:
       "action": "...",
       "announcement": "..."
     },
-    ... (1 item for single, 2-3 items for multi, empty list for none)
+    ... (1 item for single, 2-3 items for multi, empty list for none
+        and for surface_existing)
   ],
   "lead_in": "<short Coach-voice opener, or null>",
   "capability_bucket": "non_capability" | 1 | 2 | 3 | 4,
@@ -418,13 +450,19 @@ def detect_turn_intent(
         return out
 
     dispatch_type = parsed.get("dispatch_type")
-    if dispatch_type not in ("none", "single", "multi"):
+    if dispatch_type not in ("none", "single", "multi", "surface_existing"):
         dispatch_type = "none"
 
     dispatches = _normalize_dispatches(parsed.get("dispatches"))
 
     # Cross-check: dispatch_type must match dispatches count.
     if dispatch_type == "none":
+        dispatches = []
+    elif dispatch_type == "surface_existing":
+        # User-pull of existing artifacts — server reads archive[] and
+        # replays it as sub-agent messages. There is no new action to
+        # enqueue, so strip any dispatches the LLM wrongly emitted. The
+        # lead_in IS kept (handled below — surface_existing is not `none`).
         dispatches = []
     elif dispatch_type == "single":
         # Keep only first valid dispatch; demote to none if empty.

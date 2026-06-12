@@ -164,6 +164,76 @@ class TestDetectTurnIntent:
         result = tid.detect_turn_intent("can you help?")
         assert result["dispatch_type"] == "none"
 
+    # ---------------------------------------------------------------------
+    # surface_existing — user-pull of artifacts the backend already produced
+    # (read archive[] → announce_subagent, NOT future-work). The fourth
+    # dispatch_type: it carries NO dispatches[] (no new action to enqueue)
+    # but DOES keep a lead_in (Coach-voice opener before the sub-agent
+    # messages). Server reads this type, then surfaces existing archive
+    # items as standalone sub-agent messages.
+    # ---------------------------------------------------------------------
+
+    def test_surface_existing_parsed_keeps_lead_in_drops_dispatches(
+        self, monkeypatch
+    ):
+        monkeypatch.setattr(
+            "agent.auxiliary_client.call_llm",
+            lambda **kw: _fake_response(
+                '{"dispatch_type": "surface_existing", '
+                '"dispatches": [], '
+                '"lead_in": "Here\'s what the team put together.", '
+                '"confidence": "high", '
+                '"reasoning": "user wants to see existing materials"}'
+            ),
+            raising=False,
+        )
+        result = tid.detect_turn_intent(
+            "walk me through what scout and the publicist actually found"
+        )
+        assert result["checked"] is True
+        assert result["dispatch_type"] == "surface_existing"
+        # No future-work items — the artifacts already exist in archive[].
+        assert result["dispatches"] == []
+        # Unlike `none`, surface_existing keeps its lead_in: Coach opens
+        # before the sub-agent messages are surfaced.
+        assert result["lead_in"] == "Here's what the team put together."
+
+    def test_surface_existing_strips_stray_dispatches(self, monkeypatch):
+        """An LLM that wrongly emits dispatches[] for surface_existing has
+        them dropped — surface_existing never enqueues future work."""
+        monkeypatch.setattr(
+            "agent.auxiliary_client.call_llm",
+            lambda **kw: _fake_response(
+                '{"dispatch_type": "surface_existing", '
+                '"dispatches": [{"sub_agent": "publicist", '
+                '"id_slug": "draft-something", "action": "Draft", '
+                '"announcement": "Publicist is on it."}], '
+                '"lead_in": "Pulling those up.", '
+                '"confidence": "high", "reasoning": "show me the docs"}'
+            ),
+            raising=False,
+        )
+        result = tid.detect_turn_intent("show me the docs you made")
+        assert result["dispatch_type"] == "surface_existing"
+        assert result["dispatches"] == []
+        assert result["lead_in"] == "Pulling those up."
+
+    def test_surface_existing_clears_affect_report(self, monkeypatch):
+        """affect_report is only meaningful on a `none` turn. A pull turn
+        is the user acting on existing work, not holding affect."""
+        monkeypatch.setattr(
+            "agent.auxiliary_client.call_llm",
+            lambda **kw: _fake_response(
+                '{"dispatch_type": "surface_existing", "dispatches": [], '
+                '"lead_in": "Here you go.", "affect_report": true, '
+                '"confidence": "high", "reasoning": "x"}'
+            ),
+            raising=False,
+        )
+        result = tid.detect_turn_intent("can you show me the resume again")
+        assert result["dispatch_type"] == "surface_existing"
+        assert result["affect_report"] is False
+
     def test_invalid_sub_agent_dropped(self, monkeypatch):
         """Dispatch with invalid sub_agent gets dropped from list."""
         monkeypatch.setattr(
@@ -1068,3 +1138,32 @@ class TestEmotionalReportRoutesNonePromptRule:
         # routes to multi. The prompt must keep that example.
         prompt = tid._DETECT_PROMPT.lower()
         assert "dig in" in prompt
+
+
+class TestSurfaceExistingPromptRule:
+    def test_prompt_defines_surface_existing_shape(self):
+        # The fourth shape must be described in the prompt + the JSON schema
+        # so the LLM can emit it. Guards against the value being added to the
+        # parser's allow-list but never taught to the model.
+        prompt = tid._DETECT_PROMPT.lower()
+        assert "surface_existing" in prompt
+
+    def test_prompt_ties_surface_existing_to_already_produced(self):
+        # The load-bearing distinction: surface_existing is for artifacts the
+        # backend ALREADY produced (in archive), pulled by the user — NOT new
+        # work. The prompt must tie the shape to "already" existing output so
+        # it doesn't blur into single/multi (which create new work).
+        prompt = tid._DETECT_PROMPT.lower()
+        assert "surface_existing" in prompt
+        assert "already" in prompt
+        # The user-pull triggers from the simulation must be present as
+        # examples so the model recognizes the shape.
+        assert "walk me through" in prompt
+        assert "show me" in prompt
+
+    def test_surface_existing_in_schema_block(self):
+        # The strict-JSON schema enumeration must list surface_existing as a
+        # valid dispatch_type value alongside none/single/multi.
+        prompt = tid._DETECT_PROMPT
+        # The schema line enumerates the dispatch_type union.
+        assert '"surface_existing"' in prompt
