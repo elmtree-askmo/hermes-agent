@@ -731,53 +731,6 @@ def render_injection_block(detection: dict[str, Any]) -> str | None:
     return "\n".join(lines)
 
 
-def render_surface_existing_block(surfaced: list[dict[str, Any]]) -> str | None:
-    """Render the system-prompt block for the surface_existing path.
-
-    When the server has already replayed existing archive work products as
-    standalone sub-agent messages (🔍 Scout / 📊 Analyst / ✍️ Publicist,
-    each pushed under its own prefix), Coach sees this block. It tells Coach:
-      1. The sub-agent messages are already on Slack — do NOT restate their
-         content (no re-listing the roles Scout found, no pasting the cover
-         letter body).
-      2. Coach's job this turn is a short Coach-voice bridge / CTA only —
-         the sim shape after a walkthrough is one forward sentence + an
-         optional A/B (sim lines 175 "First app out. …", 204 "There it
-         is. …").
-
-    Returns None when nothing was surfaced — Coach then narrates in its own
-    voice (the pre-existing single-voice walkthrough, graceful degrade).
-    """
-    if not surfaced:
-        return None
-    _REGISTRY = {
-        "scout": ("🔍", "Scout"),
-        "analyst": ("📊", "Analyst"),
-        "publicist": ("✍️", "Publicist"),
-    }
-    lines = [
-        "",
-        "**Team work already surfaced** (the user pulled existing work and "
-        "the server already replayed each sub-agent's product as its own "
-        "Slack message, under the sub-agent prefix):",
-    ]
-    for item in surfaced:
-        sub_agent = item.get("sub_agent", "")
-        emoji, name = _REGISTRY.get(sub_agent, ("", sub_agent))
-        summary = (item.get("summary") or "").strip()
-        lines.append(f"  - {emoji} *{name}:* {summary}")
-    lines.append("")
-    lines.append(
-        "**Do NOT restate or re-list what the sub-agents just said** — "
-        "those messages are already on the user's screen; repeating them "
-        "reads as the team talking in circles. Your job this turn is ONE "
-        "short Coach-voice bridge: a forward sentence and/or a single A/B "
-        "(e.g. \"That's the team's read — want to act on any of it, or sit "
-        "with it?\"). Keep it to 1-2 sentences."
-    )
-    return "\n".join(lines)
-
-
 def render_already_executed_block(
     sub_agent: str,
     action: str,

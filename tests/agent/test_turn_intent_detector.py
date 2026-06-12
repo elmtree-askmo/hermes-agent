@@ -749,32 +749,6 @@ class TestRenderInjectionBlock:
 
 
 # =========================================================================
-# render_surface_existing_block (surface_existing — user-pull replay)
-# =========================================================================
-
-class TestRenderSurfaceExistingBlock:
-    def test_block_names_surfaced_subagents_and_forbids_restate(self):
-        surfaced = [
-            {"sub_agent": "scout", "summary": "Found 2 roles."},
-            {"sub_agent": "publicist", "summary": "Drafted cover letter."},
-        ]
-        block = tid.render_surface_existing_block(surfaced)
-        assert block is not None
-        # Tells Coach the sub-agent messages already went out.
-        assert "already" in block.lower()
-        assert "scout" in block.lower()
-        assert "publicist" in block.lower()
-        # Must instruct Coach NOT to restate the surfaced content — just a
-        # short bridge / CTA (sim lines 175 / 204).
-        assert "not" in block.lower()
-
-    def test_empty_surfaced_returns_none(self):
-        # Nothing surfaced → no block; Coach narrates in its own voice
-        # (graceful degrade, current behavior).
-        assert tid.render_surface_existing_block([]) is None
-
-
-# =========================================================================
 # render_already_executed_block (single Type E)
 # =========================================================================
 

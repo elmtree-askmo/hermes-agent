@@ -2433,6 +2433,14 @@ class GatewayRunner:
         # Slack itself — in that case we skip Coach inference entirely
         # (Type F "lead-in-only" completion path).
         _multi_lead_in_short_circuit = False
+        # surface_existing replays existing sub-agent products as their own
+        # Slack messages (server-side). When that succeeds, Coach must NOT
+        # also reply — a Coach turn would restate the same content (the
+        # render-block "don't restate" instruction proved unreliable; only
+        # skipping Coach entirely is deterministic). Matches the sim shape:
+        # the user pulls a walkthrough, the sub-agents speak, Coach stays
+        # out. Architecture-level enforcement, same as the multi lead-in.
+        _surface_short_circuit = False
         # Artemis-only feature — gate on explicit deployment opt-in so
         # non-Artemis forks of the gateway don't run the auxiliary LLM
         # classifier or inject Artemis-specific enqueue_action /
@@ -2453,7 +2461,6 @@ class GatewayRunner:
                     render_affect_report_block,
                     render_already_executed_block,
                     render_team_dispatch_executed_block,
-                    render_surface_existing_block,
                     execute_via_helper,
                     log_result as _log_turn_intent,
                 )
@@ -2601,25 +2608,30 @@ class GatewayRunner:
                     and not _pending_announce
                 ):
                     # surface_existing — user pulled work the team already
-                    # produced. Server replays each archive product as a
-                    # standalone sub-agent message, then Coach adds a short
-                    # bridge. No new work enqueued. If nothing qualifies
-                    # (empty/stale archive), the helper returns surfaced=[]
-                    # and we inject nothing — Coach narrates in its own
-                    # voice (graceful degrade to the prior single-voice
-                    # walkthrough).
+                    # produced. The helper replays each archive product as a
+                    # standalone sub-agent message (and pushes the lead-in).
+                    # No new work enqueued. Two outcomes:
+                    #   - surfaced non-empty → SHORT-CIRCUIT Coach entirely.
+                    #     The sub-agent messages are the complete answer (sim
+                    #     shape: user pulls a walkthrough, the team speaks,
+                    #     Coach stays out). A Coach reply here would restate
+                    #     the same content — the prior render-block "don't
+                    #     restate" hint proved unreliable in dev, so we
+                    #     enforce it architecturally by skipping Coach.
+                    #   - surfaced empty (stale/empty archive) → inject
+                    #     nothing, let Coach narrate in its own voice
+                    #     (graceful degrade to the prior single-voice
+                    #     walkthrough).
                     _surf_result = execute_via_helper(_uid, _detection)
                     _surfaced = (
                         _surf_result.get("surfaced")
                         if _surf_result.get("ok") else None
                     ) or []
                     if _surfaced:
-                        _surf_block = render_surface_existing_block(_surfaced)
-                        if _surf_block:
-                            context_prompt = context_prompt + "\n" + _surf_block
+                        _surface_short_circuit = True
                         logger.info(
                             "turn-intent: chat=%s surfaced_existing n=%d "
-                            "sub_agents=%s",
+                            "sub_agents=%s — short-circuiting Coach",
                             _chat, len(_surfaced),
                             ",".join(s.get("sub_agent", "") for s in _surfaced),
                         )
@@ -3378,18 +3390,23 @@ class GatewayRunner:
             # is complete: any Coach reply now would land AFTER the lead-in
             # and either duplicate it or contradict it. Save a full Coach
             # inference + avoid the second-message failure mode.
-            if _multi_lead_in_short_circuit:
+            if _multi_lead_in_short_circuit or _surface_short_circuit:
+                _sc_reason = (
+                    "multi_lead_in_short_circuit"
+                    if _multi_lead_in_short_circuit
+                    else "surface_existing_short_circuit"
+                )
                 logger.info(
-                    "turn-intent: chat=%s skipped Coach inference — "
-                    "multi lead-in already pushed to Slack",
-                    source.chat_id or "unknown",
+                    "turn-intent: chat=%s skipped Coach inference — %s "
+                    "(messages already pushed to Slack)",
+                    source.chat_id or "unknown", _sc_reason,
                 )
                 agent_result = {
                     "final_response": "",
                     "messages": [],
                     "api_calls": 0,
                     "failed": False,
-                    "skipped_reason": "multi_lead_in_short_circuit",
+                    "skipped_reason": _sc_reason,
                 }
             else:
                 agent_result = await self._run_agent(
