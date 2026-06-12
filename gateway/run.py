@@ -2453,6 +2453,7 @@ class GatewayRunner:
                     render_affect_report_block,
                     render_already_executed_block,
                     render_team_dispatch_executed_block,
+                    render_surface_existing_block,
                     execute_via_helper,
                     log_result as _log_turn_intent,
                 )
@@ -2592,6 +2593,41 @@ class GatewayRunner:
                             "turn-intent: chat=%s injected_block_len=%d "
                             "dispatch_type=%s",
                             _chat, len(_block), _dispatch_type,
+                        )
+                elif (
+                    _dispatch_type == "surface_existing"
+                    and _conf == "high"
+                    and _uid
+                    and not _pending_announce
+                ):
+                    # surface_existing — user pulled work the team already
+                    # produced. Server replays each archive product as a
+                    # standalone sub-agent message, then Coach adds a short
+                    # bridge. No new work enqueued. If nothing qualifies
+                    # (empty/stale archive), the helper returns surfaced=[]
+                    # and we inject nothing — Coach narrates in its own
+                    # voice (graceful degrade to the prior single-voice
+                    # walkthrough).
+                    _surf_result = execute_via_helper(_uid, _detection)
+                    _surfaced = (
+                        _surf_result.get("surfaced")
+                        if _surf_result.get("ok") else None
+                    ) or []
+                    if _surfaced:
+                        _surf_block = render_surface_existing_block(_surfaced)
+                        if _surf_block:
+                            context_prompt = context_prompt + "\n" + _surf_block
+                        logger.info(
+                            "turn-intent: chat=%s surfaced_existing n=%d "
+                            "sub_agents=%s",
+                            _chat, len(_surfaced),
+                            ",".join(s.get("sub_agent", "") for s in _surfaced),
+                        )
+                    else:
+                        logger.info(
+                            "turn-intent: chat=%s surface_existing_empty "
+                            "ok=%s — Coach narrates in own voice",
+                            _chat, _surf_result.get("ok"),
                         )
 
                 # Capability bucket injection (A+ design) — independent of

@@ -749,6 +749,32 @@ class TestRenderInjectionBlock:
 
 
 # =========================================================================
+# render_surface_existing_block (surface_existing — user-pull replay)
+# =========================================================================
+
+class TestRenderSurfaceExistingBlock:
+    def test_block_names_surfaced_subagents_and_forbids_restate(self):
+        surfaced = [
+            {"sub_agent": "scout", "summary": "Found 2 roles."},
+            {"sub_agent": "publicist", "summary": "Drafted cover letter."},
+        ]
+        block = tid.render_surface_existing_block(surfaced)
+        assert block is not None
+        # Tells Coach the sub-agent messages already went out.
+        assert "already" in block.lower()
+        assert "scout" in block.lower()
+        assert "publicist" in block.lower()
+        # Must instruct Coach NOT to restate the surfaced content — just a
+        # short bridge / CTA (sim lines 175 / 204).
+        assert "not" in block.lower()
+
+    def test_empty_surfaced_returns_none(self):
+        # Nothing surfaced → no block; Coach narrates in its own voice
+        # (graceful degrade, current behavior).
+        assert tid.render_surface_existing_block([]) is None
+
+
+# =========================================================================
 # render_already_executed_block (single Type E)
 # =========================================================================
 
@@ -831,6 +857,35 @@ class TestExecuteViaHelper:
         )
         assert result["ok"] is False
         assert "not dispatchable" in result["error"]
+
+    def test_surface_existing_dispatches_without_dispatches(self, tmp_path):
+        """surface_existing carries no dispatches but is still dispatchable —
+        the helper reads the archive. Payload must forward dispatch_type and
+        lead_in so the helper routes to the surface path."""
+        helper = tmp_path / "exec.py"
+        helper.write_text(
+            "#!/usr/bin/env python3\n"
+            "import json, sys\n"
+            "payload = json.loads(sys.stdin.read())\n"
+            "out = {'ok': True, "
+            "'dispatch_type_seen': payload.get('dispatch_type'), "
+            "'lead_in_seen': payload.get('lead_in'), "
+            "'surfaced': []}\n"
+            "print(json.dumps(out))\n"
+        )
+        helper.chmod(0o755)
+        result = tid.execute_via_helper(
+            "U_TEST",
+            {
+                "dispatch_type": "surface_existing",
+                "dispatches": [],
+                "lead_in": "Here's what the team put together.",
+            },
+            helper_path=str(helper),
+        )
+        assert result["ok"] is True
+        assert result["dispatch_type_seen"] == "surface_existing"
+        assert result["lead_in_seen"] == "Here's what the team put together."
 
     def test_single_dispatch_helper_success(self, tmp_path):
         helper = tmp_path / "exec.py"
