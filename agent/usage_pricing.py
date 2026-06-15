@@ -81,6 +81,27 @@ _UTC_NOW = lambda: datetime.now(timezone.utc)
 # Official docs snapshot entries. Models whose published pricing and cache
 # semantics are stable enough to encode exactly.
 _OFFICIAL_DOCS_PRICING: Dict[tuple[str, str], PricingEntry] = {
+    # OpenRouter's models API publishes qwen3.6-plus input / output /
+    # input_cache_write but OMITS input_cache_read, so the live-metadata path
+    # leaves cache_read_cost_per_million=None and estimate_usage_cost bails to
+    # amount_usd=None on every cache hit. Pin the full rate set here (read = 0.10x
+    # input, write = 1.25x input — both confirmed against the OpenRouter
+    # generation API `total_cost` + `cache_discount`) and let the OpenRouter
+    # branch in get_pricing_entry prefer this snapshot over the incomplete
+    # metadata. Keyed by the full OpenRouter model id (the OpenRouter route keeps
+    # the vendor prefix).
+    (
+        "openrouter",
+        "qwen/qwen3.6-plus",
+    ): PricingEntry(
+        input_cost_per_million=Decimal("0.325"),
+        output_cost_per_million=Decimal("1.95"),
+        cache_read_cost_per_million=Decimal("0.0325"),
+        cache_write_cost_per_million=Decimal("0.40625"),
+        source="official_docs_snapshot",
+        source_url="https://openrouter.ai/qwen/qwen3.6-plus",
+        pricing_version="qwen-openrouter-2026-06-15",
+    ),
     (
         "anthropic",
         "claude-opus-4-20250514",
@@ -404,6 +425,13 @@ def get_pricing_entry(
             pricing_version="included-route",
         )
     if route.provider == "openrouter":
+        # Prefer a pinned official-snapshot entry when we have one (the only
+        # OpenRouter-keyed snapshots are models whose live metadata is missing
+        # cache pricing — e.g. qwen3.6-plus has no input_cache_read). Falls back
+        # to the live models-API metadata for everything else.
+        snapshot = _lookup_official_docs_pricing(route)
+        if snapshot is not None:
+            return snapshot
         return _openrouter_pricing_entry(route)
     if route.base_url:
         entry = _pricing_entry_from_metadata(
