@@ -12,6 +12,42 @@ import copy
 from typing import Any, Dict, List
 
 
+# Models with OpenRouter explicit prompt caching: they accept the same ephemeral
+# cache_control breakpoints as Anthropic. Alibaba/Qwen + DeepSeek-v3.2 per
+# OpenRouter docs; verified live for qwen/qwen3.6-plus (write 1.25x / read 0.10x,
+# 5-minute TTL). Matched as substrings of the OpenRouter model id. Snapshot
+# endpoints (e.g. qwen/qwen3.5-plus-02-15) are deliberately absent — Alibaba does
+# not cache those, so a marker there would just cache-miss.
+_OPENROUTER_EXPLICIT_CACHE_MODELS = (
+    "qwen/qwen3-max",
+    "qwen/qwen-plus",
+    "qwen/qwen3.6-plus",
+    "qwen/qwen3-coder-plus",
+    "qwen/qwen3-coder-flash",
+    "deepseek/deepseek-v3.2",
+)
+
+
+def model_supports_prompt_caching(
+    model: str, is_openrouter: bool, is_native_anthropic: bool
+) -> bool:
+    """Whether to emit cache_control breakpoints for this model.
+
+    Native Anthropic always supports it. Via OpenRouter, Claude models plus the
+    Alibaba/DeepSeek explicit-cache allowlist accept the ephemeral markers; every
+    other model gets no cache_control (a stray marker would at worst cache-miss,
+    but we keep the request surface tight).
+    """
+    if is_native_anthropic:
+        return True
+    if not is_openrouter:
+        return False
+    m = (model or "").lower()
+    if "claude" in m:
+        return True
+    return any(tag in m for tag in _OPENROUTER_EXPLICIT_CACHE_MODELS)
+
+
 def _apply_cache_marker(msg: dict, cache_marker: dict, native_anthropic: bool = False) -> None:
     """Add cache_control to a single message, handling all format variations."""
     role = msg.get("role", "")

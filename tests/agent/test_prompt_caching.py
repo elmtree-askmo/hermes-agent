@@ -6,10 +6,53 @@ import pytest
 from agent.prompt_caching import (
     _apply_cache_marker,
     apply_anthropic_cache_control,
+    model_supports_prompt_caching,
 )
 
 
 MARKER = {"type": "ephemeral"}
+
+
+class TestModelSupportsPromptCaching:
+    def test_native_anthropic_always_supported(self):
+        # Native Anthropic does not go through OpenRouter.
+        assert model_supports_prompt_caching("claude-opus-4-8", False, True) is True
+        assert model_supports_prompt_caching("anything", False, True) is True
+
+    def test_openrouter_claude_supported(self):
+        assert model_supports_prompt_caching(
+            "anthropic/claude-sonnet-4-6", True, False
+        ) is True
+
+    def test_openrouter_qwen36_plus_supported(self):
+        # The dev/prod paid model — live-verified explicit caching.
+        assert model_supports_prompt_caching("qwen/qwen3.6-plus", True, False) is True
+
+    def test_openrouter_other_explicit_cache_models_supported(self):
+        for m in (
+            "qwen/qwen3-max",
+            "qwen/qwen-plus",
+            "qwen/qwen3-coder-plus",
+            "qwen/qwen3-coder-flash",
+            "deepseek/deepseek-v3.2",
+        ):
+            assert model_supports_prompt_caching(m, True, False) is True, m
+
+    def test_openrouter_qwen35_snapshot_excluded(self):
+        # Snapshot endpoints do not support explicit caching.
+        assert model_supports_prompt_caching(
+            "qwen/qwen3.5-plus-02-15", True, False
+        ) is False
+
+    def test_openrouter_unlisted_model_not_supported(self):
+        assert model_supports_prompt_caching(
+            "nvidia/nemotron-3-super-120b-a12b:free", True, False
+        ) is False
+
+    def test_non_openrouter_non_native_not_supported(self):
+        # Even a Claude/Qwen name gets no markers off the supported transports.
+        assert model_supports_prompt_caching("qwen/qwen3.6-plus", False, False) is False
+        assert model_supports_prompt_caching("claude-sonnet-4-6", False, False) is False
 
 
 class TestApplyCacheMarker:

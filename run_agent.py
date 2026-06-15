@@ -91,7 +91,7 @@ from agent.model_metadata import (
 )
 from agent.context_compressor import ContextCompressor
 from agent.subdirectory_hints import SubdirectoryHintTracker
-from agent.prompt_caching import apply_anthropic_cache_control
+from agent.prompt_caching import apply_anthropic_cache_control, model_supports_prompt_caching
 from agent.prompt_builder import build_skills_system_prompt, build_context_files_prompt, load_soul_md, TOOL_USE_ENFORCEMENT_GUIDANCE, TOOL_USE_ENFORCEMENT_MODELS, DEVELOPER_ROLE_MODELS, GOOGLE_MODEL_OPERATIONAL_GUIDANCE, OPENAI_MODEL_EXECUTION_GUIDANCE
 from agent.usage_pricing import estimate_usage_cost, normalize_usage
 from agent.display import (
@@ -633,13 +633,15 @@ class AIAgent:
         self.reasoning_config = reasoning_config  # None = use default (medium for OpenRouter)
         self.prefill_messages = prefill_messages or []  # Prefilled conversation turns
         
-        # Anthropic prompt caching: auto-enabled for Claude models via OpenRouter.
-        # Reduces input costs by ~75% on multi-turn conversations by caching the
+        # Prompt caching: auto-enabled for Claude + the OpenRouter explicit-cache
+        # allowlist (Alibaba/Qwen, DeepSeek-v3.2) and native Anthropic. Reduces
+        # input costs by ~75% on multi-turn conversations by caching the
         # conversation prefix. Uses system_and_3 strategy (4 breakpoints).
         is_openrouter = self._is_openrouter_url()
-        is_claude = "claude" in self.model.lower()
         is_native_anthropic = self.api_mode == "anthropic_messages"
-        self._use_prompt_caching = (is_openrouter and is_claude) or is_native_anthropic
+        self._use_prompt_caching = model_supports_prompt_caching(
+            self.model, is_openrouter, is_native_anthropic
+        )
         self._cache_ttl = "5m"  # Default 5-minute TTL (1.25x write cost)
         
         # Iteration budget pressure: warn the LLM as it approaches max_iterations.
@@ -1333,9 +1335,9 @@ class AIAgent:
 
         # ── Re-evaluate prompt caching ──
         is_native_anthropic = api_mode == "anthropic_messages"
-        self._use_prompt_caching = (
-            ("openrouter" in (self.base_url or "").lower() and "claude" in new_model.lower())
-            or is_native_anthropic
+        is_openrouter = "openrouter" in (self.base_url or "").lower()
+        self._use_prompt_caching = model_supports_prompt_caching(
+            new_model, is_openrouter, is_native_anthropic
         )
 
         # ── Update context compressor ──
@@ -4886,9 +4888,9 @@ class AIAgent:
 
             # Re-evaluate prompt caching for the new provider/model
             is_native_anthropic = fb_api_mode == "anthropic_messages"
-            self._use_prompt_caching = (
-                ("openrouter" in fb_base_url.lower() and "claude" in fb_model.lower())
-                or is_native_anthropic
+            is_openrouter = "openrouter" in fb_base_url.lower()
+            self._use_prompt_caching = model_supports_prompt_caching(
+                fb_model, is_openrouter, is_native_anthropic
             )
 
             # Update context compressor limits for the fallback model.
