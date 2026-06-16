@@ -837,6 +837,41 @@ def render_team_dispatch_executed_block(
     return "\n".join(lines)
 
 
+def render_short_circuit_transcript_text(
+    *,
+    surfaced: list[dict[str, Any]] | None = None,
+    lead_in: str | None = None,
+) -> str:
+    """Build the synthetic `assistant` transcript text for a Coach
+    short-circuit turn (P-0612-03).
+
+    Short-circuit turns (`surface_existing`, multi-dispatch lead-in) skip
+    Coach inference and push their messages to Slack out-of-band, so the
+    session transcript would otherwise record only the user message with no
+    answer. This produces a single string summarizing what the user was
+    shown, written back as an `assistant` entry so the next turn's
+    `detect_turn_intent` history and Coach's own history both see it.
+
+    `surfaced` (surface_existing path) takes precedence over `lead_in`
+    (multi-dispatch path) — surface_existing never carries a lead_in, but if
+    both are passed the surfaced products are the richer record.
+
+    Returns "" when there is nothing to record; the caller writes no entry.
+    """
+    if surfaced:
+        parts = []
+        for s in surfaced:
+            sub_agent = (s.get("sub_agent") or "Teammate").strip()
+            summary = (s.get("summary") or "").strip()
+            line = f"{sub_agent}: {summary}".strip() if summary else sub_agent
+            if line:
+                parts.append(line)
+        return "\n\n".join(parts).strip()
+    if lead_in:
+        return lead_in.strip()
+    return ""
+
+
 def execute_via_helper(
     user_id: str,
     detection: dict[str, Any],

@@ -1196,3 +1196,49 @@ class TestSurfaceExistingPromptRule:
         prompt = tid._DETECT_PROMPT
         # The schema line enumerates the dispatch_type union.
         assert '"surface_existing"' in prompt
+
+
+# =========================================================================
+# render_short_circuit_transcript_text
+# =========================================================================
+
+class TestRenderShortCircuitTranscriptText:
+    def test_surface_existing_joins_products(self):
+        surfaced = [
+            {"sub_agent": "Scout", "summary": "Found 3 Topicals roles."},
+            {"sub_agent": "Researcher", "summary": "Topicals raised a Series B."},
+        ]
+        out = tid.render_short_circuit_transcript_text(surfaced=surfaced)
+        assert "Topicals" in out
+        assert "Scout: Found 3 Topicals roles." in out
+        assert "Researcher: Topicals raised a Series B." in out
+
+    def test_surface_existing_missing_fields_degrade(self):
+        surfaced = [{"summary": "no sub_agent key"}, {"sub_agent": "Scout"}]
+        out = tid.render_short_circuit_transcript_text(surfaced=surfaced)
+        # Missing sub_agent falls back to a generic label; missing summary -> empty.
+        assert "no sub_agent key" in out
+        assert "Scout" in out
+
+    def test_lead_in_used_verbatim(self):
+        out = tid.render_short_circuit_transcript_text(lead_in="Pulling the team in.")
+        assert out == "Pulling the team in."
+
+    def test_lead_in_stripped(self):
+        out = tid.render_short_circuit_transcript_text(lead_in="  Team's on it.  ")
+        assert out == "Team's on it."
+
+    def test_empty_inputs_return_empty(self):
+        assert tid.render_short_circuit_transcript_text() == ""
+        assert tid.render_short_circuit_transcript_text(surfaced=[]) == ""
+        assert tid.render_short_circuit_transcript_text(lead_in="") == ""
+        assert tid.render_short_circuit_transcript_text(lead_in="   ") == ""
+
+    def test_surfaced_takes_precedence_over_lead_in(self):
+        # surface_existing path never carries a lead_in, but guard the
+        # contract: if both passed, surfaced wins (it is the richer record).
+        out = tid.render_short_circuit_transcript_text(
+            surfaced=[{"sub_agent": "Scout", "summary": "x"}],
+            lead_in="ignored",
+        )
+        assert out == "Scout: x"
