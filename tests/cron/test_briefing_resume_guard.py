@@ -123,3 +123,73 @@ def test_missing_strategy_fails_open_false(patch_home):
     (patch_home / "artemis" / _USER / "resumes").mkdir(exist_ok=True)
     (patch_home / "artemis" / _USER / "resumes" / "general.json").write_text("{}", encoding="utf-8")
     assert _quiet_day_resume_short_circuit(_USER) is False
+
+
+# --- Integration: drive tick() end to end and assert the short-circuit wires up ---
+# The predicate tests above prove the boolean; these prove the tick() wiring
+# actually swaps deliver_content to the fixed note AND skips the write-LLM,
+# which the predicate-only tests cannot catch (the wiring bug surfaces only here).
+
+from unittest.mock import patch
+
+_RESUME_SOLICIT_BRIEFING = (
+    "Quiet week on the board — graduation's close. When you're ready, "
+    "drop your resume here and we'll get matching."
+)
+
+
+def _briefing_job():
+    return {
+        "id": "JTEST",
+        "name": "daily-briefing",
+        "skills": ["artemis-briefing"],
+        "prompt": "Run artemis-briefing",
+        "origin": {"platform": "slack", "chat_id": "D1", "user_id": _USER},
+    }
+
+
+def _run_tick_capturing(predicate_value):
+    """Drive tick() with run_job stubbed to return a resume-soliciting briefing.
+    Returns (delivered_content, two_step_called)."""
+    captured = {}
+    two_step_called = {"n": 0}
+
+    def _fake_deliver(job, content, adapters=None, loop=None):
+        captured["content"] = content
+        return None
+
+    def _fake_two_step(content, job_id, silence_tier=None):
+        two_step_called["n"] += 1
+        return content  # pretend write-LLM passed it through unchanged
+
+    with patch("cron.scheduler.get_due_jobs", return_value=[_briefing_job()]), \
+         patch("cron.scheduler.advance_next_run"), \
+         patch("cron.scheduler.save_job_output", return_value="/tmp/x"), \
+         patch("cron.scheduler.mark_job_run"), \
+         patch("cron.scheduler.run_job",
+               return_value=(True, "doc", _RESUME_SOLICIT_BRIEFING, None)), \
+         patch("cron.scheduler._quiet_day_resume_short_circuit",
+               return_value=predicate_value), \
+         patch("cron.scheduler._run_two_step_briefing", side_effect=_fake_two_step), \
+         patch("cron.scheduler._voice_scan_check", return_value=(True, "")), \
+         patch("cron.scheduler._deliver_result", side_effect=_fake_deliver):
+        from cron.scheduler import tick
+        tick(verbose=False)
+    return captured.get("content"), two_step_called["n"]
+
+
+def test_tick_short_circuits_to_fallback_when_predicate_true():
+    from cron.scheduler import _quiet_day_fallback
+    delivered, two_step_n = _run_tick_capturing(predicate_value=True)
+    # the resume-soliciting briefing must NOT reach the user
+    assert delivered == _quiet_day_fallback()
+    assert "resume" not in (delivered or "").lower()
+    # and the write-LLM (two-step) must be skipped entirely
+    assert two_step_n == 0
+
+
+def test_tick_keeps_llm_path_when_predicate_false():
+    delivered, two_step_n = _run_tick_capturing(predicate_value=False)
+    # predicate False → normal path: two-step runs, original content flows
+    assert two_step_n == 1
+    assert delivered == _RESUME_SOLICIT_BRIEFING
