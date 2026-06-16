@@ -2441,6 +2441,13 @@ class GatewayRunner:
         # the user pulls a walkthrough, the sub-agents speak, Coach stays
         # out. Architecture-level enforcement, same as the multi lead-in.
         _surface_short_circuit = False
+        # P-0612-03: synthetic transcript text for short-circuit turns.
+        # Populated when a short-circuit flag is set (surface_existing uses
+        # the surfaced products; multi lead-in uses the pushed lead_in), then
+        # written as an `assistant` entry in the transcript fallback below so
+        # next turn's detector + Coach history see what the user was shown.
+        # Initialized unconditionally so the write site never hits NameError.
+        _sc_synthetic_text = ""
         # Artemis-only feature — gate on explicit deployment opt-in so
         # non-Artemis forks of the gateway don't run the auxiliary LLM
         # classifier or inject Artemis-specific enqueue_action /
@@ -2461,6 +2468,7 @@ class GatewayRunner:
                     render_affect_report_block,
                     render_already_executed_block,
                     render_team_dispatch_executed_block,
+                    render_short_circuit_transcript_text,
                     execute_via_helper,
                     log_result as _log_turn_intent,
                 )
@@ -2575,6 +2583,11 @@ class GatewayRunner:
                             # don't enforce it — server must short-circuit.
                             if _lead_in_pushed:
                                 _multi_lead_in_short_circuit = True
+                                _sc_synthetic_text = (
+                                    render_short_circuit_transcript_text(
+                                        lead_in=_detection.get("lead_in"),
+                                    )
+                                )
                         context_prompt = context_prompt + "\n" + _executed_block
                     else:
                         logger.warning(
@@ -2629,6 +2642,9 @@ class GatewayRunner:
                     ) or []
                     if _surfaced:
                         _surface_short_circuit = True
+                        _sc_synthetic_text = render_short_circuit_transcript_text(
+                            surfaced=_surfaced,
+                        )
                         logger.info(
                             "turn-intent: chat=%s surfaced_existing n=%d "
                             "sub_agents=%s — short-circuiting Coach",
@@ -3665,6 +3681,17 @@ class GatewayRunner:
                         self.session_store.append_to_transcript(
                             session_entry.session_id,
                             {"role": "assistant", "content": response, "timestamp": ts}
+                        )
+                    elif _sc_synthetic_text:
+                        # P-0612-03: short-circuit turn pushed its messages to
+                        # Slack out-of-band and produced no Coach reply. Record
+                        # what the user was shown as an `assistant` entry so the
+                        # next turn's history is complete. Role MUST be
+                        # `assistant` — the detector history filter and Coach's
+                        # history both keep only user/assistant string entries.
+                        self.session_store.append_to_transcript(
+                            session_entry.session_id,
+                            {"role": "assistant", "content": _sc_synthetic_text, "timestamp": ts}
                         )
                 else:
                     # The agent already persisted these messages to SQLite via
