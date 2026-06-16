@@ -5,6 +5,7 @@ import pytest
 
 from agent.prompt_caching import (
     _apply_cache_marker,
+    _is_effectively_cacheable,
     apply_anthropic_cache_control,
     model_supports_prompt_caching,
 )
@@ -184,3 +185,56 @@ class TestApplyAnthropicCacheControl:
             elif "cache_control" in msg:
                 count += 1
         assert count <= 4
+
+
+class TestEffectivelyCacheable:
+    def test_tool_not_cacheable_on_openrouter(self):
+        assert _is_effectively_cacheable({"role": "tool", "content": "r"}, False) is False
+
+    def test_tool_cacheable_on_native(self):
+        assert _is_effectively_cacheable({"role": "tool", "content": "r"}, True) is True
+
+    def test_empty_assistant_not_cacheable_on_openrouter(self):
+        assert _is_effectively_cacheable({"role": "assistant", "content": ""}, False) is False
+        assert _is_effectively_cacheable({"role": "assistant", "content": None}, False) is False
+
+    def test_user_string_content_cacheable(self):
+        assert _is_effectively_cacheable({"role": "user", "content": "hi"}, False) is True
+
+    def test_assistant_text_content_cacheable(self):
+        assert _is_effectively_cacheable({"role": "assistant", "content": "thinking"}, False) is True
+
+
+class TestRollingWindowKeepsUserPrefix:
+    """Regression: in a tool-heavy agentic loop the rolling window must not
+    abandon the cacheable leading user message for un-cacheable tool/empty
+    messages (the cw=0 / cr-collapse bug on Qwen)."""
+
+    def _loop_messages(self):
+        return [
+            {"role": "system", "content": "SYS"},
+            {"role": "user", "content": "INJECTION"},
+            {"role": "assistant", "content": ""},          # tool-call only
+            {"role": "tool", "content": "big tool result 1"},
+            {"role": "assistant", "content": ""},
+            {"role": "tool", "content": "big tool result 2"},
+            {"role": "assistant", "content": ""},
+            {"role": "tool", "content": "big tool result 3"},
+        ]
+
+    def test_openrouter_user_injection_keeps_marker(self):
+        result = apply_anthropic_cache_control(self._loop_messages(), native_anthropic=False)
+        # system marked
+        assert result[0]["content"][0]["cache_control"]["type"] == "ephemeral"
+        # user injection STILL marked (the fix) — content wrapped to a block
+        inj = result[1]["content"]
+        assert isinstance(inj, list) and inj[0]["cache_control"]["type"] == "ephemeral"
+
+    def test_openrouter_no_marker_on_tool_or_empty(self):
+        result = apply_anthropic_cache_control(self._loop_messages(), native_anthropic=False)
+        for m in result:
+            if m["role"] == "tool":
+                assert "cache_control" not in m
+                assert isinstance(m["content"], str)  # untouched
+            if m["role"] == "assistant" and m.get("content") in ("", None):
+                assert "cache_control" not in m
