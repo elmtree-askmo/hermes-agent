@@ -664,6 +664,15 @@ class AIAgent:
         self._last_activity_desc: str = "initializing"
         self._current_tool: str | None = None
         self._api_call_count: int = 0
+        # Hard per-session cap on web_search calls (0 = unlimited). Unlike the
+        # delegate cap, this accumulates across turns: the model fans out one
+        # or two searches per turn over a long agentic loop, so the runaway is
+        # cross-turn, not within-turn — a per-turn cap wouldn't bound it.
+        self._web_search_count: int = 0
+        try:
+            self._web_search_budget: int = int(os.getenv("WEB_SEARCH_MAX_PER_SESSION", "0"))
+        except ValueError:
+            self._web_search_budget = 0
 
         # Centralized logging — agent.log (INFO+) and errors.log (WARNING+)
         # both live under ~/.hermes/logs/.  Idempotent, so gateway mode
@@ -2872,6 +2881,62 @@ class AIAgent:
             else:
                 logger.warning("Removed duplicate tool call: %s", tc.function.name)
         return unique if len(unique) < len(tool_calls) else tool_calls
+
+    def _cap_web_search_calls(self, tool_calls: list) -> list:
+        """Enforce a hard per-session budget on web_search calls.
+
+        Unlike _cap_delegate_task_calls (which bounds a single turn), the
+        web_search budget accumulates across the whole session: the model
+        fans out one or two searches per turn over a long agentic loop, so
+        the runaway is cross-turn, not within-turn.
+
+        Over-budget calls are NOT dropped silently — a silent drop leads the
+        model to fabricate results/figures for the queries it could not run
+        (observed: it invented a "~18,500 listings" count for an unsearched
+        title). Instead each over-budget web_search is left in the list (so
+        its id still matches the recorded assistant message) but marked
+        `_web_search_capped`; _execute_tool_calls skips marked calls, and an
+        explicit budget-reached tool result is stashed in
+        `_pending_dropped_tool_responses` for the caller to append — reusing
+        the B-0512-01 drop-and-respond machinery. The directive result tells
+        the model not to fabricate the unsearched queries.
+
+        Budget comes from WEB_SEARCH_MAX_PER_SESSION (0 = unlimited).
+        Membership of the returned list is unchanged.
+        """
+        if not self._web_search_budget:
+            return tool_calls
+        capped = 0
+        responses = []
+        for tc in tool_calls:
+            if tc.function.name != "web_search":
+                continue
+            if self._web_search_count >= self._web_search_budget:
+                tc._web_search_capped = True
+                capped += 1
+                responses.append({
+                    "role": "tool",
+                    "tool_call_id": self._get_tool_call_id_static(tc),
+                    "content": (
+                        f"web_search budget for this session "
+                        f"({self._web_search_budget}) is exhausted — this call "
+                        f"was not run. Do NOT fabricate results or figures for "
+                        f"queries you could not search; answer only from the "
+                        f"searches already returned and state that the rest is "
+                        f"unverified."
+                    ),
+                })
+            else:
+                self._web_search_count += 1
+        if capped:
+            existing = getattr(self, "_pending_dropped_tool_responses", None) or []
+            self._pending_dropped_tool_responses = existing + responses
+            logger.warning(
+                "Capped %d web_search call(s): per-session budget "
+                "WEB_SEARCH_MAX_PER_SESSION=%d exhausted",
+                capped, self._web_search_budget,
+            )
+        return tool_calls
 
     def _repair_tool_call(self, tool_name: str) -> str | None:
         """Attempt to repair a mismatched tool name before aborting.
@@ -5941,10 +6006,14 @@ class AIAgent:
         # this method returns — see the _pending_dropped_tool_responses path.
         # Mutating in place is safe: the persisted assistant_msg dict was
         # already built by _build_assistant_message before this filter runs.
-        if any(getattr(tc, "_b0512_dropped", False) for tc in assistant_message.tool_calls):
+        # `_web_search_capped` (per-session web_search budget) uses the same
+        # skip-execution + caller-appends-a-stashed-response contract.
+        def _skip_exec(tc) -> bool:
+            return getattr(tc, "_b0512_dropped", False) or getattr(tc, "_web_search_capped", False)
+        if any(_skip_exec(tc) for tc in assistant_message.tool_calls):
             assistant_message.tool_calls = [
                 tc for tc in assistant_message.tool_calls
-                if not getattr(tc, "_b0512_dropped", False)
+                if not _skip_exec(tc)
             ]
         tool_calls = assistant_message.tool_calls
 
@@ -8818,6 +8887,9 @@ class AIAgent:
                         assistant_message.tool_calls
                     )
                     assistant_message.tool_calls = self._deduplicate_tool_calls(
+                        assistant_message.tool_calls
+                    )
+                    assistant_message.tool_calls = self._cap_web_search_calls(
                         assistant_message.tool_calls
                     )
 

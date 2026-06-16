@@ -261,3 +261,90 @@ class TestGetToolCallIdStatic:
     def test_object_without_id_attr(self):
         tc = types.SimpleNamespace()
         assert AIAgent._get_tool_call_id_static(tc) == ""
+
+
+# ---------------------------------------------------------------------------
+# _cap_web_search_calls — Phase 2c: hard per-session web_search budget
+# ---------------------------------------------------------------------------
+
+class TestCapWebSearchCalls:
+    """Instance method: bounds cumulative web_search across the session.
+
+    Called as an unbound function with a SimpleNamespace stand-in for `self`.
+    Over-budget calls are kept in the list but marked `_web_search_capped`
+    (so _execute_tool_calls skips them) and answered with a directive
+    budget-reached result stashed in `_pending_dropped_tool_responses` — they
+    are NOT removed, so their ids still match the recorded assistant message.
+    """
+
+    @staticmethod
+    def _agent(budget: int, count: int = 0) -> types.SimpleNamespace:
+        return types.SimpleNamespace(
+            _web_search_budget=budget,
+            _web_search_count=count,
+            _get_tool_call_id_static=AIAgent._get_tool_call_id_static,
+        )
+
+    @staticmethod
+    def _web(i: int) -> types.SimpleNamespace:
+        tc = make_tc("web_search", f'{{"q":{i}}}')
+        tc.id = f"ws{i}"
+        return tc
+
+    @staticmethod
+    def _capped(tool_calls) -> list:
+        return [tc for tc in tool_calls if getattr(tc, "_web_search_capped", False)]
+
+    def test_unlimited_when_budget_zero(self):
+        agent = self._agent(budget=0)
+        tcs = [self._web(i) for i in range(10)]
+        out = AIAgent._cap_web_search_calls(agent, tcs)
+        assert out is tcs                       # untouched, same object
+        assert agent._web_search_count == 0
+        assert not self._capped(tcs)
+
+    def test_under_budget_executes_all(self):
+        agent = self._agent(budget=6)
+        tcs = [self._web(0), make_tc("get_resume")]
+        AIAgent._cap_web_search_calls(agent, tcs)
+        assert agent._web_search_count == 1
+        assert not self._capped(tcs)
+        assert getattr(agent, "_pending_dropped_tool_responses", None) in (None, [])
+
+    def test_over_budget_marks_and_stashes_directive(self):
+        agent = self._agent(budget=2)
+        tcs = [self._web(i) for i in range(5)]
+        out = AIAgent._cap_web_search_calls(agent, tcs)
+        # all 5 stay in the list (ids must match the recorded assistant msg)
+        assert len(out) == 5
+        executed = [tc for tc in out
+                    if tc.function.name == "web_search" and not getattr(tc, "_web_search_capped", False)]
+        assert len(executed) == 2
+        assert len(self._capped(out)) == 3
+        assert agent._web_search_count == 2
+        # one directive budget result stashed per capped call, ids aligned
+        pending = agent._pending_dropped_tool_responses
+        assert len(pending) == 3
+        assert {p["tool_call_id"] for p in pending} == {"ws2", "ws3", "ws4"}
+        assert all(p["role"] == "tool" for p in pending)
+        assert all("fabricate" in p["content"].lower() for p in pending)
+
+    def test_budget_accumulates_across_turns(self):
+        agent = self._agent(budget=4)
+        AIAgent._cap_web_search_calls(agent, [self._web(0), self._web(1)])
+        assert agent._web_search_count == 2
+        out = AIAgent._cap_web_search_calls(agent, [self._web(2), self._web(3), self._web(4)])
+        assert agent._web_search_count == 4
+        assert len(self._capped(out)) == 1          # only 1 over budget this turn
+        out = AIAgent._cap_web_search_calls(agent, [self._web(5)])
+        assert len(self._capped(out)) == 1          # budget spent — capped
+
+    def test_non_web_search_calls_untouched(self):
+        agent = self._agent(budget=1)
+        gr, ca = make_tc("get_resume"), make_tc("complete_action")
+        tcs = [self._web(0), gr, self._web(1), ca]
+        AIAgent._cap_web_search_calls(agent, tcs)
+        assert agent._web_search_count == 1
+        assert not getattr(gr, "_web_search_capped", False)
+        assert not getattr(ca, "_web_search_capped", False)
+        assert len(self._capped(tcs)) == 1
