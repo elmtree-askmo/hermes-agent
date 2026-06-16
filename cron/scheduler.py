@@ -111,6 +111,82 @@ def _quiet_day_fallback() -> str:
     )
 
 
+def _quiet_day_resume_short_circuit(user_id: str) -> bool:
+    """Deterministic guard for Artemis B-0616-01: should this briefing skip the
+    write-LLM and emit the fixed quiet-day note instead?
+
+    Returns True only when ALL hold:
+      - the user has a resume on file (`resumes/*.json` exists), AND
+      - no follow-up is due today (channel=='briefing', when <= today), AND
+      - no pending/in_progress action has a deadline within the next 2 days, AND
+      - there is no pending/in_progress action at all.
+
+    That is the "resume already on file + genuinely empty day" subset — exactly
+    where the prompt-only guard (artemis-briefing SKILL.md) let the model solicit
+    a resume it should not (failed ~2/3 in prod). On True the caller emits
+    `_quiet_day_fallback()` and never runs the write-LLM, so the model gets no
+    chance to solicit. Days with any real dated item fall through to the normal
+    LLM render — zero content loss.
+
+    The date-math mirrors the server-side pre-filters in Artemis
+    `mcp-server/server.py` handle_get_strategy: `todays_follow_ups` (~672-681),
+    `approaching_deadlines` (~786-806), and `_resume_on_file` (~587-599).
+    Re-implemented fork-local (stdlib, fail-open) to avoid importing the Artemis
+    server; KEEP THE TWO IN SYNC if those filters change.
+
+    Fail-open: any read/parse error returns False (do not suppress the briefing
+    — fall through to the normal path rather than risk eating a real one).
+    """
+    _APPROACHING_DEADLINE_DAYS = 2
+    try:
+        home = get_hermes_home()
+        base = home / "artemis" / user_id
+
+        # resume_on_file — any *.json under resumes/ (mirror _resume_on_file)
+        resumes_dir = base / "resumes"
+        if not (resumes_dir.is_dir() and any(resumes_dir.glob("*.json"))):
+            return False
+
+        strategy_path = base / "strategy.json"
+        if not strategy_path.exists():
+            return False
+        strategy = json.loads(strategy_path.read_text(encoding="utf-8"))
+
+        today = datetime.now(timezone.utc).date()
+
+        # follow-up due today on the briefing channel?
+        for fu in (strategy.get("follow_ups") or []):
+            if not isinstance(fu, dict):
+                continue
+            if fu.get("channel") != "briefing":
+                continue
+            when = fu.get("when")
+            if not isinstance(when, str):
+                continue
+            try:
+                when_d = datetime.fromisoformat(when).date()
+            except (ValueError, TypeError):
+                continue
+            if when_d <= today:
+                return False  # a real check-in is due — keep the LLM render
+
+        # any pending/in_progress action (and any with an approaching deadline)?
+        for act in (strategy.get("action_queue") or []):
+            if not isinstance(act, dict):
+                continue
+            if act.get("status") not in ("pending", "in_progress"):
+                continue
+            return False  # genuine pending work — not an empty day
+
+        return True
+    except (OSError, json.JSONDecodeError, ValueError, TypeError) as exc:
+        logger.warning(
+            "resume-guard short-circuit check failed user=%s err=%s — fail-open (no suppress)",
+            user_id, exc,
+        )
+        return False
+
+
 # ---------------------------------------------------------------------------
 # Artemis B-0510-01 Phase 4b — post-LLM semantic voice-scan.
 # ---------------------------------------------------------------------------
@@ -2054,11 +2130,32 @@ def tick(verbose: bool = True, adapters=None, loop=None) -> int:
                         )
                         should_deliver = False
 
+                # Artemis B-0616-01 — deterministic resume-solicitation guard.
+                # When the user has a resume on file AND the day is genuinely
+                # empty, skip the write-LLM entirely and emit the fixed quiet-day
+                # note, so the model gets no chance to re-ask for a resume already
+                # on file (the prompt-only SKILL.md guard failed ~2/3 in prod).
+                # Runs BEFORE two-step/voice-scan: on a hit the note is final and
+                # neither LLM stage should run.
+                _resume_guard_fired = False
+                if should_deliver and success and _is_briefing_job(job):
+                    _rg_origin = _resolve_origin(job)
+                    _rg_uid = (_rg_origin or {}).get("user_id")
+                    if _rg_uid and _quiet_day_resume_short_circuit(_rg_uid):
+                        deliver_content = _quiet_day_fallback()
+                        _resume_guard_fired = True
+                        logger.info(
+                            "Job '%s': resume-guard short-circuit (resume on file + "
+                            "empty day) — emitting deterministic quiet-day note, "
+                            "skipping write-LLM for user=%s (B-0616-01)",
+                            job["id"], _rg_uid,
+                        )
+
                 # B-0510-01 Phase 6 — two-step briefing (decide + write).
                 # Unconditional for all briefing jobs. On any failure,
                 # _run_two_step_briefing returns None and deliver_content
                 # flows through Phase 5 voice-scan unchanged.
-                if should_deliver and success and _is_briefing_job(job):
+                if should_deliver and success and _is_briefing_job(job) and not _resume_guard_fired:
                     # S-0525-02 Domain 6: pass the silence tier so the write call
                     # branches into a graduated check-in. speak=False days emit
                     # [SILENT] at the raw stage (delivery already suppressed), so
@@ -2074,7 +2171,7 @@ def tick(verbose: bool = True, adapters=None, loop=None) -> int:
                 # Artemis B-0510-01 Phase 5 — semantic voice-scan.
                 # Last-resort catch for write-call drift or two-step failure.
                 # Briefing-only, fail-open on any LLM/HTTP/parse error.
-                if should_deliver and success and _is_briefing_job(job):
+                if should_deliver and success and _is_briefing_job(job) and not _resume_guard_fired:
                     vs_clean, vs_reason = _voice_scan_check(deliver_content, job["id"])
                     if not vs_clean:
                         logger.warning(
