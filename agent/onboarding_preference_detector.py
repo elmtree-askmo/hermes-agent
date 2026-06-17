@@ -10,11 +10,15 @@ mirrors milestone_detector (S-0601-03): a server-side state-reminder injected
 into context_prompt regardless of Coach's tool calls, gated by its own markers
 so it is onboarding-only and ask-once.
 
-State lives as two flag files under <user_dir>:
+State lives as flag files under <user_dir>:
   onboarding_preference_pending.flag — dropped at onboarding-complete on the
       non-blocking path; means "a preference question is due next turn".
   onboarding_preference_asked.flag — dropped when the question is injected;
       ask-once dedup. Once present, the detector never fires again.
+  onboarding_direction_present.flag — dropped on any single/multi dispatch
+      turn; marks that this onboarding arrived via the non-blocking path, so
+      the briefing turn — which is classified `none` — can still drop the
+      pending marker.
 
 This module reads/writes per-user artemis files directly (like
 milestone_detector) — it does not import the Artemis MCP server. All disk
@@ -28,6 +32,7 @@ from typing import Any
 
 _PENDING_FLAG = "onboarding_preference_pending.flag"
 _ASKED_FLAG = "onboarding_preference_asked.flag"
+_DIRECTION_FLAG = "onboarding_direction_present.flag"
 
 
 def detect_onboarding_preference_pending(user_dir: Path) -> dict[str, Any] | None:
@@ -84,6 +89,32 @@ def mark_onboarding_preference_pending(user_dir: Path) -> None:
             flag.write_text("1", encoding="utf-8")
     except OSError:
         return
+
+
+def mark_onboarding_direction_present(user_dir: Path) -> None:
+    """Mark that a single/multi dispatch occurred this onboarding (the goal
+    turn). Session-level: read later at onboarding-complete to decide the
+    non-blocking path, since the briefing turn itself classifies as 'none'.
+    Idempotent, best-effort (swallows write errors).
+    """
+    try:
+        d = Path(user_dir)
+        d.mkdir(parents=True, exist_ok=True)
+        flag = d / _DIRECTION_FLAG
+        if not flag.exists():
+            flag.write_text("1", encoding="utf-8")
+    except OSError:
+        return
+
+
+def has_onboarding_direction_present(user_dir: Path) -> bool:
+    """True iff a single/multi dispatch was marked this onboarding. Fail-safe:
+    any error returns False.
+    """
+    try:
+        return (Path(user_dir) / _DIRECTION_FLAG).exists()
+    except OSError:
+        return False
 
 
 def mark_onboarding_preference_asked(user_dir: Path) -> None:

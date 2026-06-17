@@ -61,3 +61,32 @@ def test_mark_pending_idempotent(tmp_path):
 
 def test_detect_on_nonexistent_dir_returns_none():
     assert detect_onboarding_preference_pending(Path("/nonexistent/xyz")) is None
+
+
+from agent.onboarding_preference_detector import (
+    mark_onboarding_direction_present,
+    has_onboarding_direction_present,
+)
+
+DIRECTION = "onboarding_direction_present.flag"
+
+
+def test_direction_absent_by_default(tmp_path):
+    assert has_onboarding_direction_present(tmp_path) is False
+
+
+def test_mark_direction_then_present(tmp_path):
+    mark_onboarding_direction_present(tmp_path)
+    assert (tmp_path / DIRECTION).exists()
+    assert has_onboarding_direction_present(tmp_path) is True
+
+
+def test_mark_direction_idempotent(tmp_path):
+    mark_onboarding_direction_present(tmp_path)
+    mark_onboarding_direction_present(tmp_path)  # no raise
+    assert has_onboarding_direction_present(tmp_path) is True
+
+
+def test_has_direction_on_nonexistent_dir_is_false():
+    from pathlib import Path
+    assert has_onboarding_direction_present(Path("/nonexistent/xyz")) is False

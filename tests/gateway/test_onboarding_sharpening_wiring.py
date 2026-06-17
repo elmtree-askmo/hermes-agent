@@ -43,18 +43,17 @@ from agent.onboarding_preference_detector import (
 )
 
 
-def _should_mark_pending(spawn_ok: bool, dispatch_type) -> bool:
-    """Mirror of the gateway gate: mark preference-pending only when the team
-    actually dispatched (non-blocking path) and the spawn succeeded."""
-    return bool(spawn_ok) and dispatch_type in ("single", "multi")
+def _should_mark_pending(spawn_ok: bool, direction_present: bool) -> bool:
+    """New gate: drop preference-pending when onboarding-complete spawned the
+    team AND this onboarding arrived via the non-blocking path (direction was
+    marked at the goal turn). No longer reads this-turn dispatch_type."""
+    return bool(spawn_ok) and bool(direction_present)
 
 
 def test_mark_pending_only_on_nonblocking_successful_spawn():
-    assert _should_mark_pending(True, "multi") is True
-    assert _should_mark_pending(True, "single") is True
-    assert _should_mark_pending(True, "none") is False      # blocking path: no preference marker
-    assert _should_mark_pending(False, "multi") is False    # dispatch failed: no team, no refinement
-    assert _should_mark_pending(True, None) is False         # detector off/unbound
+    assert _should_mark_pending(True, True) is True       # non-blocking + spawned
+    assert _should_mark_pending(True, False) is False      # blocking path (no direction flag)
+    assert _should_mark_pending(False, True) is False      # spawn failed
 
 
 def test_pending_then_asked_lifecycle(tmp_path):

@@ -2522,6 +2522,25 @@ class GatewayRunner:
                 _dispatches = _detection.get("dispatches") or []
                 _uid = getattr(source, "user_id", "") or ""
 
+                # S-0617-01: mark the non-blocking path at the GOAL turn. Coach
+                # often defers briefing across several sharpening turns, so the
+                # briefing turn (where onboarding-complete fires) classifies as
+                # 'none'. A session-level flag set here lets the producer at
+                # onboarding-complete still recognize the non-blocking path.
+                if _uid and _dispatch_type in ("single", "multi"):
+                    try:
+                        import os as _dpos
+                        from pathlib import Path as _DPPath
+                        _dp_hh = _dpos.environ.get("HERMES_HOME") or str(_DPPath.home() / ".hermes")
+                        from agent.onboarding_preference_detector import (
+                            mark_onboarding_direction_present,
+                        )
+                        mark_onboarding_direction_present(
+                            _DPPath(_dp_hh) / "artemis" / _uid
+                        )
+                    except Exception as _dp_err:  # noqa: BLE001
+                        logger.debug("direction-present mark failed: %s", _dp_err)
+
                 _should_auto_execute = (
                     _dispatch_type in ("single", "multi")
                     and _conf == "high"
@@ -3561,34 +3580,36 @@ class GatewayRunner:
                                 source.chat_id or "unknown",
                                 _onb_result.get("mode", "sync"),
                             )
-                            # S-0617-01 non-blocking path: the team just
-                            # dispatched (direction was present this turn →
-                            # dispatch_type single/multi). Drop a preference-
-                            # pending marker so next turn's milestone-style
-                            # injection asks ONE filter-preference question.
-                            # The blocking path (dispatch_type none) handles
-                            # sharpening in the cold-start block, so no marker
-                            # here. Read _dispatch_type defensively (unbound if
-                            # the detector path was off this turn).
-                            _pref_dt = locals().get("_dispatch_type")
-                            if _pref_dt in ("single", "multi"):
-                                try:
-                                    from agent.onboarding_preference_detector import (
-                                        mark_onboarding_preference_pending,
-                                    )
-                                    mark_onboarding_preference_pending(
-                                        _Path(_hh) / "artemis" / _uid
-                                    )
+                            # S-0617-01 non-blocking path: drop the preference-
+                            # pending marker IFF this onboarding arrived via the
+                            # non-blocking path (a single/multi dispatch was
+                            # marked on the goal turn). The briefing turn itself
+                            # classifies as 'none', so we must NOT read this
+                            # turn's dispatch_type — read the session-level
+                            # direction flag set at the goal turn. Blocking-path
+                            # (Jordan) onboardings are 'none' throughout, so the
+                            # flag is absent and no preference question fires.
+                            try:
+                                import os as _pfmos
+                                from pathlib import Path as _PFMPath
+                                _pfm_hh = _pfmos.environ.get("HERMES_HOME") or str(_PFMPath.home() / ".hermes")
+                                _pfm_dir = _PFMPath(_pfm_hh) / "artemis" / _uid
+                                from agent.onboarding_preference_detector import (
+                                    has_onboarding_direction_present,
+                                    mark_onboarding_preference_pending,
+                                )
+                                if has_onboarding_direction_present(_pfm_dir):
+                                    mark_onboarding_preference_pending(_pfm_dir)
                                     logger.info(
                                         "onboarding preference-pending marked: "
-                                        "chat=%s dispatch=%s",
-                                        source.chat_id or "unknown", _pref_dt,
+                                        "chat=%s (non-blocking path)",
+                                        source.chat_id or "unknown",
                                     )
-                                except Exception as _pref_err:  # noqa: BLE001
-                                    logger.debug(
-                                        "preference-pending mark failed: %s",
-                                        _pref_err,
-                                    )
+                            except Exception as _pfm_err:  # noqa: BLE001
+                                logger.debug(
+                                    "preference-pending mark failed: %s",
+                                    _pfm_err,
+                                )
                         else:
                             logger.warning(
                                 "onboarding-complete: chat=%s dispatch_failed "
