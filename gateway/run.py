@@ -2776,18 +2776,18 @@ class GatewayRunner:
                     else:
                         _cs_block = (
                             "\n**Onboarding handoff turn — the team has not yet introduced itself to this user.** "
-                            "Your reply must follow this shape:\n\n"
+                            "Your reply must follow this shape, and asks NO question this turn:\n\n"
                             "1. Mirror back what the user just told you in 1-2 short sentences. One normalizing line is fine "
                             "(e.g. 'that's a clean pivot' / 'common starting point' — but only when it fits).\n"
                             "2. One short handoff sentence that names tomorrow morning's briefing — e.g. 'I'm briefing the team now — first results land in tomorrow morning's briefing.' "
                             "Do not say 'you'll hear from them in a minute' or leave the timing vague. "
                             "The three sub-agents (Scout, Analyst, Publicist) will introduce themselves in first person seconds after your reply lands.\n"
-                            "3. One question about communication tone: 'do you want me to be direct, gentle, or somewhere in between?' "
-                            "When the user answers, call save_user_profile with persona='direct', 'gentle', or 'balanced' accordingly, then reply with a single-word ack ('Got it.' / 'Done.' / 'Noted.'). "
+                            "Do NOT ask any question on this turn — not the communication-tone question, not a work-direction question, nothing. "
+                            "The tone question and the preference questions come AFTER the self-intros, as a one-at-a-time series (see § Sharpening Questions); asking anything here would leave two questions hanging while the team self-intros land. "
                             "Do not ask about work direction (which company / role / what to prioritize).\n\n"
                             "Do not list capabilities or what you can help with. Do not narrate what the sub-agents are doing — "
                             "their introduction is their job. Do not propose work directions or pull together reads / scans / comparisons. "
-                            "Light shape per § Turn Weight, ~50-70 words. Recording facts the user just stated (silent save_user_profile) is fine."
+                            "Light shape per § Turn Weight, ~40-60 words, statement-only. Recording facts the user just stated (silent save_user_profile) is fine."
                         )
                     # S-0617-01: append onboarding sharpening, branched on the
                     # turn-intent detector's dispatch_type (computed earlier this
