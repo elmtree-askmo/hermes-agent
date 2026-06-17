@@ -731,6 +731,48 @@ def render_injection_block(detection: dict[str, Any]) -> str | None:
     return "\n".join(lines)
 
 
+def render_onboarding_sharpening_block(dispatch_type: str | None) -> str | None:
+    """Onboarding sharpening instruction appended to the cold-start block,
+    branched on the turn-intent detector's dispatch_type for the first
+    substantive onboarding turn. See docs/specs/sharpening-questions.md
+    § Amendment v3 (S-0617-01).
+
+    - "none"            → direction absent → BLOCKING reverse-engineering
+                          series; the detector did not auto-dispatch, so the
+                          team has not started. Coach surfaces a direction
+                          before saying "briefing the team".
+    - "single"/"multi"  → direction present → NON-BLOCKING preference series;
+                          the team already auto-dispatched (correct per the
+                          simulation's Maya path). Coach asks the filter axes
+                          the scan needs but the resume/conversation didn't
+                          supply, after the self-intros.
+    - anything else / None → no sharpening append (safe fallback: detector
+                          off, errored, or a non-onboarding dispatch shape).
+    """
+    if dispatch_type == "none":
+        return (
+            "\n**Onboarding sharpening — direction not yet clear.** "
+            "After the tone-preference ack, do NOT say 'briefing the team' yet. "
+            "First surface a direction by asking one axis (reverse-engineering question) per turn "
+            "(what kind of work they've enjoyed or done, then what environment fits them) — "
+            "read toward a profile from concrete history, never ask them to declare a goal they don't have. "
+            "Wait for each answer before the next axis. Once a workable direction emerges, "
+            "synthesize it back in one sentence, then say you're briefing the team. "
+            "The sub-agent self-intros fire after you say that, so do not preempt them."
+        )
+    if dispatch_type in ("single", "multi"):
+        return (
+            "\n**Onboarding sharpening — refine the scan's filters.** "
+            "The team is already starting (the self-intros land right after your reply). "
+            "After the tone-preference ack and the self-intros, ask ONE short preference question per turn — "
+            "only for the filter axes the scan needs but the resume/conversation hasn't given you "
+            "(prestige-vs-fit weighting, and any role shapes to exclude). "
+            "One axis per turn, wait for the answer, stop as soon as the remaining unknowns wouldn't sharpen the scan. "
+            "Do not re-ask anything already known from the resume (e.g. location)."
+        )
+    return None
+
+
 def render_already_executed_block(
     sub_agent: str,
     action: str,

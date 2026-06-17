@@ -1242,3 +1242,34 @@ class TestRenderShortCircuitTranscriptText:
             lead_in="ignored",
         )
         assert out == "Scout: x"
+
+
+# =========================================================================
+# render_onboarding_sharpening_block (S-0617-01)
+# =========================================================================
+
+class TestRenderOnboardingSharpeningBlock:
+    def test_none_returns_blocking_reverse_engineering_instruction(self):
+        block = tid.render_onboarding_sharpening_block("none")
+        assert block is not None
+        assert "one axis" in block.lower()
+        assert "briefing the team" in block.lower()
+        assert "direction" in block.lower()
+
+    def test_multi_returns_nonblocking_preference_instruction(self):
+        block = tid.render_onboarding_sharpening_block("multi")
+        assert block is not None
+        assert "one axis" in block.lower()
+        assert "after" in block.lower()
+
+    def test_single_uses_same_nonblocking_path_as_multi(self):
+        assert tid.render_onboarding_sharpening_block("single") == tid.render_onboarding_sharpening_block("multi")
+
+    def test_surface_existing_returns_none(self):
+        assert tid.render_onboarding_sharpening_block("surface_existing") is None
+
+    def test_unknown_returns_none(self):
+        assert tid.render_onboarding_sharpening_block("bogus") is None
+
+    def test_none_arg_returns_none(self):
+        assert tid.render_onboarding_sharpening_block(None) is None
