@@ -3528,6 +3528,34 @@ class GatewayRunner:
                                 source.chat_id or "unknown",
                                 _onb_result.get("mode", "sync"),
                             )
+                            # S-0617-01 non-blocking path: the team just
+                            # dispatched (direction was present this turn →
+                            # dispatch_type single/multi). Drop a preference-
+                            # pending marker so next turn's milestone-style
+                            # injection asks ONE filter-preference question.
+                            # The blocking path (dispatch_type none) handles
+                            # sharpening in the cold-start block, so no marker
+                            # here. Read _dispatch_type defensively (unbound if
+                            # the detector path was off this turn).
+                            _pref_dt = locals().get("_dispatch_type")
+                            if _pref_dt in ("single", "multi"):
+                                try:
+                                    from agent.onboarding_preference_detector import (
+                                        mark_onboarding_preference_pending,
+                                    )
+                                    mark_onboarding_preference_pending(
+                                        _Path(_hh) / "artemis" / _uid
+                                    )
+                                    logger.info(
+                                        "onboarding preference-pending marked: "
+                                        "chat=%s dispatch=%s",
+                                        source.chat_id or "unknown", _pref_dt,
+                                    )
+                                except Exception as _pref_err:  # noqa: BLE001
+                                    logger.debug(
+                                        "preference-pending mark failed: %s",
+                                        _pref_err,
+                                    )
                         else:
                             logger.warning(
                                 "onboarding-complete: chat=%s dispatch_failed "
