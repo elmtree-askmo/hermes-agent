@@ -2745,10 +2745,23 @@ class GatewayRunner:
                         "their introduction is their job. Do not propose work directions or pull together reads / scans / comparisons. "
                         "Light shape per § Turn Weight, ~50-70 words. Recording facts the user just stated (silent save_user_profile) is fine."
                     )
+                    # S-0617-01: append onboarding sharpening, branched on the
+                    # turn-intent detector's dispatch_type (computed earlier this
+                    # turn). _dispatch_type may be unbound if the detector path
+                    # was disabled (HERMES_ARTEMIS_ENABLED off) or errored, so
+                    # read it via locals() and degrade to no-append.
+                    from agent.turn_intent_detector import (
+                        render_onboarding_sharpening_block,
+                    )
+                    _onb_dispatch_type = locals().get("_dispatch_type")
+                    _onb_sharpen = render_onboarding_sharpening_block(_onb_dispatch_type)
+                    if _onb_sharpen:
+                        _cs_block = _cs_block + _onb_sharpen
                     context_prompt = context_prompt + "\n" + _cs_block
                     logger.info(
-                        "cold-start onboarding block injected: chat=%s",
+                        "cold-start onboarding block injected: chat=%s sharpen=%s",
                         source.chat_id or "unknown",
+                        _onb_dispatch_type or "none-bound",
                     )
         except Exception as _cs_err:  # noqa: BLE001
             logger.debug("cold-start block injection failed: %s", _cs_err)
