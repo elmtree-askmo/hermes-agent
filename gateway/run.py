@@ -2739,41 +2739,79 @@ class GatewayRunner:
                 # field but no flag file (e.g. pre-flag profiles, tests
                 # that seed only the profile).
                 _cs_legacy_pushed = False
+                _cs_has_goal = False
                 try:
                     _cs_pp = _cs_user_dir / "profile.json"
                     if _cs_pp.exists():
                         import json as _csjson
                         _cs_profile = _csjson.loads(_cs_pp.read_text(encoding="utf-8"))
-                        if isinstance(_cs_profile, dict) and _cs_profile.get("sub_agent_intros_pushed"):
-                            _cs_legacy_pushed = True
+                        if isinstance(_cs_profile, dict):
+                            if _cs_profile.get("sub_agent_intros_pushed"):
+                                _cs_legacy_pushed = True
+                            if _cs_profile.get("goal"):
+                                _cs_has_goal = True
                 except Exception:
                     _cs_legacy_pushed = False
                 if not _cs_flag.exists() and not _cs_legacy_pushed:
-                    _cs_block = (
-                        "\n**Onboarding handoff turn — the team has not yet introduced itself to this user.** "
-                        "Your reply must follow this shape:\n\n"
-                        "1. Mirror back what the user just told you in 1-2 short sentences. One normalizing line is fine "
-                        "(e.g. 'that's a clean pivot' / 'common starting point' — but only when it fits).\n"
-                        "2. One short handoff sentence that names tomorrow morning's briefing — e.g. 'I'm briefing the team now — first results land in tomorrow morning's briefing.' "
-                        "Do not say 'you'll hear from them in a minute' or leave the timing vague. "
-                        "The three sub-agents (Scout, Analyst, Publicist) will introduce themselves in first person seconds after your reply lands.\n"
-                        "3. One question about communication tone: 'do you want me to be direct, gentle, or somewhere in between?' "
-                        "When the user answers, call save_user_profile with persona='direct', 'gentle', or 'balanced' accordingly, then reply with a single-word ack ('Got it.' / 'Done.' / 'Noted.'). "
-                        "Do not ask about work direction (which company / role / what to prioritize).\n\n"
-                        "Do not list capabilities or what you can help with. Do not narrate what the sub-agents are doing — "
-                        "their introduction is their job. Do not propose work directions or pull together reads / scans / comparisons. "
-                        "Light shape per § Turn Weight, ~50-70 words. Recording facts the user just stated (silent save_user_profile) is fine."
+                    # S-0617-01: branch the cold-start block on whether a
+                    # direction/goal is present this turn. On the user's first
+                    # message before they've given any direction (e.g. a bare
+                    # "hi"), Coach should invite the goal only — not brief the
+                    # team or ask the tone question (those belong on the turn the
+                    # goal actually arrives). "No direction yet" = the detector
+                    # saw nothing dispatchable AND the profile has no goal yet.
+                    _cs_dt = locals().get("_dispatch_type")
+                    _cs_no_direction = (
+                        _cs_dt in (None, "none") and not _cs_has_goal
                     )
+                    if _cs_no_direction:
+                        _cs_block = (
+                            "\n**Onboarding first turn — the user has not yet told you their goal.** "
+                            "Do NOT brief the team, do NOT ask the tone preference, do NOT list capabilities, "
+                            "do NOT propose work directions. Your reply invites the two things you need to start: "
+                            "what they're looking for (the goal) and where they're starting from (background). "
+                            "Offer the low-friction options: they can type it out or drop their resume in and you'll read between the lines. "
+                            "Warm, brief (~40-60 words), one open invitation — no menu, no phase language."
+                        )
+                    else:
+                        _cs_block = (
+                            "\n**Onboarding handoff turn — the team has not yet introduced itself to this user.** "
+                            "Your reply must follow this shape:\n\n"
+                            "1. Mirror back what the user just told you in 1-2 short sentences. One normalizing line is fine "
+                            "(e.g. 'that's a clean pivot' / 'common starting point' — but only when it fits).\n"
+                            "2. One short handoff sentence that names tomorrow morning's briefing — e.g. 'I'm briefing the team now — first results land in tomorrow morning's briefing.' "
+                            "Do not say 'you'll hear from them in a minute' or leave the timing vague. "
+                            "The three sub-agents (Scout, Analyst, Publicist) will introduce themselves in first person seconds after your reply lands.\n"
+                            "3. One question about communication tone: 'do you want me to be direct, gentle, or somewhere in between?' "
+                            "When the user answers, call save_user_profile with persona='direct', 'gentle', or 'balanced' accordingly, then reply with a single-word ack ('Got it.' / 'Done.' / 'Noted.'). "
+                            "Do not ask about work direction (which company / role / what to prioritize).\n\n"
+                            "Do not list capabilities or what you can help with. Do not narrate what the sub-agents are doing — "
+                            "their introduction is their job. Do not propose work directions or pull together reads / scans / comparisons. "
+                            "Light shape per § Turn Weight, ~50-70 words. Recording facts the user just stated (silent save_user_profile) is fine."
+                        )
                     # S-0617-01: append onboarding sharpening, branched on the
                     # turn-intent detector's dispatch_type (computed earlier this
                     # turn). _dispatch_type may be unbound if the detector path
                     # was disabled (HERMES_ARTEMIS_ENABLED off) or errored, so
                     # read it via locals() and degrade to no-append.
+                    #
+                    # Skip the blocking reverse-engineering append on the pure
+                    # goal-invitation turn (_cs_no_direction): that append tells
+                    # Coach to "ask one reverse-engineering axis per turn" after
+                    # a tone-preference ack that has not happened on a bare first
+                    # turn — it would contradict the single open goal+resume
+                    # invitation. The goal-invitation block wins here; the
+                    # sharpening append still fires on later no-direction turns
+                    # where reverse-engineering is due.
                     from agent.turn_intent_detector import (
                         render_onboarding_sharpening_block,
                     )
                     _onb_dispatch_type = locals().get("_dispatch_type")
-                    _onb_sharpen = render_onboarding_sharpening_block(_onb_dispatch_type)
+                    _onb_sharpen = (
+                        None
+                        if _cs_no_direction
+                        else render_onboarding_sharpening_block(_onb_dispatch_type)
+                    )
                     if _onb_sharpen:
                         _cs_block = _cs_block + _onb_sharpen
                     context_prompt = context_prompt + "\n" + _cs_block
