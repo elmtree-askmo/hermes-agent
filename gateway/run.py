@@ -3536,10 +3536,31 @@ class GatewayRunner:
                         # Fire-and-forget: helper sleeps 3s before posting
                         # so Coach's reply lands on Slack first, then
                         # team self-intros follow. Gateway doesn't wait.
+                        # S-0617-01 v3: on the non-blocking onboarding path
+                        # (direction was present this onboarding → the team
+                        # was briefed, not reverse-engineered), the helper
+                        # proactively posts the sharpening invite right after
+                        # the self-intros (sim Maya beat 7). Gated on the
+                        # session-level direction flag. Blocking path (Jordan)
+                        # has no direction flag → no invite.
+                        _onb_invite = None
+                        try:
+                            from agent.onboarding_preference_detector import (
+                                has_onboarding_direction_present,
+                            )
+                            if has_onboarding_direction_present(_Path(_hh) / "artemis" / _uid):
+                                _onb_invite = (
+                                    "While the team gets up to speed — want to answer a few "
+                                    "quick questions that'll make the results sharper? "
+                                    "I'll send them one at a time."
+                                )
+                        except Exception as _inv_err:  # noqa: BLE001
+                            logger.debug("sharpening-invite gate failed: %s", _inv_err)
                         _onb_result = _onb_execute(
                             _uid, _onb["intros"],
                             delay_seconds=3.0,
                             fire_and_forget=True,
+                            sharpening_invite=_onb_invite,
                         )
                         if _onb_result.get("ok"):
                             logger.info(
@@ -3547,11 +3568,6 @@ class GatewayRunner:
                                 source.chat_id or "unknown",
                                 _onb_result.get("mode", "sync"),
                             )
-                            # S-0617-01 v3: the proactive sharpening invite that
-                            # consumes the onboarding direction flag here is
-                            # wired in a separate later task. No preference
-                            # action at this site for now (see
-                            # docs/specs/sharpening-questions.md § Amendment v3).
                         else:
                             logger.warning(
                                 "onboarding-complete: chat=%s dispatch_failed "
