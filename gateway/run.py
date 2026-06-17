@@ -3599,6 +3599,7 @@ class GatewayRunner:
                             delay_seconds=3.0,
                             fire_and_forget=True,
                             sharpening_invite=_onb_invite,
+                            session_id=getattr(session_entry, "session_id", None),
                         )
                         if _onb_result.get("ok"):
                             logger.info(

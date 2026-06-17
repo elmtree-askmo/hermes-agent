@@ -296,6 +296,7 @@ def execute_via_helper(
     delay_seconds: float = 0.0,
     fire_and_forget: bool = False,
     sharpening_invite: str | None = None,
+    session_id: str | None = None,
 ) -> dict[str, Any]:
     """Run the Artemis helper script that pushes the 3 self-intros and
     sets the onboarding-pushed flag.
@@ -313,6 +314,12 @@ def execute_via_helper(
         message to the user's DM after the 3 self-intros succeed (the
         onboarding sharpening invite). Used only on the non-blocking
         onboarding path.
+      session_id: the Coach session id (gateway session_entry.session_id).
+        When set, the helper appends the self-intros + invite to this
+        session's transcript in state.db so Coach's next turn "sees" the
+        out-of-band messages it sent (otherwise next-turn context, which
+        reads state.db only, would miss them and Coach can't follow up on
+        a reply to the invite).
 
     Returns:
       Sync mode: {"ok": True, "pushed": <int>} on success
@@ -343,6 +350,7 @@ def execute_via_helper(
         "intros": intros,
         "delay_seconds": delay_seconds,
         "sharpening_invite": sharpening_invite,
+        "session_id": session_id,
     })
 
     # Same venv resolution as turn_intent_detector — Artemis MCP server
