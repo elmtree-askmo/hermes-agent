@@ -58,21 +58,40 @@ reply. You are NOT writing text; you only choose the emoji.
 User's latest message:
 {user_message}
 
+A reaction is a HIGHLIGHT, not an acknowledgment of every turn. React only
+when the message carries real energy or texture — an opinion, a vivid
+preference, a commitment, a burst of warmth. Most plain replies get NO
+reaction. Aim to react to only the standout turns (roughly one in three),
+never to every answer. When in doubt, choose null — a missing reaction is
+fine; a reaction on a flat turn makes Coach feel like a bot that likes
+everything.
+
 Choose exactly one, by the TONE of the user's message:
 
 - **fire** — a sharp, vivid take: a strong like/dislike, a decisive
-  exclusion ("the worst job would be X"), an emphatic agreement
-  ("I love it"), or a "doing it right now" follow-through.
+  exclusion ("scheduling posts someone else wrote all day", "definitely
+  not big corporate"), an emphatic agreement ("I love it"), or a
+  "doing it right now" follow-through ("doing that right now").
 - **muscle** — a let's-go, I'm-in burst of forward energy and commitment
   ("ok let's go", "I'm in", "ready").
-- **raised_hands** — warm positive feeling or a concrete preference shared
-  ("honestly really good", "thanks", "chicago but open to nyc or la").
-- **thumbsup** — a crisp, plain answer or pick to Coach's question
-  ("tomorrow", "role fit", "yeah", "sounds good").
-- **null** — none of the above. The message is NOT a warm/decisive
-  response to Coach: it's a question, a vent, a report of bad news, neutral
-  logistics, or the user opening a brand-new topic. When unsure, choose
-  null — a missing reaction is fine; a wrong one is not.
+- **raised_hands** — genuine warmth or a preference shared WITH some
+  texture/reasoning ("honestly really good", "amazing, thanks",
+  "chicago but open to nyc or la", "role fit — I want to actually do
+  things not just have a name").
+- **thumbsup** — use SPARINGLY, only for a deliberate decision/pick that
+  resolves a choice ("tomorrow" when picking when to act). A bare option
+  word echoed back is NOT this — see null.
+- **null** — the default. Choose null whenever the message lacks standout
+  energy, including:
+  • a bare option-word picked from a menu Coach offered ("direct",
+    "gentle", "in between", "yes", "no", "remote") — a mechanical choice
+    with no opinion or texture;
+  • a pure acknowledgment that adds no new information ("ok", "sure",
+    "got it", "sounds good", "noted", "k");
+  • closing or exiting the conversation ("no, i'm good", "nope I think
+    I'm good", "that's all", "I'm done", "all set");
+  • a question, a vent, a report of bad news, self-doubt
+    ("not very impressive"), neutral logistics, or opening a new topic.
 
 Return STRICT JSON, no prose, no markdown fence:
 {
