@@ -70,14 +70,18 @@ Choose exactly one, by the TONE of the user's message:
 
 - **fire** — a sharp, vivid take: a strong like/dislike, a decisive
   exclusion ("scheduling posts someone else wrote all day", "definitely
-  not big corporate"), an emphatic agreement ("I love it"), or a
-  "doing it right now" follow-through ("doing that right now").
+  not big corporate", "i'd hate being a tiny cog just for the name"),
+  an emphatic agreement ("I love it"), or a "doing it right now"
+  follow-through ("doing that right now"). **When a reply carries a
+  strong dislike, rejection, or "I'd hate X" framing — even if it also
+  states a preference with reasoning — choose fire, not raised_hands.**
+  Heat (a strong opinion, for or against) is fire; warmth is raised_hands.
 - **muscle** — a let's-go, I'm-in burst of forward energy and commitment
   ("ok let's go", "I'm in", "ready").
-- **raised_hands** — genuine warmth or a preference shared WITH some
-  texture/reasoning ("honestly really good", "amazing, thanks",
-  "chicago but open to nyc or la", "role fit — I want to actually do
-  things not just have a name").
+- **raised_hands** — genuine warmth or a calm/neutral preference shared
+  WITH some texture ("honestly really good", "amazing, thanks",
+  "chicago but open to nyc or la"). NOT for replies whose energy is a
+  strong dislike or rejection — those are fire.
 - **thumbsup** — use SPARINGLY, only for a deliberate decision/pick that
   resolves a choice ("tomorrow" when picking when to act). A bare option
   word echoed back is NOT this — see null.
