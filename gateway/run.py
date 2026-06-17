@@ -2851,6 +2851,39 @@ class GatewayRunner:
         except Exception as _ms_err:  # noqa: BLE001
             logger.debug("milestone block injection failed: %s", _ms_err)
 
+        # S-0617-01 non-blocking path: onboarding preference-sharpening.
+        # Fires on the turn AFTER the self-intros (the cold-start block has
+        # already retired because onboarding_pushed.flag was written last turn,
+        # so this cannot live there). Gated by the detector's own pending/asked
+        # markers — onboarding-only, ask-once. Independent of the milestone gate.
+        try:
+            import os as _pfos
+            _pf_enabled = str(
+                _pfos.environ.get("HERMES_ARTEMIS_ENABLED", "")
+            ).strip().lower() in ("1", "true", "yes", "on")
+            _pfuid = getattr(source, "user_id", "") or ""
+            if _pf_enabled and _pfuid:
+                from pathlib import Path as _PFPath
+                _pf_hh = _pfos.environ.get("HERMES_HOME") or str(_PFPath.home() / ".hermes")
+                _pf_user_dir = _PFPath(_pf_hh) / "artemis" / _pfuid
+                from agent.onboarding_preference_detector import (
+                    detect_onboarding_preference_pending,
+                    render_onboarding_preference_block,
+                    mark_onboarding_preference_asked,
+                )
+                _pf_pending = detect_onboarding_preference_pending(_pf_user_dir)
+                if _pf_pending:
+                    _pf_block = render_onboarding_preference_block(_pf_pending)
+                    if _pf_block:
+                        context_prompt = context_prompt + _pf_block
+                        mark_onboarding_preference_asked(_pf_user_dir)
+                        logger.info(
+                            "onboarding preference sharpening injected: chat=%s",
+                            source.chat_id or "unknown",
+                        )
+        except Exception as _pf_err:  # noqa: BLE001
+            logger.debug("onboarding preference injection failed: %s", _pf_err)
+
         # If the previous session expired and was auto-reset, prepend a notice
         # so the agent knows this is a fresh conversation (not an intentional /reset).
         if getattr(session_entry, 'was_auto_reset', False):

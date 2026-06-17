@@ -62,3 +62,22 @@ def test_pending_then_asked_lifecycle(tmp_path):
     assert detect_onboarding_preference_pending(tmp_path) is not None
     mark_onboarding_preference_asked(tmp_path)
     assert detect_onboarding_preference_pending(tmp_path) is None
+
+
+from agent.onboarding_preference_detector import render_onboarding_preference_block
+
+
+def _compose_preference(context_prompt: str, pending) -> str:
+    """Mirror of the gateway preference injection: append the block iff pending."""
+    block = render_onboarding_preference_block(pending)
+    return context_prompt + block if block else context_prompt
+
+
+def test_preference_pending_appends_block():
+    composed = _compose_preference("BASE", {"kind": "preference"})
+    assert composed.startswith("BASE")
+    assert "refine the scan's filters" in composed
+
+
+def test_no_pending_appends_nothing():
+    assert _compose_preference("BASE", None) == "BASE"
