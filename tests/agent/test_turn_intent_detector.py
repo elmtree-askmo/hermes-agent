@@ -1253,17 +1253,17 @@ class TestRenderOnboardingSharpeningBlock:
         block = tid.render_onboarding_sharpening_block("none")
         assert block is not None
         assert "one axis" in block.lower()
+        # substring appears in the "do NOT say 'briefing the team' yet" instruction
         assert "briefing the team" in block.lower()
         assert "direction" in block.lower()
 
-    def test_multi_returns_nonblocking_preference_instruction(self):
-        block = tid.render_onboarding_sharpening_block("multi")
-        assert block is not None
-        assert "one axis" in block.lower()
-        assert "after" in block.lower()
+    def test_multi_returns_none(self):
+        # non-blocking path moved to onboarding_preference_detector (S-0617-01 v3
+        # correction). The cold-start block no longer carries it.
+        assert tid.render_onboarding_sharpening_block("multi") is None
 
-    def test_single_uses_same_nonblocking_path_as_multi(self):
-        assert tid.render_onboarding_sharpening_block("single") == tid.render_onboarding_sharpening_block("multi")
+    def test_single_returns_none(self):
+        assert tid.render_onboarding_sharpening_block("single") is None
 
     def test_surface_existing_returns_none(self):
         assert tid.render_onboarding_sharpening_block("surface_existing") is None
