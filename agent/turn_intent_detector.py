@@ -163,11 +163,15 @@ exchanges, decide the **dispatch shape** this turn needs.
   'coach-commit-' prefix). Example: 'diagnose-glossier-rejection'.
 - `action`: one-line verb+object describing the work. Example:
   "Diagnose what specifically lost the Glossier interview".
-- `announcement`: one sentence, third-person, sub-agent as subject.
-  Example: "Analyst is digging into what Glossier weighted differently."
-  Keep it short — the real insight comes later from Executor via
-  post_activity_log. This is the "team is on it" placeholder, except we
-  don't push the placeholder; the Coach lead-in carries it.
+- `announcement`: one sentence in the sub-agent's OWN FIRST-PERSON
+  voice — it is rendered under a `<emoji> *<Name>:*` prefix that already
+  names the speaker, so the sentence must NOT re-name the sub-agent in
+  third person. Write what the sub-agent says as "I" (or subject elided):
+  "Digging into what Glossier weighted differently." — NOT "Analyst is
+  digging into…". Keep it short — the real insight comes later from
+  Executor via post_activity_log. This is the "team is on it"
+  placeholder, except we don't push the placeholder; the Coach lead-in
+  carries it.
 
 **Also generate a Coach-voice `lead_in`:**
 
