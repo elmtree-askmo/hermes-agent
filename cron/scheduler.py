@@ -408,6 +408,7 @@ Your job: extract the SIGNAL — ignore all reasoning, extract only the user-fac
 Return a JSON object with EXACTLY these fields:
 {{
   "briefing_type": "quiet_day" | "content",
+  "opener": "<one short greeting line about what the team did overnight, or null>",
   "follow_ups": ["<item>", ...],
   "coaches_take": "<first-person judgment + a forward A/B choice, second-person-addressed, no reasoning>",
   "observation": "<if the Coach proactively named a recurring CROSS-SESSION pattern the user did NOT raise this turn, copy that WHOLE beat VERBATIM — the across-our-conversations framing + the substance/affect + its correction invitation; else null>",
@@ -416,6 +417,7 @@ Return a JSON object with EXACTLY these fields:
 
 Rules:
 - briefing_type: "quiet_day" if nothing actionable today; "content" if follow_ups or new roles present.
+- opener: ONE short, natural greeting line summarizing what the team did overnight — vary it by the day's content. Examples: "Morning. Your team ran 3 things overnight." / "Morning. Analyst finished something interesting overnight." / "Morning — busy night, two fronts moved." Do NOT state an exact count unless it's clearly correct; a qualitative phrasing is fine (the server adds a count-based fallback if you omit this). null on a quiet day with no team work.
 - follow_ups: list of concrete actionable items from the briefing. Empty list [] if none. (Used only by the silence check-in path; the normal briefing does not render a follow-ups block.)
 - coaches_take: this is the "My take:" beat. Distil the core JUDGMENT to 1-3 sentences AND end with a forward A/B choice — two concrete next actions the user can pick between (e.g. "review the materials, or want me to walk you through them first?"). Lead with a point of view (lean a direction), don't just summarize. MUST be first-person Coach voice ("I'll...", "My read is...", "You've done..."). NEVER include any person's name (first or last). No third-person pronouns (she/he/they) referring to the user. Replace any name with "they" or rephrase to second-person ("you"). Do NOT put the proactive cross-session observation here — that goes in `observation`, intact.
 - observation: if the raw output proactively surfaces a recurring CROSS-SESSION pattern (the Coach naming something the user did NOT raise this turn — e.g. "one thing I've noticed across our conversations…", a recurring emotional theme, a pattern in how the user talks about their work), copy that WHOLE beat VERBATIM into this field: the across-sessions framing, the substance/affect, AND its correction invitation ("tell me if I'm wrong" / "push back" / "flip it back"). null if absent. Do NOT distil, paraphrase, soften, or fold it into coaches_take — it is a Coach-initiated observation; its exact framing + correction handle must reach the user intact.
@@ -432,11 +434,11 @@ You have a decision package below. Render it as a concise Slack message.
 Rules:
 - Address the user in second person ("you", "your") ONLY. NEVER include any person's name (first or last) anywhere in the output. Never use she/he/they for the user. If a name appears in a follow-up item (e.g. "Amy's check-in"), replace with "their" or rephrase without the name.
 - Begin directly with the briefing content. No "Here is your briefing" preamble.
-- Do NOT render any sub-agent attribution lines (e.g. "🔍 Scout ...", "✍️ Publicist ..."). Attribution is added separately by the system — never write it yourself.
+- Do NOT render the opener/greeting line OR any sub-agent attribution lines (e.g. "Morning, your team...", "🔍 Scout ...", "✍️ Publicist ..."). The opener and attribution are added separately by the system — never write them yourself.
 - Do NOT render a Follow-ups block, a Pending block, or any dated to-do list. The whole briefing body is just the take below.
 - For quiet_day: one short paragraph in the same "My take:" voice.
 - For content: render a single \U0001f4ac *My take:* beat — the coaches_take, lightly polished, preserving its judgment and its closing A/B choice.
-- My take: lead with a point of view (a direction you lean), then end with a two-choice closer offering the user two concrete next actions to pick between. Keep it to a few sentences — no lists, no headers other than the "My take:" label.
+- My take: lead with a point of view (a direction you lean). Put the judgment in the first paragraph, then put the two-choice closer (offering the user two concrete next actions to pick between) in ITS OWN separate paragraph after a blank line. No lists, no headers other than the "My take:" label.
 - observation: if non-null, render it as its OWN beat (its own short paragraph inside the My take area), VERBATIM — preserve the across-our-conversations framing, the substance/affect, and the correction invitation exactly. Do NOT paraphrase, shorten, soften, or merge it into the rest of the take. REQUIRED whenever present (it is a Coach-initiated observation and the user must get its exact framing + the handle to push back).
 - SILENCE CHECK-IN: if the package contains a "silence_tier" field, the user has gone quiet for days and this is a low-key re-engagement message, NOT a normal briefing. Override the format above entirely — plain text only, no code block, no roles sections, no attribution lines, no "My take:" label:
   - "day1": one brief, warm line noting it's been quiet, plus at most ONE fresh lead drawn from follow_ups if present. 1-2 sentences total. Low-key, not a full briefing.
@@ -576,7 +578,8 @@ def _briefing_write_call(decision_pkg: dict, job_id: str = "?") -> str | None:
 
 
 def _run_two_step_briefing(
-    raw_output: str, job_id: str = "?", silence_tier: str | None = None
+    raw_output: str, job_id: str = "?", silence_tier: str | None = None,
+    capture: dict | None = None,
 ) -> str | None:
     """Phase 6 orchestrator — decide then write.
 
@@ -589,6 +592,11 @@ def _run_two_step_briefing(
     into the decide package deterministically so the write call branches the
     briefing into a graduated silence check-in — the tier is computed by code,
     never inferred by the decide LLM from raw output.
+
+    `capture`, when given, is populated with side-channel fields the server
+    renders itself (not the write LLM) — currently `capture["opener"]` = the
+    decide LLM's opener line, which the scheduler prepends above the attribution
+    block (server controls ordering + supplies a count-based fallback).
     """
     pkg = _briefing_decide_call(raw_output, job_id)
     if pkg is None:
@@ -597,6 +605,9 @@ def _run_two_step_briefing(
 
     if silence_tier:
         pkg["silence_tier"] = silence_tier
+
+    if capture is not None:
+        capture["opener"] = pkg.get("opener")
 
     rendered = _briefing_write_call(pkg, job_id)
     if rendered is None:
@@ -740,6 +751,80 @@ def _render_team_attribution_for_briefing(user_id: str) -> str:
         lines.append(f"{entry['emoji']} *{entry['display_name']}* {summary}.")
 
     return "\n".join(lines)
+
+
+def _active_sub_agents_in_window(user_id: str) -> list[str]:
+    """Return sub-agent keys (canonical order) with a completion in the last 24h.
+
+    Same archive-read + 24h-window + registry filter as
+    _render_team_attribution_for_briefing, but returns the *set* of active
+    sub-agents (for the opener's N count) rather than the rendered lines.
+    Self-swallowing — any read/parse failure returns [].
+    """
+    try:
+        strategy_path = get_hermes_home() / "artemis" / user_id / "strategy.json"
+        if not strategy_path.exists():
+            return []
+        strategy = json.loads(strategy_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+
+    archive = strategy.get("archive") or []
+    if not isinstance(archive, list):
+        return []
+
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=_ATTRIBUTION_WINDOW_HOURS)
+    active: set[str] = set()
+    for item in archive:
+        if not isinstance(item, dict):
+            continue
+        sub_agent = item.get("sub_agent")
+        if sub_agent not in _SUB_AGENT_ATTRIBUTION_REGISTRY:
+            continue
+        completed_at = item.get("completed_at")
+        if not isinstance(completed_at, str):
+            continue
+        try:
+            ts = datetime.fromisoformat(completed_at.replace("Z", "+00:00"))
+        except (ValueError, TypeError):
+            continue
+        if ts < cutoff:
+            continue
+        active.add(sub_agent)
+
+    return [a for a in _SUB_AGENT_ATTRIBUTION_ORDER if a in active]
+
+
+def _count_active_sub_agents(user_id: str) -> int:
+    """Number of distinct sub-agents with a completion in the last 24h (the opener's N)."""
+    return len(_active_sub_agents_in_window(user_id))
+
+
+def _render_opener(user_id: str, llm_opener: str | None) -> str:
+    """Render the briefing opener line. B-primary + A-fallback.
+
+    Returns "" when no sub-agent has work in the last 24h (nothing to greet
+    about — consistent with the attribution block suppressing on empty).
+
+    Otherwise prefers the LLM-written `llm_opener` (variety: it reads the day's
+    content and picks an angle). Falls back to a deterministic template keyed on
+    N when the LLM produced nothing usable, so the briefing always has an opener
+    (three-layer enforcement — server保底 below the probabilistic LLM line):
+      - N >= 2: "Morning. Your team ran N things overnight."
+      - N == 1: "Morning. <Agent> finished something overnight."
+    """
+    active = _active_sub_agents_in_window(user_id)
+    n = len(active)
+    if n == 0:
+        return ""
+
+    if isinstance(llm_opener, str) and llm_opener.strip():
+        return llm_opener.strip()
+
+    if n == 1:
+        display = _SUB_AGENT_ATTRIBUTION_REGISTRY[active[0]]["display_name"]
+        return f"Morning. {display} finished something overnight."
+    return f"Morning. Your team ran {n} things overnight."
 
 
 def _inject_attribution_block(deliver_content: str, attribution: str) -> str:
@@ -2138,6 +2223,7 @@ def tick(verbose: bool = True, adapters=None, loop=None) -> int:
                 # Unconditional for all briefing jobs. On any failure,
                 # _run_two_step_briefing returns None and deliver_content
                 # flows through Phase 5 voice-scan unchanged.
+                _briefing_opener_llm = None  # decide LLM's opener, captured below
                 if should_deliver and success and _is_briefing_job(job) and not _resume_guard_fired:
                     # S-0525-02 Domain 6: pass the silence tier so the write call
                     # branches into a graduated check-in. speak=False days emit
@@ -2145,11 +2231,14 @@ def tick(verbose: bool = True, adapters=None, loop=None) -> int:
                     # only engaged/day1/day5/day8 speak-days reach here.
                     _s_tier, _s_speak = _briefing_silence(job)
                     _silence_tier = _s_tier if (_s_tier not in (None, "engaged") and _s_speak) else None
+                    _two_step_capture: dict = {}
                     two_step_result = _run_two_step_briefing(
-                        deliver_content, job["id"], silence_tier=_silence_tier
+                        deliver_content, job["id"], silence_tier=_silence_tier,
+                        capture=_two_step_capture,
                     )
                     if two_step_result is not None:
                         deliver_content = two_step_result
+                        _briefing_opener_llm = _two_step_capture.get("opener")
 
                 # Artemis B-0510-01 Phase 5 — semantic voice-scan.
                 # Last-resort catch for write-call drift or two-step failure.
@@ -2187,9 +2276,19 @@ def tick(verbose: bool = True, adapters=None, loop=None) -> int:
                                 "Job '%s': prepended team attribution block (%d lines) for user=%s",
                                 job["id"], attribution.count("\n") + 1, user_id_for_attr,
                             )
+                        # Dynamic opener — prepended AFTER attribution so it lands
+                        # ABOVE the bullets (opener → attribution → body). B-primary
+                        # (decide LLM's opener, captured above) + A-fallback (server
+                        # count-based template); "" when no team work this cycle.
+                        opener = _render_opener(user_id_for_attr, _briefing_opener_llm)
+                        if opener:
+                            deliver_content = _inject_attribution_block(deliver_content, opener)
+                            logger.info(
+                                "Job '%s': prepended opener for user=%s", job["id"], user_id_for_attr,
+                            )
                         # Artemis S-0601-04 — N-day milestone summary. Prepended
-                        # AFTER attribution so it lands ahead of it (milestone is
-                        # the first paragraph, then attribution, then body). Same
+                        # AFTER attribution + opener so it lands ahead of them
+                        # (milestone → opener → attribution → body). Same
                         # deterministic-render rationale as attribution; fires at
                         # most once per 30/60/90-day mark (milestones_emitted[]).
                         milestone = _render_milestone_block(user_id_for_attr)

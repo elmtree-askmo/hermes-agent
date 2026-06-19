@@ -158,7 +158,7 @@ def _run_tick_capturing(predicate_value):
         captured["content"] = content
         return None
 
-    def _fake_two_step(content, job_id, silence_tier=None):
+    def _fake_two_step(content, job_id, silence_tier=None, capture=None):
         two_step_called["n"] += 1
         return content  # pretend write-LLM passed it through unchanged
 

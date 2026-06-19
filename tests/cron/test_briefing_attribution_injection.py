@@ -15,6 +15,9 @@ import pytest
 from cron.scheduler import (
     _inject_attribution_block,
     _render_team_attribution_for_briefing,
+    _render_opener,
+    _count_active_sub_agents,
+    _SUB_AGENT_ATTRIBUTION_REGISTRY,
 )
 
 pytestmark = pytest.mark.xdist_group("cron_scheduler")
@@ -177,3 +180,74 @@ def test_inject_empty_content_returns_attribution_alone():
     attribution = "📊 *Analyst* — Did a thing."
     out = _inject_attribution_block("", attribution)
     assert out == attribution
+
+
+# ---- _count_active_sub_agents ----------------------------------------------
+
+
+def test_count_active_sub_agents_counts_distinct_within_24h(tmp_path):
+    _setup_strategy(tmp_path, "U123", [
+        {"id": "s1", "sub_agent": "scout", "completed_at": _iso(-1), "summary": "x"},
+        {"id": "a1", "sub_agent": "analyst", "completed_at": _iso(-2), "summary": "y"},
+        {"id": "s2", "sub_agent": "scout", "completed_at": _iso(-3), "summary": "z"},  # same agent
+    ])
+    with patch("cron.scheduler.get_hermes_home", return_value=tmp_path):
+        assert _count_active_sub_agents("U123") == 2  # scout + analyst, scout counted once
+
+
+def test_count_active_sub_agents_excludes_old(tmp_path):
+    _setup_strategy(tmp_path, "U123", [
+        {"id": "s1", "sub_agent": "scout", "completed_at": _iso(-48), "summary": "old"},
+    ])
+    with patch("cron.scheduler.get_hermes_home", return_value=tmp_path):
+        assert _count_active_sub_agents("U123") == 0
+
+
+# ---- _render_opener (B-primary + A-fallback) -------------------------------
+
+
+def _setup_n(tmp_path, n):
+    """Set up strategy with n distinct recent sub-agents."""
+    agents = list(_SUB_AGENT_ATTRIBUTION_REGISTRY.keys())[:n]
+    _setup_strategy(tmp_path, "U123", [
+        {"id": f"{a}1", "sub_agent": a, "completed_at": _iso(-1), "summary": "did work"}
+        for a in agents
+    ])
+
+
+def test_opener_uses_llm_text_when_valid(tmp_path):
+    _setup_n(tmp_path, 3)
+    with patch("cron.scheduler.get_hermes_home", return_value=tmp_path):
+        out = _render_opener("U123", "Morning — busy night, three fronts moved.")
+    assert out == "Morning — busy night, three fronts moved."
+
+
+def test_opener_falls_back_to_plural_template_when_llm_missing(tmp_path):
+    _setup_n(tmp_path, 3)
+    with patch("cron.scheduler.get_hermes_home", return_value=tmp_path):
+        out = _render_opener("U123", None)
+    assert out == "Morning. Your team ran 3 things overnight."
+
+
+def test_opener_falls_back_to_plural_template_when_llm_blank(tmp_path):
+    _setup_n(tmp_path, 2)
+    with patch("cron.scheduler.get_hermes_home", return_value=tmp_path):
+        out = _render_opener("U123", "   ")
+    assert out == "Morning. Your team ran 2 things overnight."
+
+
+def test_opener_fallback_singular_names_the_agent(tmp_path):
+    # one sub-agent → singular highlight template
+    _setup_strategy(tmp_path, "U123", [
+        {"id": "a1", "sub_agent": "analyst", "completed_at": _iso(-1), "summary": "did work"},
+    ])
+    with patch("cron.scheduler.get_hermes_home", return_value=tmp_path):
+        out = _render_opener("U123", None)
+    assert out == "Morning. Analyst finished something overnight."
+
+
+def test_opener_empty_when_no_active_sub_agents(tmp_path):
+    _setup_strategy(tmp_path, "U123", [])
+    with patch("cron.scheduler.get_hermes_home", return_value=tmp_path):
+        # even if LLM supplied text, no team work → no opener (nothing to greet about)
+        assert _render_opener("U123", "Morning, team did stuff.") == ""
