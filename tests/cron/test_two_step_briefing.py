@@ -227,6 +227,51 @@ def test_decide_prompt_take_is_judgment_plus_choice():
     assert "choice" in lowered or "option" in lowered or "a/b" in lowered
 
 
+# ---------------------------------------------------------------------------
+# Sim-alignment 2026-06-19 — C (conditional walkthrough), A (emotional
+# check-in), D (My-take label optional), E (situational opener). Derived from
+# the full sim briefing-structure analysis.
+# ---------------------------------------------------------------------------
+
+
+def test_decide_prompt_walkthrough_is_conditional_on_fresh_materials():
+    """C: the A/B closer should lean to a walkthrough option when fresh reviewable
+    sub-agent products exist this cycle — not unconditionally."""
+    from cron.scheduler import _BRIEFING_DECIDE_PROMPT
+    lowered = _BRIEFING_DECIDE_PROMPT.lower()
+    assert "walk you through" in lowered or "walk them through" in lowered
+    # conditional wording present (only when there's freshly-made material to review)
+    assert "fresh" in lowered or "just-drafted" in lowered or "just drafted" in lowered or "newly" in lowered
+
+
+def test_decide_prompt_has_emotional_checkin_field():
+    """A: decide extracts an emotional check-in signal so the write step can add a
+    brief 'how are you feeling' beat at event transitions / dips."""
+    from cron.scheduler import _BRIEFING_DECIDE_PROMPT
+    assert "emotional_checkin" in _BRIEFING_DECIDE_PROMPT
+
+
+def test_write_prompt_renders_emotional_checkin_when_present():
+    """A: write step renders the emotional check-in beat when the field is set."""
+    from cron.scheduler import _BRIEFING_WRITE_PROMPT
+    assert "emotional_checkin" in _BRIEFING_WRITE_PROMPT
+
+
+def test_write_prompt_my_take_label_is_optional():
+    """D: the 'My take:' label is not forced on every briefing — judgment may be
+    embedded without the label on conversational/strategic days."""
+    from cron.scheduler import _BRIEFING_WRITE_PROMPT
+    lowered = _BRIEFING_WRITE_PROMPT.lower()
+    assert "optional" in lowered or "need not" in lowered or "not required" in lowered or "you may omit" in lowered
+
+
+def test_decide_prompt_opener_allows_situational():
+    """E: opener may be situational (not only a team-summary greeting)."""
+    from cron.scheduler import _BRIEFING_DECIDE_PROMPT
+    lowered = _BRIEFING_DECIDE_PROMPT.lower()
+    assert "situational" in lowered or "coming back to" in lowered
+
+
 from cron.scheduler import _briefing_write_call
 
 # ---------------------------------------------------------------------------

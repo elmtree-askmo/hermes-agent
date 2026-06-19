@@ -408,18 +408,20 @@ Your job: extract the SIGNAL — ignore all reasoning, extract only the user-fac
 Return a JSON object with EXACTLY these fields:
 {{
   "briefing_type": "quiet_day" | "content",
-  "opener": "<one short greeting line about what the team did overnight, or null>",
+  "opener": "<one short greeting line — team-summary OR situational, or null>",
   "follow_ups": ["<item>", ...],
   "coaches_take": "<first-person judgment + a forward A/B choice, second-person-addressed, no reasoning>",
+  "emotional_checkin": "<a brief 'how are you feeling'-style line ONLY at an emotional inflection (post-interview, post-rejection, a motivation dip, or a clear win); else null>",
   "observation": "<if the Coach proactively named a recurring CROSS-SESSION pattern the user did NOT raise this turn, copy that WHOLE beat VERBATIM — the across-our-conversations framing + the substance/affect + its correction invitation; else null>",
   "tone_signal": "low_pressure" | "neutral" | "urgent"
 }}
 
 Rules:
 - briefing_type: "quiet_day" if nothing actionable today; "content" if follow_ups or new roles present.
-- opener: ONE short, natural greeting line summarizing what the team did overnight — vary it by the day's content. Examples: "Morning. Your team ran 3 things overnight." / "Morning. Analyst finished something interesting overnight." / "Morning — busy night, two fronts moved." Do NOT state an exact count unless it's clearly correct; a qualitative phrasing is fine (the server adds a count-based fallback if you omit this). null on a quiet day with no team work.
+- opener: ONE short, natural greeting line — vary it by the day's content. It can be a TEAM-SUMMARY greeting ("Morning. Your team ran 3 things overnight." / "Morning. Analyst finished something interesting overnight.") OR a SITUATIONAL opener when that fits the day better ("Coming back to Warby Parker — you said you'd look Tuesday, then passed again." / "Something I've been noticing across our conversations."). Do NOT state an exact count unless clearly correct (the server adds a count-based fallback if you omit this). null on a quiet day with no team work.
 - follow_ups: list of concrete actionable items from the briefing. Empty list [] if none. (Used only by the silence check-in path; the normal briefing does not render a follow-ups block.)
-- coaches_take: this is the "My take:" beat. Distil the core JUDGMENT to 1-3 sentences AND end with a forward A/B choice — two concrete next actions the user can pick between (e.g. "review the materials, or want me to walk you through them first?"). Lead with a point of view (lean a direction), don't just summarize. MUST be first-person Coach voice ("I'll...", "My read is...", "You've done..."). NEVER include any person's name (first or last). No third-person pronouns (she/he/they) referring to the user. Replace any name with "they" or rephrase to second-person ("you"). Do NOT put the proactive cross-session observation here — that goes in `observation`, intact.
+- coaches_take: this is the take beat. Distil the core JUDGMENT to 1-3 sentences AND end with a forward A/B choice — two concrete next actions the user can pick between. Lead with a point of view (lean a direction), don't just summarize. WALKTHROUGH OPTION: when the team just produced FRESH reviewable material this cycle (a newly-drafted resume/cover letter, a just-finished analysis), make one of the two choices a "want me to walk you through it first?" review option (e.g. "review the materials yourself, or want me to walk you through the key changes first?"). When there's no freshly-drafted material to review, use two forward-action choices instead — do NOT offer a walkthrough of nothing. MUST be first-person Coach voice ("I'll...", "My read is...", "You've done..."). NEVER include any person's name (first or last). No third-person pronouns (she/he/they) referring to the user. Replace any name with "they" or rephrase to second-person ("you"). Do NOT put the proactive cross-session observation here — that goes in `observation`, intact.
+- emotional_checkin: set this ONLY when the day is an emotional inflection point — right after an interview/phone screen, after a rejection, during a visible motivation dip or comparison spiral, or on a clear win. A short, warm line that makes space for how they feel (e.g. "How are you feeling about it?"). On a routine task-focused day, leave it null — do NOT force a feelings check-in every day.
 - observation: if the raw output proactively surfaces a recurring CROSS-SESSION pattern (the Coach naming something the user did NOT raise this turn — e.g. "one thing I've noticed across our conversations…", a recurring emotional theme, a pattern in how the user talks about their work), copy that WHOLE beat VERBATIM into this field: the across-sessions framing, the substance/affect, AND its correction invitation ("tell me if I'm wrong" / "push back" / "flip it back"). null if absent. Do NOT distil, paraphrase, soften, or fold it into coaches_take — it is a Coach-initiated observation; its exact framing + correction handle must reach the user intact.
 - tone_signal: emotional register the Coach intended.
 
@@ -436,10 +438,12 @@ Rules:
 - Begin directly with the briefing content. No "Here is your briefing" preamble.
 - Do NOT render the opener/greeting line OR any sub-agent attribution lines (e.g. "Morning, your team...", "🔍 Scout ...", "✍️ Publicist ..."). The opener and attribution are added separately by the system — never write them yourself.
 - Do NOT render a Follow-ups block, a Pending block, or any dated to-do list. The whole briefing body is just the take below.
-- For quiet_day: one short paragraph in the same "My take:" voice.
-- For content: render a single \U0001f4ac *My take:* beat — the coaches_take, lightly polished, preserving its judgment and its closing A/B choice.
-- My take: lead with a point of view (a direction you lean). Put the judgment in the first paragraph, then put the two-choice closer (offering the user two concrete next actions to pick between) in ITS OWN separate paragraph after a blank line. No lists, no headers other than the "My take:" label.
-- observation: if non-null, render it as its OWN beat (its own short paragraph inside the My take area), VERBATIM — preserve the across-our-conversations framing, the substance/affect, and the correction invitation exactly. Do NOT paraphrase, shorten, soften, or merge it into the rest of the take. REQUIRED whenever present (it is a Coach-initiated observation and the user must get its exact framing + the handle to push back).
+- For quiet_day: one short paragraph in the same first-person take voice.
+- For content: render the coaches_take, lightly polished, preserving its judgment and its closing A/B choice.
+- The take: lead with a point of view (a direction you lean). Put the judgment in the first paragraph, then put the two-choice closer (offering the user two concrete next actions to pick between) in ITS OWN separate paragraph after a blank line. No lists.
+- The "\U0001f4ac *My take:*" label is OPTIONAL, not required — use it on routine task-focused briefings where it aids scannability; you may omit it on conversational or strategic days where it reads more naturally as the Coach simply speaking. Either way the judgment + A/B closer must be present.
+- emotional_checkin: if non-null, render it as a short, warm beat (its own line) acknowledging the moment and making space for how they feel — placed naturally near the take. null → omit entirely (do not invent a feelings check-in).
+- observation: if non-null, render it as its OWN beat (its own short paragraph), VERBATIM — preserve the across-our-conversations framing, the substance/affect, and the correction invitation exactly. Do NOT paraphrase, shorten, soften, or merge it into the rest of the take. REQUIRED whenever present (it is a Coach-initiated observation and the user must get its exact framing + the handle to push back).
 - SILENCE CHECK-IN: if the package contains a "silence_tier" field, the user has gone quiet for days and this is a low-key re-engagement message, NOT a normal briefing. Override the format above entirely — plain text only, no code block, no roles sections, no attribution lines, no "My take:" label:
   - "day1": one brief, warm line noting it's been quiet, plus at most ONE fresh lead drawn from follow_ups if present. 1-2 sentences total. Low-key, not a full briefing.
   - "day5": 1-2 empathetic, no-agenda sentences checking in, and offer an explicit option to pause the daily updates. Do not list any follow-ups or roles.
@@ -454,8 +458,9 @@ DECISION PACKAGE:
 def _briefing_decide_call(text: str, job_id: str = "?") -> dict | None:
     """Phase 6 — Step 1: distil raw Coach output into a structured decision package.
 
-    Returns a dict with keys: briefing_type, follow_ups, coaches_take, tone_signal.
-    Returns None on any failure (caller falls back to Phase 5 path).
+    Returns a dict with keys: briefing_type, opener, follow_ups, coaches_take,
+    emotional_checkin, observation, tone_signal. Returns None on any failure
+    (caller falls back to Phase 5 path).
     """
     api_key = os.getenv("OPENROUTER_API_KEY")
     if not api_key:
