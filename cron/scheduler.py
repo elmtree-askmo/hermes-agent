@@ -734,7 +734,10 @@ def _render_team_attribution_for_briefing(user_id: str) -> str:
         if not summary:
             continue
         summary = summary.rstrip(".")
-        lines.append(f"{entry['emoji']} *{entry['display_name']}* — {summary}.")
+        # Name flows straight into a verb-led summary sentence (no separator),
+        # e.g. "🔍 *Scout* found 2 new roles — Glossier...". The summary is
+        # authored verb-first per the complete_action summary contract.
+        lines.append(f"{entry['emoji']} *{entry['display_name']}* {summary}.")
 
     return "\n".join(lines)
 

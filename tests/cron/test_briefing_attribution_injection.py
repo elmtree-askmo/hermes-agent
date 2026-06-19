@@ -55,9 +55,9 @@ def test_three_sub_agents_render_in_canonical_order(tmp_path):
         out = _render_team_attribution_for_briefing(user_id)
     lines = out.split("\n")
     assert len(lines) == 3
-    assert lines[0].startswith("🔍 *Scout* — Surfaced 3 consumer brand fits.")
-    assert lines[1].startswith("📊 *Analyst* — Rewrote internship bullet")
-    assert lines[2].startswith("✍️ *Publicist* — Drafted Glossier cover letter.")
+    assert lines[0].startswith("🔍 *Scout* Surfaced 3 consumer brand fits.")
+    assert lines[1].startswith("📊 *Analyst* Rewrote internship bullet")
+    assert lines[2].startswith("✍️ *Publicist* Drafted Glossier cover letter.")
 
 
 def test_items_older_than_24h_excluded(tmp_path):
@@ -97,7 +97,7 @@ def test_single_sub_agent_still_renders(tmp_path):
     ])
     with patch("cron.scheduler.get_hermes_home", return_value=tmp_path):
         out = _render_team_attribution_for_briefing(user_id)
-    assert out == "🔍 *Scout* — Solo scout overnight."
+    assert out == "🔍 *Scout* Solo scout overnight."
 
 
 def test_empty_archive_returns_empty(tmp_path):
@@ -161,10 +161,10 @@ def test_trailing_period_normalized(tmp_path):
 
 
 def test_inject_prepends_with_blank_line_gap():
-    attribution = "🔍 *Scout* — Found 2 roles."
+    attribution = "🔍 *Scout* Found 2 roles."
     deliver = "Morning briefing content here."
     out = _inject_attribution_block(deliver, attribution)
-    assert out == "🔍 *Scout* — Found 2 roles.\n\nMorning briefing content here."
+    assert out == "🔍 *Scout* Found 2 roles.\n\nMorning briefing content here."
 
 
 def test_inject_empty_attribution_returns_content_unchanged():
