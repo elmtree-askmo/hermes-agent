@@ -249,22 +249,21 @@ The briefing must be a DELIVERABLE addressed to the user, not the LLM's internal
 
 A structure violation is when the briefing contains:
 (a) Planning narration — the model talking to itself about what it's going to produce. Signals: "Now let me construct ...", "Let me build it.", "Let me compose it ...", "Key facts:", "Format:", "Status is ..." (as a leading sentence stating the model's own situation read), "I should send ...", "The strategic playbook is ..." followed by self-instruction.
-(b) The deliverable being entirely replaced by the planning (no Coach's Take, no Follow-ups block, no quiet-day note actually addressed to the user).
+(b) The deliverable being entirely replaced by the planning (no "My take:" beat, no quiet-day note actually addressed to the user).
 (c) The deliverable being preceded by planning narration (even if a clean deliverable appears later in the text). The user should never see the model's internal thinking before the deliverable.
 
 A quiet-day note counts as a valid deliverable as long as it stands alone without planning prefix. Example of acceptable quiet-day deliverable: "Nothing urgent on the board today — I'll keep scanning in the background."
 
-**Sub-agent team attribution paragraphs are NOT planning narration and NOT a structure violation.** A team attribution paragraph names what each named sub-agent (Scout, Analyst, Publicist) did or found in this briefing cycle. It is a user-facing deliverable surface — the user sees these as their named coaching team, not as internal model reasoning. Each line is prefixed with the agent's emoji and bold-italic name (🔍 *Scout*, 📊 *Analyst*, ✍️ *Publicist*) followed by a sentence describing the work surfaced this cycle. These lines pass structure even when they appear at the top of the briefing before Follow-ups / Coach's Take.
+NOTE: the briefing body you are scanning is just the "My take:" beat — a first-person judgment ending in a two-choice closer. Sub-agent attribution lines (🔍 *Scout* / ✍️ *Publicist*) are added by the system AFTER this scan, so you will not see them here; their absence is not a violation.
 
 Examples of structure violations:
 - "Now let me construct the briefing. Key facts: ..." (planning, not deliverable)
 - A briefing that opens with "The status is no_resume — no resume on file..." then later contains a clean quiet-day note (planning prefix before deliverable)
-- A briefing that opens with "I'll skip New Roles entirely. Garwin is in acute ambiguity fatigue." then a Follow-ups block (planning prefix before deliverable)
+- A briefing that opens with "I'll skip New Roles entirely. Garwin is in acute ambiguity fatigue." then the take (planning prefix before deliverable)
 
 Examples of OK structure:
-- Opens directly with a sentence addressed to the user, followed by Follow-ups block + Coach's Take.
+- A first-person "My take:" beat addressed to the user, ending in a two-choice closer.
 - Quiet-day note that addresses the user from the first word.
-- Opens with sub-agent team attribution lines (🔍 *Scout* / 📊 *Analyst* / ✍️ *Publicist*), followed by Follow-ups block and Coach's Take. The attribution lines are part of the deliverable, not planning narration.
 
 ================================================================
 
@@ -410,25 +409,15 @@ Return a JSON object with EXACTLY these fields:
 {{
   "briefing_type": "quiet_day" | "content",
   "follow_ups": ["<item>", ...],
-  "team_work": {{
-    "scout": "<one sentence describing what Scout did/found, or null>",
-    "analyst": "<one sentence describing what Analyst did/found, or null>",
-    "publicist": "<one sentence describing what Publicist did/produced, or null>"
-  }},
-  "coaches_take": "<first-person, second-person-addressed summary, no reasoning>",
+  "coaches_take": "<first-person judgment + a forward A/B choice, second-person-addressed, no reasoning>",
   "observation": "<if the Coach proactively named a recurring CROSS-SESSION pattern the user did NOT raise this turn, copy that WHOLE beat VERBATIM — the across-our-conversations framing + the substance/affect + its correction invitation; else null>",
   "tone_signal": "low_pressure" | "neutral" | "urgent"
 }}
 
 Rules:
 - briefing_type: "quiet_day" if nothing actionable today; "content" if follow_ups or new roles present.
-- follow_ups: list of concrete actionable items from the briefing. Empty list [] if none.
-- team_work: extract what each sub-agent did or found in this briefing cycle. Each field is a single sentence in second-person voice ("you") or impersonal ("Scout found...") — NO names. Set a field to null if that sub-agent has no work to surface this briefing.
-  - scout: new roles found, market signals, events identified, recruiting calendar items
-  - analyst: positioning recommendations, profile comparisons, strategy adjustments, cohort signals, gap analyses
-  - publicist: resumes tailored, cover letters drafted, outreach materials prepared, follow-up emails ready
-  Look at the raw output and any mention of work attributed to a sub-agent (by name, emoji, or by work type). When unsure, prefer null over guessing — better empty than fabricated.
-- coaches_take: the core judgment distilled to 1-3 sentences. MUST be first-person Coach voice ("I'll...", "The signal is...", "You've done..."). NEVER include any person's name (first or last). No third-person pronouns (she/he/they) referring to the user. Replace any name with "they" or rephrase to second-person ("you"). Do NOT put the proactive cross-session observation here — that goes in `observation`, intact.
+- follow_ups: list of concrete actionable items from the briefing. Empty list [] if none. (Used only by the silence check-in path; the normal briefing does not render a follow-ups block.)
+- coaches_take: this is the "My take:" beat. Distil the core JUDGMENT to 1-3 sentences AND end with a forward A/B choice — two concrete next actions the user can pick between (e.g. "review the materials, or want me to walk you through them first?"). Lead with a point of view (lean a direction), don't just summarize. MUST be first-person Coach voice ("I'll...", "My read is...", "You've done..."). NEVER include any person's name (first or last). No third-person pronouns (she/he/they) referring to the user. Replace any name with "they" or rephrase to second-person ("you"). Do NOT put the proactive cross-session observation here — that goes in `observation`, intact.
 - observation: if the raw output proactively surfaces a recurring CROSS-SESSION pattern (the Coach naming something the user did NOT raise this turn — e.g. "one thing I've noticed across our conversations…", a recurring emotional theme, a pattern in how the user talks about their work), copy that WHOLE beat VERBATIM into this field: the across-sessions framing, the substance/affect, AND its correction invitation ("tell me if I'm wrong" / "push back" / "flip it back"). null if absent. Do NOT distil, paraphrase, soften, or fold it into coaches_take — it is a Coach-initiated observation; its exact framing + correction handle must reach the user intact.
 - tone_signal: emotional register the Coach intended.
 
@@ -443,17 +432,14 @@ You have a decision package below. Render it as a concise Slack message.
 Rules:
 - Address the user in second person ("you", "your") ONLY. NEVER include any person's name (first or last) anywhere in the output. Never use she/he/they for the user. If a name appears in a follow-up item (e.g. "Amy's check-in"), replace with "their" or rephrase without the name.
 - Begin directly with the briefing content. No "Here is your briefing" preamble.
-- For quiet_day: one short paragraph, no follow-ups block needed unless follow_ups list is non-empty.
-- For content: include in this order — (1) team attribution paragraph if ≥2 sub-agents have content (see rule below); (2) \U0001f4cc Follow-ups block; (3) \U0001f4ac Coach's Take.
-- Team attribution paragraph: count non-null fields in team_work. If ≥2 non-null, render one sentence per non-null sub-agent in Scout → Analyst → Publicist order, each on its own line, prefixed by emoji + bold italic name + space. Format examples:
-  \U0001f50d *Scout* <sentence from team_work.scout>
-  \U0001f4ca *Analyst* <sentence from team_work.analyst>
-  ✍️ *Publicist* <sentence from team_work.publicist>
-  Place this paragraph BEFORE the Follow-ups block, separated by a blank line. If <2 non-null fields, skip the paragraph entirely (do not render single-sub-agent attribution).
-- coaches_take goes into \U0001f4ac Coach's Take verbatim (you may lightly polish but preserve meaning).
-- observation: if non-null, render it as its OWN beat (its own short paragraph inside the Coach's Take area), VERBATIM — preserve the across-our-conversations framing, the substance/affect, and the correction invitation exactly. Do NOT paraphrase, shorten, soften, or merge it into the rest of coaches_take. REQUIRED whenever present (it is a Coach-initiated observation and the user must get its exact framing + the handle to push back).
-- SILENCE CHECK-IN: if the package contains a "silence_tier" field, the user has gone quiet for days and this is a low-key re-engagement message, NOT a normal briefing. Override the format above entirely — plain text only, no code block, no Follow-ups/New Roles sections, no team attribution, no "Coach's Take" header:
-  - "day1": one brief, warm line noting it's been quiet, plus at most ONE fresh lead drawn from follow_ups/team_work if present. 1-2 sentences total. Low-key, not a full briefing.
+- Do NOT render any sub-agent attribution lines (e.g. "🔍 Scout ...", "✍️ Publicist ..."). Attribution is added separately by the system — never write it yourself.
+- Do NOT render a Follow-ups block, a Pending block, or any dated to-do list. The whole briefing body is just the take below.
+- For quiet_day: one short paragraph in the same "My take:" voice.
+- For content: render a single \U0001f4ac *My take:* beat — the coaches_take, lightly polished, preserving its judgment and its closing A/B choice.
+- My take: lead with a point of view (a direction you lean), then end with a two-choice closer offering the user two concrete next actions to pick between. Keep it to a few sentences — no lists, no headers other than the "My take:" label.
+- observation: if non-null, render it as its OWN beat (its own short paragraph inside the My take area), VERBATIM — preserve the across-our-conversations framing, the substance/affect, and the correction invitation exactly. Do NOT paraphrase, shorten, soften, or merge it into the rest of the take. REQUIRED whenever present (it is a Coach-initiated observation and the user must get its exact framing + the handle to push back).
+- SILENCE CHECK-IN: if the package contains a "silence_tier" field, the user has gone quiet for days and this is a low-key re-engagement message, NOT a normal briefing. Override the format above entirely — plain text only, no code block, no roles sections, no attribution lines, no "My take:" label:
+  - "day1": one brief, warm line noting it's been quiet, plus at most ONE fresh lead drawn from follow_ups if present. 1-2 sentences total. Low-key, not a full briefing.
   - "day5": 1-2 empathetic, no-agenda sentences checking in, and offer an explicit option to pause the daily updates. Do not list any follow-ups or roles.
   - "day8": a single warm, lowest-bar re-entry line — invite them back with no pressure and the smallest possible action (a one-tap reply). No content, no agenda, nothing to do.
   Address the user in second person, no names (the name rule above still holds). Phrase it naturally in your own words — do NOT output a fixed templated sentence.
@@ -526,16 +512,10 @@ def _briefing_decide_call(text: str, job_id: str = "?") -> dict | None:
         logger.warning("Job '%s': briefing_decide_call missing keys — got %s", job_id, list(pkg.keys()))
         return None
 
-    # team_work is optional for back-compat with older raw outputs / decide-call drift.
-    # Normalize: ensure dict with the three sub-agent keys, defaulting to null.
-    tw = pkg.get("team_work") or {}
-    if not isinstance(tw, dict):
-        tw = {}
-    pkg["team_work"] = {
-        "scout": tw.get("scout") if isinstance(tw.get("scout"), str) and tw.get("scout").strip() else None,
-        "analyst": tw.get("analyst") if isinstance(tw.get("analyst"), str) and tw.get("analyst").strip() else None,
-        "publicist": tw.get("publicist") if isinstance(tw.get("publicist"), str) and tw.get("publicist").strip() else None,
-    }
+    # Sub-agent attribution is rendered server-side (_inject_attribution_block),
+    # not by the LLM. Drop any stray team_work the decide LLM may still emit so
+    # it can never reach the write call and produce a duplicate attribution block.
+    pkg.pop("team_work", None)
 
     return pkg
 

@@ -140,79 +140,91 @@ def test_decide_call_returns_none_on_non_json(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# team_work normalization (S-0518-01 Phase 2 — sub-agent attribution)
+# team_work removal (2026-06-19) — the LLM-side attribution path (S-0518-01
+# Phase 2) was superseded by the server-side _inject_attribution_block render
+# (2ff8fa5a). Both firing produced a duplicate attribution block in the
+# delivered briefing. team_work is now fully removed; the server-side block is
+# the single source of truth for sub-agent attribution.
 # ---------------------------------------------------------------------------
 
-def test_decide_call_back_compat_missing_team_work(monkeypatch):
-    """Older decide outputs lacking team_work must be accepted and normalized to all-null."""
+def test_decide_call_does_not_emit_team_work(monkeypatch):
+    """decide call must NOT add a team_work key — attribution is server-side only."""
     pkg = {
         "briefing_type": "content",
         "follow_ups": ["item 1"],
         "coaches_take": "stay the course",
         "tone_signal": "neutral",
-        # team_work intentionally omitted
     }
     import urllib.request
     monkeypatch.setenv("OPENROUTER_API_KEY", "sk-test-fake")
     monkeypatch.setattr(urllib.request, "urlopen", _fake_urlopen_decide(pkg))
-    result = _briefing_decide_call("raw", "test-back-compat")
+    result = _briefing_decide_call("raw", "test-no-team-work")
     assert result is not None
-    assert result["team_work"] == {"scout": None, "analyst": None, "publicist": None}
+    assert "team_work" not in result
 
 
-def test_decide_call_team_work_normalizes_partial(monkeypatch):
-    """team_work with only some sub-agents present must fill missing ones with null."""
+def test_decide_call_ignores_stray_team_work_from_llm(monkeypatch):
+    """If the decide LLM still returns a team_work field, it must be dropped, not normalized."""
     pkg = {
         "briefing_type": "content",
         "follow_ups": ["item 1"],
-        "team_work": {"scout": "found 2 new roles"},
+        "team_work": {"scout": "found 2 new roles"},  # stray — must be ignored
         "coaches_take": "great progress",
         "tone_signal": "neutral",
     }
     import urllib.request
     monkeypatch.setenv("OPENROUTER_API_KEY", "sk-test-fake")
     monkeypatch.setattr(urllib.request, "urlopen", _fake_urlopen_decide(pkg))
-    result = _briefing_decide_call("raw", "test-partial")
+    result = _briefing_decide_call("raw", "test-stray-team-work")
     assert result is not None
-    assert result["team_work"]["scout"] == "found 2 new roles"
-    assert result["team_work"]["analyst"] is None
-    assert result["team_work"]["publicist"] is None
+    assert "team_work" not in result
 
 
-def test_decide_call_team_work_treats_empty_string_as_null(monkeypatch):
-    """team_work with empty-string values must be normalized to null."""
-    pkg = {
-        "briefing_type": "content",
-        "follow_ups": [],
-        "team_work": {"scout": "", "analyst": "  ", "publicist": "drafted letter"},
-        "coaches_take": "ok",
-        "tone_signal": "neutral",
-    }
-    import urllib.request
-    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-test-fake")
-    monkeypatch.setattr(urllib.request, "urlopen", _fake_urlopen_decide(pkg))
-    result = _briefing_decide_call("raw", "test-empty-string")
-    assert result is not None
-    assert result["team_work"]["scout"] is None
-    assert result["team_work"]["analyst"] is None
-    assert result["team_work"]["publicist"] == "drafted letter"
+def test_decide_prompt_has_no_team_work_instruction():
+    """The decide prompt must not instruct the LLM to extract team_work."""
+    from cron.scheduler import _BRIEFING_DECIDE_PROMPT
+    assert "team_work" not in _BRIEFING_DECIDE_PROMPT
 
 
-def test_decide_call_team_work_rejects_non_dict(monkeypatch):
-    """team_work that is not a dict (e.g. list, string) must be normalized to all-null."""
-    pkg = {
-        "briefing_type": "content",
-        "follow_ups": [],
-        "team_work": ["scout did stuff"],  # wrong shape
-        "coaches_take": "ok",
-        "tone_signal": "neutral",
-    }
-    import urllib.request
-    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-test-fake")
-    monkeypatch.setattr(urllib.request, "urlopen", _fake_urlopen_decide(pkg))
-    result = _briefing_decide_call("raw", "test-non-dict")
-    assert result is not None
-    assert result["team_work"] == {"scout": None, "analyst": None, "publicist": None}
+# ---------------------------------------------------------------------------
+# Briefing body rework (2026-06-19) — align Scene-2 to the PM simulation:
+# drop the 📌 Follow-ups block, render the take as first-person "My take:"
+# with a judgment + A/B closer (sim "My take:" beat).
+# ---------------------------------------------------------------------------
+
+def test_write_prompt_has_no_attribution_paragraph_rule():
+    """The write prompt must not render an LLM-side team attribution paragraph."""
+    from cron.scheduler import _BRIEFING_WRITE_PROMPT
+    assert "team attribution" not in _BRIEFING_WRITE_PROMPT.lower()
+    assert "*Scout*" not in _BRIEFING_WRITE_PROMPT
+
+
+def test_write_prompt_drops_follow_ups_block():
+    """The write prompt must not render a 📌 Follow-ups block in normal briefings."""
+    from cron.scheduler import _BRIEFING_WRITE_PROMPT
+    assert "\U0001f4cc Follow-ups" not in _BRIEFING_WRITE_PROMPT
+
+
+def test_write_prompt_uses_first_person_my_take_label():
+    """The take is labelled 'My take:' (first-person), not '💬 Coach's Take'."""
+    from cron.scheduler import _BRIEFING_WRITE_PROMPT
+    assert "My take:" in _BRIEFING_WRITE_PROMPT
+    assert "Coach's Take" not in _BRIEFING_WRITE_PROMPT
+
+
+def test_write_prompt_instructs_ab_closer():
+    """The write prompt must instruct the take to end with a two-choice (A/B) closer."""
+    from cron.scheduler import _BRIEFING_WRITE_PROMPT
+    lowered = _BRIEFING_WRITE_PROMPT.lower()
+    assert "two" in lowered and ("choice" in lowered or "option" in lowered)
+
+
+def test_decide_prompt_take_is_judgment_plus_choice():
+    """The decide prompt's coaches_take must call for a judgment + a forward choice, not just a summary."""
+    from cron.scheduler import _BRIEFING_DECIDE_PROMPT
+    lowered = _BRIEFING_DECIDE_PROMPT.lower()
+    assert "my take" in lowered or "judgment" in lowered
+    assert "choice" in lowered or "option" in lowered or "a/b" in lowered
 
 
 from cron.scheduler import _briefing_write_call
