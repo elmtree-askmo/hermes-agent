@@ -17,6 +17,7 @@ from cron.scheduler import (
     _render_team_attribution_for_briefing,
     _render_opener,
     _count_active_sub_agents,
+    _has_fresh_reviewable_products,
     _SUB_AGENT_ATTRIBUTION_REGISTRY,
 )
 
@@ -251,3 +252,57 @@ def test_opener_empty_when_no_active_sub_agents(tmp_path):
     with patch("cron.scheduler.get_hermes_home", return_value=tmp_path):
         # even if LLM supplied text, no team work → no opener (nothing to greet about)
         assert _render_opener("U123", "Morning, team did stuff.") == ""
+
+
+# ---- _has_fresh_reviewable_products (C — walkthrough signal, server-side) --
+
+
+def test_fresh_reviewable_true_for_recent_cover_letter(tmp_path):
+    _setup_strategy(tmp_path, "U123", [
+        {"id": "p1", "sub_agent": "publicist", "completed_at": _iso(-2),
+         "artifact_kind": "cover-letter", "summary": "tailored Glossier letter"},
+    ])
+    with patch("cron.scheduler.get_hermes_home", return_value=tmp_path):
+        assert _has_fresh_reviewable_products("U123") is True
+
+
+def test_fresh_reviewable_true_for_recent_resume(tmp_path):
+    _setup_strategy(tmp_path, "U123", [
+        {"id": "r1", "sub_agent": "publicist", "completed_at": _iso(-1),
+         "artifact_kind": "resume", "summary": "tailored resume variant"},
+    ])
+    with patch("cron.scheduler.get_hermes_home", return_value=tmp_path):
+        assert _has_fresh_reviewable_products("U123") is True
+
+
+def test_fresh_reviewable_false_for_jobs_only(tmp_path):
+    # a job-scan artifact is NOT a reviewable drafted material — no walkthrough
+    _setup_strategy(tmp_path, "U123", [
+        {"id": "s1", "sub_agent": "scout", "completed_at": _iso(-1),
+         "artifact_kind": "jobs", "summary": "10 matches"},
+    ])
+    with patch("cron.scheduler.get_hermes_home", return_value=tmp_path):
+        assert _has_fresh_reviewable_products("U123") is False
+
+
+def test_fresh_reviewable_false_for_old_cover_letter(tmp_path):
+    _setup_strategy(tmp_path, "U123", [
+        {"id": "p1", "sub_agent": "publicist", "completed_at": _iso(-48),
+         "artifact_kind": "cover-letter", "summary": "old letter"},
+    ])
+    with patch("cron.scheduler.get_hermes_home", return_value=tmp_path):
+        assert _has_fresh_reviewable_products("U123") is False
+
+
+def test_fresh_reviewable_false_on_empty(tmp_path):
+    _setup_strategy(tmp_path, "U123", [])
+    with patch("cron.scheduler.get_hermes_home", return_value=tmp_path):
+        assert _has_fresh_reviewable_products("U123") is False
+
+
+def test_write_prompt_walkthrough_keyed_on_fresh_materials_flag():
+    """C (corrected): the WRITE prompt offers walkthrough keyed on the server-set
+    fresh_materials flag in the package — not on the decide LLM reading raw text."""
+    from cron.scheduler import _BRIEFING_WRITE_PROMPT
+    assert "fresh_materials" in _BRIEFING_WRITE_PROMPT
+    assert "walk you through" in _BRIEFING_WRITE_PROMPT.lower()

@@ -234,14 +234,15 @@ def test_decide_prompt_take_is_judgment_plus_choice():
 # ---------------------------------------------------------------------------
 
 
-def test_decide_prompt_walkthrough_is_conditional_on_fresh_materials():
-    """C: the A/B closer should lean to a walkthrough option when fresh reviewable
-    sub-agent products exist this cycle — not unconditionally."""
-    from cron.scheduler import _BRIEFING_DECIDE_PROMPT
-    lowered = _BRIEFING_DECIDE_PROMPT.lower()
-    assert "walk you through" in lowered or "walk them through" in lowered
-    # conditional wording present (only when there's freshly-made material to review)
-    assert "fresh" in lowered or "just-drafted" in lowered or "just drafted" in lowered or "newly" in lowered
+def test_walkthrough_signal_is_server_side_not_decide_inferred():
+    """C (corrected): the walkthrough A/B option is keyed on a server-set
+    `fresh_materials` flag (deterministic, from the archive — same source as the
+    attribution block), NOT on the decide LLM reading raw text. The decide LLM
+    only sees raw briefing text which does not reliably mention fresh archive
+    products, so decide must not be where the walkthrough condition lives."""
+    from cron.scheduler import _BRIEFING_WRITE_PROMPT
+    assert "fresh_materials" in _BRIEFING_WRITE_PROMPT
+    assert "walk you through" in _BRIEFING_WRITE_PROMPT.lower()
 
 
 def test_decide_prompt_has_emotional_checkin_field():

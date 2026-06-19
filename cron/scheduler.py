@@ -420,7 +420,7 @@ Rules:
 - briefing_type: "quiet_day" if nothing actionable today; "content" if follow_ups or new roles present.
 - opener: ONE short, natural greeting line — vary it by the day's content. It can be a TEAM-SUMMARY greeting ("Morning. Your team ran 3 things overnight." / "Morning. Analyst finished something interesting overnight.") OR a SITUATIONAL opener when that fits the day better ("Coming back to Warby Parker — you said you'd look Tuesday, then passed again." / "Something I've been noticing across our conversations."). Do NOT state an exact count unless clearly correct (the server adds a count-based fallback if you omit this). null on a quiet day with no team work.
 - follow_ups: list of concrete actionable items from the briefing. Empty list [] if none. (Used only by the silence check-in path; the normal briefing does not render a follow-ups block.)
-- coaches_take: this is the take beat. Distil the core JUDGMENT to 1-3 sentences AND end with a forward A/B choice — two concrete next actions the user can pick between. Lead with a point of view (lean a direction), don't just summarize. WALKTHROUGH OPTION: when the team just produced FRESH reviewable material this cycle (a newly-drafted resume/cover letter, a just-finished analysis), make one of the two choices a "want me to walk you through it first?" review option (e.g. "review the materials yourself, or want me to walk you through the key changes first?"). When there's no freshly-drafted material to review, use two forward-action choices instead — do NOT offer a walkthrough of nothing. MUST be first-person Coach voice ("I'll...", "My read is...", "You've done..."). NEVER include any person's name (first or last). No third-person pronouns (she/he/they) referring to the user. Replace any name with "they" or rephrase to second-person ("you"). Do NOT put the proactive cross-session observation here — that goes in `observation`, intact.
+- coaches_take: this is the take beat. Distil the core JUDGMENT to 1-3 sentences AND end with a forward A/B choice — two concrete next actions the user can pick between. Lead with a point of view (lean a direction), don't just summarize. (The server may turn one of the two choices into a "walk you through it" review option when fresh materials exist — you don't decide that; just give a sound judgment + two reasonable next steps.) MUST be first-person Coach voice ("I'll...", "My read is...", "You've done..."). NEVER include any person's name (first or last). No third-person pronouns (she/he/they) referring to the user. Replace any name with "they" or rephrase to second-person ("you"). Do NOT put the proactive cross-session observation here — that goes in `observation`, intact.
 - emotional_checkin: set this ONLY when the day is an emotional inflection point — right after an interview/phone screen, after a rejection, during a visible motivation dip or comparison spiral, or on a clear win. A short, warm line that makes space for how they feel (e.g. "How are you feeling about it?"). On a routine task-focused day, leave it null — do NOT force a feelings check-in every day.
 - observation: if the raw output proactively surfaces a recurring CROSS-SESSION pattern (the Coach naming something the user did NOT raise this turn — e.g. "one thing I've noticed across our conversations…", a recurring emotional theme, a pattern in how the user talks about their work), copy that WHOLE beat VERBATIM into this field: the across-sessions framing, the substance/affect, AND its correction invitation ("tell me if I'm wrong" / "push back" / "flip it back"). null if absent. Do NOT distil, paraphrase, soften, or fold it into coaches_take — it is a Coach-initiated observation; its exact framing + correction handle must reach the user intact.
 - tone_signal: emotional register the Coach intended.
@@ -441,6 +441,7 @@ Rules:
 - For quiet_day: one short paragraph in the same first-person take voice.
 - For content: render the coaches_take, lightly polished, preserving its judgment and its closing A/B choice.
 - The take: lead with a point of view (a direction you lean). Put the judgment in the first paragraph, then put the two-choice closer (offering the user two concrete next actions to pick between) in ITS OWN separate paragraph after a blank line. No lists.
+- WALKTHROUGH OPTION: if the package has "fresh_materials": true, the team just drafted reviewable material this cycle — make ONE of the two closer choices a "want me to walk you through it/the key changes first?" review option (the other stays a forward action). If fresh_materials is absent/false, use two forward-action choices and do NOT offer a walkthrough (there's nothing freshly drafted to review).
 - The "\U0001f4ac *My take:*" label is OPTIONAL, not required — use it on routine task-focused briefings where it aids scannability; you may omit it on conversational or strategic days where it reads more naturally as the Coach simply speaking. Either way the judgment + A/B closer must be present.
 - emotional_checkin: if non-null, render it as a short, warm beat (its own line) acknowledging the moment and making space for how they feel — placed naturally near the take. null → omit entirely (do not invent a feelings check-in).
 - observation: if non-null, render it as its OWN beat (its own short paragraph), VERBATIM — preserve the across-our-conversations framing, the substance/affect, and the correction invitation exactly. Do NOT paraphrase, shorten, soften, or merge it into the rest of the take. REQUIRED whenever present (it is a Coach-initiated observation and the user must get its exact framing + the handle to push back).
@@ -584,7 +585,7 @@ def _briefing_write_call(decision_pkg: dict, job_id: str = "?") -> str | None:
 
 def _run_two_step_briefing(
     raw_output: str, job_id: str = "?", silence_tier: str | None = None,
-    capture: dict | None = None,
+    capture: dict | None = None, user_id: str | None = None,
 ) -> str | None:
     """Phase 6 orchestrator — decide then write.
 
@@ -602,6 +603,10 @@ def _run_two_step_briefing(
     renders itself (not the write LLM) — currently `capture["opener"]` = the
     decide LLM's opener line, which the scheduler prepends above the attribution
     block (server controls ordering + supplies a count-based fallback).
+
+    `user_id`, when given, lets the server set `pkg["fresh_materials"]` from the
+    archive (deterministic walkthrough A/B signal — same source as attribution,
+    not decide-inferred from raw text).
     """
     pkg = _briefing_decide_call(raw_output, job_id)
     if pkg is None:
@@ -610,6 +615,12 @@ def _run_two_step_briefing(
 
     if silence_tier:
         pkg["silence_tier"] = silence_tier
+
+    # Walkthrough A/B signal — server-side, from the archive (NOT decide-inferred,
+    # which only sees raw text). Injected after decide, read by the write LLM —
+    # same deterministic-flag pattern as silence_tier.
+    if user_id and _has_fresh_reviewable_products(user_id):
+        pkg["fresh_materials"] = True
 
     if capture is not None:
         capture["opener"] = pkg.get("opener")
@@ -803,6 +814,51 @@ def _active_sub_agents_in_window(user_id: str) -> list[str]:
 def _count_active_sub_agents(user_id: str) -> int:
     """Number of distinct sub-agents with a completion in the last 24h (the opener's N)."""
     return len(_active_sub_agents_in_window(user_id))
+
+
+# Artifact kinds that represent freshly-DRAFTED reviewable material the user
+# could walk through (vs. a job-scan list, which is data not a draft).
+_REVIEWABLE_ARTIFACT_KINDS = frozenset({"cover-letter", "resume"})
+
+
+def _has_fresh_reviewable_products(user_id: str) -> bool:
+    """True when the archive has a freshly-drafted reviewable product (cover
+    letter / resume) completed in the last 24h.
+
+    This is the SERVER-SIDE signal for the briefing's walkthrough A/B option —
+    sourced from the archive (same deterministic source as the attribution
+    block), NOT inferred by the decide LLM from raw briefing text (which does
+    not reliably mention fresh archive products). Self-swallowing → False on any
+    read/parse failure.
+    """
+    try:
+        strategy_path = get_hermes_home() / "artemis" / user_id / "strategy.json"
+        if not strategy_path.exists():
+            return False
+        strategy = json.loads(strategy_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+
+    archive = strategy.get("archive") or []
+    if not isinstance(archive, list):
+        return False
+
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=_ATTRIBUTION_WINDOW_HOURS)
+    for item in archive:
+        if not isinstance(item, dict):
+            continue
+        if item.get("artifact_kind") not in _REVIEWABLE_ARTIFACT_KINDS:
+            continue
+        completed_at = item.get("completed_at")
+        if not isinstance(completed_at, str):
+            continue
+        try:
+            ts = datetime.fromisoformat(completed_at.replace("Z", "+00:00"))
+        except (ValueError, TypeError):
+            continue
+        if ts >= cutoff:
+            return True
+    return False
 
 
 def _render_opener(user_id: str, llm_opener: str | None) -> str:
@@ -2236,10 +2292,11 @@ def tick(verbose: bool = True, adapters=None, loop=None) -> int:
                     # only engaged/day1/day5/day8 speak-days reach here.
                     _s_tier, _s_speak = _briefing_silence(job)
                     _silence_tier = _s_tier if (_s_tier not in (None, "engaged") and _s_speak) else None
+                    _two_step_uid = (_resolve_origin(job) or {}).get("user_id")
                     _two_step_capture: dict = {}
                     two_step_result = _run_two_step_briefing(
                         deliver_content, job["id"], silence_tier=_silence_tier,
-                        capture=_two_step_capture,
+                        capture=_two_step_capture, user_id=_two_step_uid,
                     )
                     if two_step_result is not None:
                         deliver_content = two_step_result
