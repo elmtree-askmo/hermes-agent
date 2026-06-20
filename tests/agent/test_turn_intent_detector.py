@@ -29,19 +29,35 @@ def _fake_response(content: str):
 
 
 class TestDetectTurnIntent:
-    def test_short_message_skipped(self, monkeypatch):
+    def test_short_surface_message_runs_detector(self, monkeypatch):
+        """Bug #9: short surface pulls ('walk me through it', 18 chars) must reach
+        the detector — the old length gate (_MIN_USER_MSG_LEN=20) silently killed
+        them when sent as a bare DM. The gate is removed; short messages now run."""
+        monkeypatch.setattr(
+            "agent.auxiliary_client.call_llm",
+            lambda **kw: _fake_response(
+                '{"dispatch_type": "none", "dispatches": [], '
+                '"lead_in": null, "confidence": "high", '
+                '"reasoning": "surface pull"}'
+            ),
+            raising=False,
+        )
+        result = tid.detect_turn_intent("walk me through it")
+        assert result["checked"] is True
+        assert result["skipped"] is None
+
+    def test_empty_message_still_skipped(self, monkeypatch):
+        """An empty/whitespace message has nothing to classify — still skip,
+        never call the aux LLM."""
         called = {"aux": False}
         monkeypatch.setattr(
             "agent.auxiliary_client.call_llm",
             lambda **kw: (called.__setitem__("aux", True), None)[1],
             raising=False,
         )
-        result = tid.detect_turn_intent("ok")
+        result = tid.detect_turn_intent("")
         assert result["checked"] is False
-        assert result["skipped"] == "msg_too_short"
-        assert result["dispatch_type"] == "none"
-        assert result["dispatches"] == []
-        assert result["lead_in"] is None
+        assert result["skipped"] == "empty_message"
         assert called["aux"] is False
 
     def test_single_dispatch_parsed(self, monkeypatch):

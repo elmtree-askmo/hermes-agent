@@ -39,15 +39,16 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
-# Skip detection for short messages. Short turns ("ok", "yes", "thanks",
-# "what") are unlikely to need sub-agent dispatch AND are typically not
-# tool-triggered capability questions either — short capability asks
-# ("call her?", "apply for me?") carry no URL/attachment that would tempt
-# Coach into a tool-call silent-regrade, so SOUL.md's static Capability
-# Posture handles them adequately. Lowering the threshold would force a
-# detector LLM call on ~70% of turns for marginal capability-classification
-# benefit; revisit only if short capability questions show production drift.
-_MIN_USER_MSG_LEN = 20
+# No length gate on detection. A prior _MIN_USER_MSG_LEN=20 char gate skipped
+# short turns to save detector calls, but it used LENGTH as a proxy for
+# "has-intent" — wrong proxy: surface-existing pulls ("walk me through it",
+# "send it", "show me the docs") are short but carry clear intent, and the gate
+# silently killed them (B/#9, 2026-06-20). Only genuinely empty messages are
+# skipped now; everything else reaches the detector, which classifies no-intent
+# turns ("ok"/"yes") as dispatch_type=none cheaply. Cost note: this adds detector
+# calls on short turns (the aux model is costlier than the main model) — a
+# deliberate accuracy-over-cost tradeoff; cost structure is a separate
+# optimization pass (detector model choice / pre-filter).
 
 # Hard timeout — this runs synchronously on every user turn before Coach
 # starts. Auxiliary must be fast or skipped.
@@ -410,8 +411,8 @@ def detect_turn_intent(
         "reasoning": None,
     }
 
-    if not user_message or len(user_message) < _MIN_USER_MSG_LEN:
-        out["skipped"] = "msg_too_short"
+    if not user_message or not user_message.strip():
+        out["skipped"] = "empty_message"
         return out
 
     try:
