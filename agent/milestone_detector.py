@@ -134,9 +134,10 @@ def render_milestone_block(milestone: dict[str, Any] | None) -> str:
 # Deterministic word-list, not an LLM: routing is a closed classification, kept
 # off the prompt-compliance path (the affirm voicing is the only LLM-judged part).
 _COMPLETION_SIGNALS = (
-    "submitted", "submit", "sent it", "sent the", "sent off", "just sent",
-    "applied", "application in", "fired off", "shipped it", "put it in",
-    "got it in", "out the door", "hit submit",
+    "submitted", "submit", "sent it", "sent the", "sent off", "sent over",
+    "sent in", "just sent", "applied", "application in", "fired off",
+    "shipped it", "put it in", "got it in", "turned it in", "out the door",
+    "hit submit", "emailed it", "emailed the", "emailed my",
 )
 
 
