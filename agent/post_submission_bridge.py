@@ -8,12 +8,15 @@ Coach's message calibration, which short-circuits the get_strategy read. The
 trigger is gated on the same user_reported_completion signal as the milestone
 affirm (agent/milestone_detector); this module only supplies the detect + render.
 
-Detection reads strategy.json action_queue[] directly (the gateway already reads
-per-user artemis files this way) — it does not import the Artemis MCP server. The
-next-role item is the Strategist-staged deliver-<company>-materials role-decision
-entry (agent/strategist-hermes.md § Staging the next role behind a submit). We key
-on the deterministic id shape + pending status, not the LLM-authored
-trigger_condition text.
+S-0622-04 Phase 2: detection reads the ``applications.json`` ledger directly (the
+gateway already reads per-user artemis files this way — it does not import the
+Artemis MCP server) for the next ``materials_ready`` application: drafted, not yet
+submitted, no terminal outcome. This replaces scanning ``action_queue[]`` for a
+Strategist-staged ``deliver-<company>-materials`` item — the ledger is the
+deterministic single source, and the original P-0609-01 false-green was precisely
+the Strategist *missing* that emit. The just-submitted application is already
+advanced to ``submitted`` by the gateway submit-detect before this runs, so the
+remaining ``materials_ready`` record is the genuine next role.
 """
 
 from __future__ import annotations
@@ -22,53 +25,39 @@ import json
 from pathlib import Path
 from typing import Any
 
-# A staged next-role item carries this id prefix/suffix shape and stays pending
-# until its submit lands. Coach's SOUL.md § Juncture A/B/Pause bridges to it.
 _DELIVER_PREFIX = "deliver-"
 _DELIVER_SUFFIX = "-materials"
 
 
-def _company_label(item_id: str) -> str:
-    """Derive a human-readable company label from a deliver-<company>-materials id.
-
-    ``deliver-brightline-health-materials`` -> ``Brightline Health``. Best-effort
-    titleization; the LLM refines phrasing when it voices the bridge.
-    """
-    core = item_id
-    if core.startswith(_DELIVER_PREFIX):
-        core = core[len(_DELIVER_PREFIX):]
-    if core.endswith(_DELIVER_SUFFIX):
-        core = core[: -len(_DELIVER_SUFFIX)]
-    return " ".join(part for part in core.split("-") if part).title()
-
-
 def detect_next_queued_role(user_dir: Path) -> dict[str, Any] | None:
-    """Return the next pending staged role to bridge to, or None.
+    """Return the next materials_ready application to bridge to, or None.
 
-    Reads ``<user_dir>/strategy.json`` and scans ``action_queue[]`` for the first
-    pending ``deliver-<company>-materials`` entry — the Strategist-staged next role
-    behind a submit. Returns ``{"id", "company_label"}`` or None when none is
-    queued. Fail-safe: a missing / corrupt strategy never raises (returns None),
+    Reads ``<user_dir>/applications.json`` for the first ``materials_ready`` record
+    with no terminal outcome — the next role whose materials are drafted but not yet
+    submitted. Returns ``{"id", "company_label"}`` (id keeps the legacy
+    ``deliver-<company>-materials`` shape for log/render continuity) or None when
+    none exists. Fail-safe: a missing / corrupt ledger never raises (returns None),
     so it can't break the gateway turn.
     """
-    strategy_path = Path(user_dir) / "strategy.json"
+    apps_path = Path(user_dir) / "applications.json"
     try:
-        strategy = json.loads(strategy_path.read_text(encoding="utf-8"))
+        raw = json.loads(apps_path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
-    if not isinstance(strategy, dict):
+    records = raw.get("applications") if isinstance(raw, dict) else raw
+    if not isinstance(records, list):
         return None
 
-    for item in strategy.get("action_queue") or []:
-        if not isinstance(item, dict):
+    for rec in records:
+        if not isinstance(rec, dict):
             continue
-        item_id = item.get("id") or ""
-        if (
-            item_id.startswith(_DELIVER_PREFIX)
-            and item_id.endswith(_DELIVER_SUFFIX)
-            and item.get("status") == "pending"
-        ):
-            return {"id": item_id, "company_label": _company_label(item_id)}
+        if rec.get("status") == "materials_ready" and not rec.get("outcome"):
+            company = rec.get("company") or ""
+            label = rec.get("display_name") or company.replace("-", " ").title()
+            return {
+                "id": f"{_DELIVER_PREFIX}{company}{_DELIVER_SUFFIX}",
+                "company_label": label,
+            }
     return None
 
 
