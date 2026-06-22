@@ -45,6 +45,20 @@ def _setup_user(tmp_path, user_id, archive_entries, days_since_signup,
         strategy["milestones_emitted"] = milestones_emitted
     (user_dir / "strategy.json").write_text(json.dumps(strategy), encoding="utf-8")
 
+    # S-0622-04: the count source is now applications.json (status >= submitted),
+    # not the archive event. Mirror the count of application_submitted archive
+    # entries into a submitted ledger so each test's intended count holds.
+    n_submitted = sum(
+        1 for a in archive_entries
+        if isinstance(a, dict) and a.get("event_type") == "application_submitted"
+    )
+    apps = [{"company": f"co{i}", "display_name": f"Co{i}", "status": "submitted",
+             "artifacts": [], "outcome": None} for i in range(n_submitted)]
+    (user_dir / "applications.json").write_text(
+        json.dumps({"applications": apps,
+                    "updated_at": datetime.now(timezone.utc).isoformat()}),
+        encoding="utf-8")
+
     flag = user_dir / "onboarding_pushed.flag"
     flag.write_text("", encoding="utf-8")
     signup_ts = (datetime.now(timezone.utc) - timedelta(days=days_since_signup)).timestamp()

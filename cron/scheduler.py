@@ -1070,11 +1070,12 @@ def _render_milestone_block(user_id: str) -> str:
         return ""
     mark_days, mark_id = due_mark
 
-    archive = strategy.get("archive") or []
-    app_count = sum(
-        1 for a in archive
-        if isinstance(a, dict) and a.get("event_type") == "application_submitted"
-    )
+    # S-0622-04: count source migrated to the applications.json ledger (the
+    # archive application_submitted event under-counted — cover letters on the
+    # save_cover_letter side path produced no archive event). Shared with the
+    # conversational sibling (agent/milestone_detector.py).
+    from agent.milestone_detector import count_submitted_applications
+    app_count = count_submitted_applications(user_dir)
 
     # The mark is time-based, so record it now even when there's nothing to voice
     # (zero apps) — otherwise it would re-evaluate (and stay empty) every briefing.

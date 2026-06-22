@@ -17,6 +17,7 @@ from agent.milestone_detector import (
     render_milestone_block,
     mark_milestone_affirmed,
     user_reported_completion,
+    count_submitted_applications,
 )
 
 
@@ -44,6 +45,13 @@ def _setup(tmp_path, user_id="U123", n_apps=0, affirmed=None, extra=None):
     if affirmed is not None:
         strategy["milestones_affirmed"] = affirmed
     (user_dir / "strategy.json").write_text(json.dumps(strategy), encoding="utf-8")
+    # S-0622-04: the count source is now applications.json (status >= submitted),
+    # not the archive event. Seed n_apps submitted records to match n_apps.
+    if n_apps:
+        _write_applications(
+            user_dir,
+            [_apprec(f"company{i}", "submitted") for i in range(1, n_apps + 1)],
+        )
     return user_dir
 
 
@@ -140,6 +148,104 @@ class TestMark:
         assert m["tier"] == "apps_3"
         mark_milestone_affirmed(ud, "apps_3")
         assert detect_milestone(ud) is None
+
+
+def _write_applications(user_dir, records):
+    """Write applications.json (the S-0622-04 ledger) into an existing user_dir."""
+    (user_dir / "applications.json").write_text(
+        json.dumps({"applications": records,
+                    "updated_at": datetime.now(timezone.utc).isoformat()}),
+        encoding="utf-8",
+    )
+
+
+def _apprec(company, status):
+    return {"company": company, "display_name": company, "status": status,
+            "artifacts": [], "outcome": None}
+
+
+class TestCountSubmittedApplications:
+    """S-0622-04 Phase 1: the milestone count migrates from the archive
+    application_submitted event to the applications.json ledger — count records
+    with status >= submitted (submitted or interviewed)."""
+
+    def test_counts_submitted_records(self, tmp_path):
+        ud = tmp_path / "artemis" / "U1"
+        ud.mkdir(parents=True)
+        _write_applications(ud, [
+            _apprec("loreal", "submitted"),
+            _apprec("coca-cola", "submitted"),
+        ])
+        assert count_submitted_applications(ud) == 2
+
+    def test_materials_ready_not_counted(self, tmp_path):
+        ud = tmp_path / "artemis" / "U1"
+        ud.mkdir(parents=True)
+        _write_applications(ud, [
+            _apprec("loreal", "submitted"),
+            _apprec("acme", "materials_ready"),
+            _apprec("widget", "identified"),
+        ])
+        assert count_submitted_applications(ud) == 1
+
+    def test_interviewed_counts_as_submitted_or_higher(self, tmp_path):
+        ud = tmp_path / "artemis" / "U1"
+        ud.mkdir(parents=True)
+        _write_applications(ud, [
+            _apprec("loreal", "submitted"),
+            _apprec("acme", "interviewed"),
+        ])
+        assert count_submitted_applications(ud) == 2
+
+    def test_missing_applications_returns_zero(self, tmp_path):
+        ud = tmp_path / "artemis" / "U1"
+        ud.mkdir(parents=True)
+        assert count_submitted_applications(ud) == 0
+
+    def test_corrupt_applications_returns_zero(self, tmp_path):
+        ud = tmp_path / "artemis" / "U1"
+        ud.mkdir(parents=True)
+        (ud / "applications.json").write_text("{not json", encoding="utf-8")
+        assert count_submitted_applications(ud) == 0
+
+
+class TestDetectFromApplications:
+    """detect_milestone now reads applications.json, not the archive count."""
+
+    def test_detect_counts_from_applications_ledger(self, tmp_path):
+        ud = tmp_path / "artemis" / "U1"
+        ud.mkdir(parents=True)
+        (ud / "strategy.json").write_text(
+            json.dumps({"milestones_affirmed": ["apps_2"]}), encoding="utf-8")
+        _write_applications(ud, [
+            _apprec("a", "submitted"), _apprec("b", "submitted"),
+            _apprec("c", "submitted"),
+        ])
+        m = detect_milestone(ud)
+        assert m is not None
+        assert m["tier"] == "apps_3"
+        assert m["count"] == 3
+
+    def test_scene3_regression_archive_undercounts_ledger_correct(self, tmp_path):
+        """SIM-JOURNEY scene 3: the user submitted 4 applications but only 2 rode
+        the archive application_submitted event (Estée/Target cover letters used
+        the save_cover_letter side path). The archive count was wrong at 2; the
+        applications ledger is the correct 4. Migrated detect must see 4."""
+        ud = tmp_path / "artemis" / "U1"
+        ud.mkdir(parents=True)
+        # Archive has only 2 typed events (the old, wrong source).
+        archive = [_app(1), _app(2)]
+        (ud / "strategy.json").write_text(
+            json.dumps({"archive": archive, "milestones_affirmed": []}),
+            encoding="utf-8")
+        # The ledger has the correct 4 submitted applications.
+        _write_applications(ud, [
+            _apprec("loreal", "submitted"), _apprec("coca-cola", "submitted"),
+            _apprec("estee-lauder", "submitted"), _apprec("target", "submitted"),
+        ])
+        m = detect_milestone(ud)
+        assert m is not None
+        assert m["count"] == 4, "must count the ledger (4), not the archive (2)"
 
 
 class TestUserReportedCompletion:

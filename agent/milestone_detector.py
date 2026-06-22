@@ -7,8 +7,15 @@ from strategy.json archive[] application_submitted events (typed by S-0601-02);
 dedup is a persisted milestones_affirmed[] ledger marked optimistically at inject
 time (over-affirm fails safe toward silence).
 
-This module reads strategy.json directly (the gateway already reads per-user
-artemis files this way) — it does not import the Artemis MCP server.
+This module reads per-user artemis files directly (the gateway already reads
+them this way) — it does not import the Artemis MCP server.
+
+S-0622-04: the application count migrated from the strategy.json archive
+``application_submitted`` event (which under-counted — cover letters riding the
+``save_cover_letter`` side path never produced an archive event, SIM-JOURNEY
+scene 3) to the ``applications.json`` ledger — the single source of application
+state. Count records with ``status`` >= submitted. Dedup still lives on the
+strategy.json ``milestones_affirmed[]`` ledger (unchanged).
 """
 
 from __future__ import annotations
@@ -20,17 +27,50 @@ from typing import Any
 # Application-count milestone tiers, ascending. Lifted from the simulation
 # (2 apps, 3 apps in the Maya scenes) plus a sparse continuation (5, 10).
 # first_screen / first_contact tiers are deferred until phone_screen /
-# contact_made event_types exist (S-0601-02 typed application_submitted only).
+# contact_made signals exist (Phase 2).
 _APP_TIERS = (("apps_2", 2), ("apps_3", 3), ("apps_5", 5), ("apps_10", 10))
+
+# Application statuses that count as "an application went out" — submitted and
+# everything downstream of it (interviewed). Active pre-submit states
+# (identified / materials_ready) and terminal outcome (carried separately on the
+# record) are excluded. Terminal state lives in `outcome`, not `status`, so a
+# rejected-after-submit application still has status="submitted" and counts.
+_SUBMITTED_STATUSES = frozenset({"submitted", "interviewed"})
+
+
+def count_submitted_applications(user_dir: Path) -> int:
+    """Count applications with status >= submitted in ``<user_dir>/applications.json``.
+
+    The single source of the application milestone count (S-0622-04). Returns 0
+    on missing / corrupt ledger (fail-safe: never raises — callers run inside the
+    gateway turn / cron job).
+    """
+    path = Path(user_dir) / "applications.json"
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return 0
+    if isinstance(raw, dict):
+        records = raw.get("applications")
+    else:
+        records = raw
+    if not isinstance(records, list):
+        return 0
+    return sum(
+        1 for r in records
+        if isinstance(r, dict) and r.get("status") in _SUBMITTED_STATUSES
+    )
 
 
 def detect_milestone(user_dir: Path) -> dict[str, Any] | None:
     """Return the highest un-affirmed application-count milestone, or None.
 
-    Reads ``<user_dir>/strategy.json``. Counts ``application_submitted`` archive
-    events, picks the highest tier whose threshold is met and not yet in
-    ``milestones_affirmed[]``. Returns None on missing / corrupt strategy, or
-    when nothing new is crossed (fail-safe: a read error never raises here).
+    Counts submitted applications from ``<user_dir>/applications.json`` (S-0622-04;
+    the count source migrated off the archive event), reads the dedup ledger from
+    ``strategy.json`` ``milestones_affirmed[]``, picks the highest tier whose
+    threshold is met and not yet affirmed. Returns None on missing / corrupt
+    strategy, or when nothing new is crossed (fail-safe: a read error never raises
+    here).
     """
     strategy_path = Path(user_dir) / "strategy.json"
     try:
@@ -40,11 +80,7 @@ def detect_milestone(user_dir: Path) -> dict[str, Any] | None:
     if not isinstance(strategy, dict):
         return None
 
-    archive = strategy.get("archive") or []
-    app_count = sum(
-        1 for a in archive
-        if isinstance(a, dict) and a.get("event_type") == "application_submitted"
-    )
+    app_count = count_submitted_applications(user_dir)
     affirmed = set(strategy.get("milestones_affirmed") or [])
 
     # An affirmed tier covers every LOWER tier — they were implicitly crossed at
