@@ -877,6 +877,52 @@ class TestExecuteViaHelper:
         assert result["dispatch_type_seen"] == "surface_existing"
         assert result["lead_in_seen"] == "Here's what the team put together."
 
+    def test_surface_existing_forwards_surface_item_ids(self, tmp_path):
+        """S-0622-03: a directed pull's surface_item_ids must reach the helper
+        payload so the helper surfaces only the named items."""
+        helper = tmp_path / "exec.py"
+        helper.write_text(
+            "#!/usr/bin/env python3\n"
+            "import json, sys\n"
+            "payload = json.loads(sys.stdin.read())\n"
+            "print(json.dumps({'ok': True, "
+            "'ids_seen': payload.get('surface_item_ids'), 'surfaced': []}))\n"
+        )
+        helper.chmod(0o755)
+        result = tid.execute_via_helper(
+            "U_TEST",
+            {
+                "dispatch_type": "surface_existing",
+                "dispatches": [],
+                "surface_item_ids": ["tailor-resume-target"],
+                "lead_in": "Pulling up your Target materials.",
+            },
+            helper_path=str(helper),
+        )
+        assert result["ok"] is True
+        assert result["ids_seen"] == ["tailor-resume-target"]
+
+    def test_surface_existing_unscoped_omits_item_ids(self, tmp_path):
+        """An unscoped pull (empty/absent surface_item_ids) forwards no ids →
+        helper falls back to full-team replay."""
+        helper = tmp_path / "exec.py"
+        helper.write_text(
+            "#!/usr/bin/env python3\n"
+            "import json, sys\n"
+            "payload = json.loads(sys.stdin.read())\n"
+            "print(json.dumps({'ok': True, "
+            "'has_ids_key': 'surface_item_ids' in payload, 'surfaced': []}))\n"
+        )
+        helper.chmod(0o755)
+        result = tid.execute_via_helper(
+            "U_TEST",
+            {"dispatch_type": "surface_existing", "dispatches": [],
+             "surface_item_ids": []},
+            helper_path=str(helper),
+        )
+        assert result["ok"] is True
+        assert result["has_ids_key"] is False
+
     def test_single_dispatch_helper_success(self, tmp_path):
         helper = tmp_path / "exec.py"
         helper.write_text(
@@ -1289,3 +1335,148 @@ class TestRenderOnboardingSharpeningBlock:
 
     def test_none_arg_returns_none(self):
         assert tid.render_onboarding_sharpening_block(None) is None
+
+
+# =========================================================================
+# S-0622-03 — directed surface_existing: the detector selects which archive
+# items a directed pull points at and returns them in `surface_item_ids`.
+# The detector is fed a compact archive index so it can resolve the user's
+# phrasing ("the target stuff") to specific archive ids semantically,
+# sidestepping the company/adjective string-match collision.
+# =========================================================================
+
+
+class TestSurfaceItemIds:
+    def test_surface_existing_parses_surface_item_ids(self, monkeypatch):
+        """surface_existing turn whose LLM output names archive ids → the
+        detector surfaces them in `surface_item_ids`."""
+        monkeypatch.setattr(
+            "agent.auxiliary_client.call_llm",
+            lambda **kw: _fake_response(
+                '{"dispatch_type": "surface_existing", "dispatches": [], '
+                '"surface_item_ids": ["tailor-resume-target"], '
+                '"lead_in": "Pulling up your Target materials.", '
+                '"confidence": "high", "reasoning": "directed pull for Target"}'
+            ),
+            raising=False,
+        )
+        result = tid.detect_turn_intent(
+            "lets see the target stuff",
+            archive_index=[
+                {"id": "tailor-resume-target", "sub_agent": "publicist",
+                 "artifact_name": "target-marketing-coordinator"},
+                {"id": "job-match-20260620", "sub_agent": "scout",
+                 "artifact_name": None},
+            ],
+        )
+        assert result["dispatch_type"] == "surface_existing"
+        assert result["surface_item_ids"] == ["tailor-resume-target"]
+
+    def test_unscoped_surface_existing_empty_item_ids(self, monkeypatch):
+        """An unscoped pull ('walk me through what the team did') → no
+        surface_item_ids → empty list → helper does full-team replay."""
+        monkeypatch.setattr(
+            "agent.auxiliary_client.call_llm",
+            lambda **kw: _fake_response(
+                '{"dispatch_type": "surface_existing", "dispatches": [], '
+                '"lead_in": "Here\'s what the team put together.", '
+                '"confidence": "high", "reasoning": "unscoped walkthrough"}'
+            ),
+            raising=False,
+        )
+        result = tid.detect_turn_intent("walk me through what the team did")
+        assert result["dispatch_type"] == "surface_existing"
+        assert result["surface_item_ids"] == []
+
+    def test_surface_item_ids_empty_for_non_surface_dispatch(self, monkeypatch):
+        """surface_item_ids is only meaningful on surface_existing turns; any
+        value the LLM emits on a none/single/multi turn is dropped."""
+        monkeypatch.setattr(
+            "agent.auxiliary_client.call_llm",
+            lambda **kw: _fake_response(
+                '{"dispatch_type": "none", "dispatches": [], '
+                '"surface_item_ids": ["leaked-id"], '
+                '"lead_in": null, "confidence": "high", "reasoning": "x"}'
+            ),
+            raising=False,
+        )
+        result = tid.detect_turn_intent("how are you")
+        assert result["dispatch_type"] == "none"
+        assert result["surface_item_ids"] == []
+
+    def test_archive_index_injected_into_prompt(self, monkeypatch):
+        """The compact archive index reaches the LLM prompt so it can resolve
+        phrasing → ids. Capture the prompt the detector builds."""
+        captured = {}
+        monkeypatch.setattr(
+            "agent.auxiliary_client.call_llm",
+            lambda **kw: captured.update(messages=kw.get("messages")) or _fake_response(
+                '{"dispatch_type": "surface_existing", "dispatches": [], '
+                '"surface_item_ids": [], "lead_in": null, '
+                '"confidence": "low", "reasoning": "x"}'
+            ),
+            raising=False,
+        )
+        tid.detect_turn_intent(
+            "show me the target stuff",
+            archive_index=[
+                {"id": "tailor-resume-target", "sub_agent": "publicist",
+                 "artifact_name": "target-marketing-coordinator"},
+            ],
+        )
+        prompt = captured["messages"][1]["content"]
+        assert "tailor-resume-target" in prompt
+
+
+# =========================================================================
+# S-0622-03 — build_archive_index: the gateway builds a compact index of
+# surfaceable archive items to feed the detector each turn. Candidate set =
+# sub-agent-attributed + non-empty summary (NOT 24h-gated — a directed pull
+# may name an older item; matches the helper's directed-pull collector).
+# =========================================================================
+
+import time as _time
+
+
+def _ai_item(action_id, sub_agent, summary="work", artifact_name=None,
+             hours_ago=1.0):
+    from datetime import datetime, timezone, timedelta
+    ts = (datetime.now(timezone.utc) - timedelta(hours=hours_ago)).isoformat()
+    item = {"id": action_id, "sub_agent": sub_agent, "summary": summary,
+            "status": "done", "completed_at": ts}
+    if artifact_name is not None:
+        item["artifact_name"] = artifact_name
+    return item
+
+
+class TestBuildArchiveIndex:
+    def test_emits_id_sub_agent_artifact_name(self):
+        archive = [_ai_item("tailor-resume-target", "publicist", "Target packet.",
+                             artifact_name="target-marketing-coordinator")]
+        idx = tid.build_archive_index(archive)
+        assert idx == [{"id": "tailor-resume-target", "sub_agent": "publicist",
+                        "artifact_name": "target-marketing-coordinator"}]
+
+    def test_includes_items_older_than_24h(self):
+        """A directed pull may name an old item — index is not 24h-gated."""
+        archive = [_ai_item("old-pub", "publicist", "Old draft.", hours_ago=72)]
+        idx = tid.build_archive_index(archive)
+        assert [i["id"] for i in idx] == ["old-pub"]
+
+    def test_skips_non_subagent_and_summaryless(self):
+        archive = [
+            {"id": "plain", "summary": "no sub_agent", "status": "done"},
+            _ai_item("no-summary", "scout", summary=""),
+            _ai_item("good", "analyst", "Has summary."),
+        ]
+        idx = tid.build_archive_index(archive)
+        assert [i["id"] for i in idx] == ["good"]
+
+    def test_artifact_name_null_when_absent(self):
+        idx = tid.build_archive_index([_ai_item("scan-1", "scout", "Scan.")])
+        assert idx[0]["artifact_name"] is None
+
+    def test_empty_or_non_list_returns_empty(self):
+        assert tid.build_archive_index([]) == []
+        assert tid.build_archive_index(None) == []
+        assert tid.build_archive_index("nope") == []

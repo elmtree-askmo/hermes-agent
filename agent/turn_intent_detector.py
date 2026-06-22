@@ -136,6 +136,25 @@ exchanges, decide the **dispatch shape** this turn needs.
   (a short Coach-voice opener like "Here's what the team put together."
   before the sub-agent messages appear).
 
+  **DIRECTED vs UNSCOPED surface_existing — set `surface_item_ids`.** A
+  pull is *directed* when the user asks for a specific slice: one company
+  ("lets see the target stuff"), one artifact type ("show me the resume"),
+  or one sub-agent's work ("what did scout find"). It is *unscoped* when
+  the user wants the whole picture ("walk me through what the team did",
+  "what did you all find"). The team's existing work is listed under
+  "Team work on record" below, each line an `id`.
+  - **Directed** → set `surface_item_ids` to the `id`(s) that match the
+    user's slice — resolve the slice from the work list semantically. Use
+    your judgment of meaning, not string matching: "the **target** stuff"
+    means the **Target company** materials (an `id` whose artifact is for
+    Target), NOT an item that merely contains the word "target" as a
+    goal/adjective (e.g. an "identify-target-consumer-brands" scan). When
+    nothing on the list matches the slice, return an empty list.
+  - **Unscoped** → return an empty `surface_item_ids` list (the whole team
+    is replayed).
+  - `surface_item_ids` is meaningful ONLY for surface_existing; omit it (or
+    empty) for every other dispatch type.
+
 **How to judge multi vs single:**
 
 1. Read current user line + last few exchanges to understand context.
@@ -260,6 +279,7 @@ Return STRICT JSON, no prose, no markdown fence:
     ... (1 item for single, 2-3 items for multi, empty list for none
         and for surface_existing)
   ],
+  "surface_item_ids": ["<archive id>", ...],
   "lead_in": "<short Coach-voice opener, or null>",
   "capability_bucket": "non_capability" | 1 | 2 | 3 | 4,
   "user_action_required": true | false,
@@ -268,6 +288,13 @@ Return STRICT JSON, no prose, no markdown fence:
   "confidence": "high|medium|low",
   "reasoning": "<one short sentence>"
 }
+
+(`surface_item_ids`: empty list except on a DIRECTED surface_existing pull.)
+
+Team work on record (for resolving a directed surface_existing pull;
+each line is one archive item — empty when nothing is on record):
+
+{archive_index}
 
 Last few exchanges (most recent last, may be empty for first turn):
 
@@ -327,6 +354,69 @@ def _format_history(history: list[dict] | None) -> str:
     return "\n".join(lines) if lines else "(no prior exchanges in this session)"
 
 
+def _format_archive_index(archive_index: list[dict] | None) -> str:
+    """Render the compact archive index for the detector prompt (S-0622-03).
+
+    Each item is {id, sub_agent, artifact_name}. The detector uses this to
+    resolve a directed surface_existing pull to specific ids. Returns a
+    sentinel when empty so the prompt always has a stable shape.
+    """
+    if not archive_index:
+        return "(no surfaceable team work on record)"
+    lines = []
+    for item in archive_index:
+        if not isinstance(item, dict):
+            continue
+        iid = item.get("id")
+        if not isinstance(iid, str) or not iid:
+            continue
+        sub_agent = item.get("sub_agent") or "?"
+        artifact_name = item.get("artifact_name")
+        name_part = f", artifact={artifact_name}" if artifact_name else ""
+        lines.append(f"- id={iid} (by {sub_agent}{name_part})")
+    return "\n".join(lines) if lines else "(no surfaceable team work on record)"
+
+
+def build_archive_index(archive: Any) -> list[dict[str, Any]]:
+    """Compact index of surfaceable archive items for the detector (S-0622-03).
+
+    The gateway calls this each turn from the user's `strategy.archive` and
+    passes the result to `detect_turn_intent(archive_index=...)`, so the
+    detector can resolve a directed surface_existing pull to specific ids.
+
+    Candidate set = sub-agent-attributed + non-empty summary. **NOT 24h-gated**
+    — a directed pull may name an older item (the user explicitly asked for
+    it), matching the helper's directed collector (`_collect_surfaceable_by_ids`),
+    which also ignores the recency window. Emits only the fields the detector
+    needs to select: `id`, `sub_agent`, `artifact_name` (None when absent) —
+    not summaries, keeping the prompt bounded.
+    """
+    if not isinstance(archive, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for item in archive:
+        if not isinstance(item, dict):
+            continue
+        iid = item.get("id")
+        if not isinstance(iid, str) or not iid:
+            continue
+        sub_agent = item.get("sub_agent")
+        if sub_agent not in _VALID_SUB_AGENTS:
+            continue
+        summary = (item.get("summary") or "").strip()
+        if not summary:
+            continue
+        artifact_name = item.get("artifact_name")
+        if not isinstance(artifact_name, str) or not artifact_name:
+            artifact_name = None
+        out.append({
+            "id": iid,
+            "sub_agent": sub_agent,
+            "artifact_name": artifact_name,
+        })
+    return out
+
+
 def _normalize_dispatches(raw_dispatches: Any) -> list[dict[str, Any]]:
     """Validate + normalize the dispatches array from the LLM output.
 
@@ -376,6 +466,7 @@ def _normalize_dispatches(raw_dispatches: Any) -> list[dict[str, Any]]:
 def detect_turn_intent(
     user_message: str,
     history: list[dict] | None = None,
+    archive_index: list[dict] | None = None,
 ) -> dict[str, Any]:
     """Classify the user's turn for sub-agent dispatch routing.
 
@@ -384,6 +475,14 @@ def detect_turn_intent(
       history: Optional list of {role, content} dicts (last ~4 messages,
         oldest first). When None / empty the detector treats the turn as
         having no prior context.
+      archive_index: Optional compact list of surfaceable archive items
+        ({id, sub_agent, artifact_name}), supplied on every turn by the
+        gateway (S-0622-03). The detector reads it ONLY to resolve a
+        directed `surface_existing` pull ("lets see the target stuff") to
+        specific archive ids — emitting them in `surface_item_ids` — and
+        ignores it for every other dispatch type. None / empty ⇒ the
+        detector cannot select items ⇒ any surface_existing stays unscoped
+        (helper does full-team replay).
 
     Returns a dict with uniform schema:
 
@@ -402,6 +501,7 @@ def detect_turn_intent(
         "skipped": None,
         "dispatch_type": "none",
         "dispatches": [],
+        "surface_item_ids": [],
         "lead_in": None,
         "capability_bucket": "non_capability",
         "user_action_required": False,
@@ -429,6 +529,7 @@ def detect_turn_intent(
     _subs = {
         "{conversation_history}": history_text,
         "{user_message}": user_message,
+        "{archive_index}": _format_archive_index(archive_index),
     }
     import re as _re
     _pat = _re.compile("|".join(_re.escape(k) for k in _subs))
@@ -483,6 +584,17 @@ def detect_turn_intent(
         else:
             dispatch_type = "none"
 
+    # surface_item_ids — directed-pull selection (S-0622-03). Only meaningful
+    # on a surface_existing turn; coerce to a clean list of non-empty strings.
+    # For every other dispatch type, drop any value the LLM leaked (the helper
+    # only consults it on surface_existing, but keeping the contract clean
+    # prevents a stray id from being mistaken for a directed pull downstream).
+    surface_item_ids: list[str] = []
+    if dispatch_type == "surface_existing":
+        raw_ids = parsed.get("surface_item_ids")
+        if isinstance(raw_ids, list):
+            surface_item_ids = [i for i in raw_ids if isinstance(i, str) and i]
+
     lead_in = parsed.get("lead_in")
     if isinstance(lead_in, str):
         lead_in = lead_in.strip() or None
@@ -528,6 +640,7 @@ def detect_turn_intent(
     out["checked"] = True
     out["dispatch_type"] = dispatch_type
     out["dispatches"] = dispatches
+    out["surface_item_ids"] = surface_item_ids
     out["lead_in"] = lead_in
     out["capability_bucket"] = capability_bucket
     out["user_action_required"] = user_action_required
@@ -965,6 +1078,14 @@ def execute_via_helper(
         payload_dict["dispatch_type"] = "surface_existing"
         if detection.get("lead_in"):
             payload_dict["lead_in"] = detection["lead_in"]
+        # S-0622-03: forward the detector's directed-pull selection. Only
+        # when non-empty — an unscoped pull omits the key so the helper
+        # falls back to the full-team replay.
+        _sids = detection.get("surface_item_ids")
+        if isinstance(_sids, list) and _sids:
+            payload_dict["surface_item_ids"] = [
+                i for i in _sids if isinstance(i, str) and i
+            ]
     elif push_lead_in and detection.get("lead_in"):
         payload_dict["lead_in"] = detection["lead_in"]
     payload = json.dumps(payload_dict)

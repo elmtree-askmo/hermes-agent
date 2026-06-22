@@ -2507,7 +2507,30 @@ class GatewayRunner:
                     _history_msgs = []
 
                 _user_text = getattr(event, "text", "") or ""
-                _detection = detect_turn_intent(_user_text, history=_history_msgs)
+                # S-0622-03: build a compact archive index so the detector can
+                # resolve a directed surface_existing pull ("lets see the
+                # target stuff") to specific archive ids. Best-effort — any
+                # failure leaves the index empty, so surface_existing stays
+                # unscoped (full-team replay), never breaking the turn.
+                _archive_index: list[dict] = []
+                try:
+                    _ai_uid = getattr(source, "user_id", "") or ""
+                    if _ai_uid:
+                        import os as _aios
+                        from pathlib import Path as _AIPath
+                        import json as _aijson
+                        from agent.turn_intent_detector import build_archive_index
+                        _ai_hh = _aios.environ.get("HERMES_HOME") or str(_AIPath.home() / ".hermes")
+                        _ai_strat = _AIPath(_ai_hh) / "artemis" / _ai_uid / "strategy.json"
+                        if _ai_strat.exists():
+                            _ai_raw = _aijson.loads(_ai_strat.read_text())
+                            _archive_index = build_archive_index(_ai_raw.get("archive") or [])
+                except Exception as _ai_err:  # noqa: BLE001
+                    logger.debug("archive index build failed: %s", _ai_err)
+                    _archive_index = []
+                _detection = detect_turn_intent(
+                    _user_text, history=_history_msgs, archive_index=_archive_index,
+                )
                 _log_turn_intent(source.chat_id or "", _detection)
 
                 _chat = source.chat_id or "unknown"
