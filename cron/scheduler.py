@@ -1833,17 +1833,52 @@ def _build_job_prompt(job: dict) -> str:
 
     from tools.skills_tool import skill_view
 
+    # B-0621-01: user-authored skills (save_user_skill) live in the per-user
+    # dir, which the global skill_view does not search. Resolve the job's
+    # user_id so we can fall back to that dir when the global lookup misses.
+    _origin = _resolve_origin(job)
+    _cron_user_id = (_origin or {}).get("user_id")
+
+    def _load_user_skill(skill_name: str) -> Optional[str]:
+        """Read a user-authored skill from the cron user's per-user skills dir.
+
+        Returns the raw skill file text (frontmatter + body), or None if there
+        is no user_id or no such file. Mirrors what skill_view returns as
+        ``content`` so the inlining below is format-identical.
+        """
+        if not _cron_user_id:
+            return None
+        skill_path = get_hermes_home() / "artemis" / _cron_user_id / "skills" / f"{skill_name}.md"
+        try:
+            if skill_path.is_file():
+                return skill_path.read_text(encoding="utf-8").strip()
+        except OSError as exc:
+            logger.warning("Cron job '%s': failed to read per-user skill '%s' — %s",
+                           job.get("name", job.get("id")), skill_name, exc)
+        return None
+
     parts = []
     skipped: list[str] = []
     for skill_name in skill_names:
         loaded = json.loads(skill_view(skill_name))
-        if not loaded.get("success"):
-            error = loaded.get("error") or f"Failed to load skill '{skill_name}'"
-            logger.warning("Cron job '%s': skill not found, skipping — %s", job.get("name", job.get("id")), error)
-            skipped.append(skill_name)
-            continue
+        if loaded.get("success"):
+            content = str(loaded.get("content") or "").strip()
+            # Global-first: if the user also authored a same-named skill, the
+            # global one wins (a user skill must not be able to override the
+            # global briefing pipeline). Surface the shadow so "my skill didn't
+            # take effect" is observable rather than silent.
+            if _load_user_skill(skill_name) is not None:
+                logger.warning("Cron job '%s': user skill '%s' is shadowed by a global skill of the same name",
+                               job.get("name", job.get("id")), skill_name)
+        else:
+            # Global miss — fall back to the cron user's own per-user skill.
+            content = _load_user_skill(skill_name)
+            if content is None:
+                error = loaded.get("error") or f"Failed to load skill '{skill_name}'"
+                logger.warning("Cron job '%s': skill not found, skipping — %s", job.get("name", job.get("id")), error)
+                skipped.append(skill_name)
+                continue
 
-        content = str(loaded.get("content") or "").strip()
         if parts:
             parts.append("")
         parts.extend(

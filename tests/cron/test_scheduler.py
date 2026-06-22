@@ -1112,6 +1112,75 @@ class TestBuildJobPromptMissingSkill:
         assert "go" in result
 
 
+class TestBuildJobPromptPerUserSkillFallback:
+    """B-0621-01: a user-authored skill (written by save_user_skill to the
+    per-user dir ``<HERMES_HOME>/artemis/<user_id>/skills/<name>.md``) is
+    unreachable from cron because ``skill_view`` only searches the global
+    skills dir. Fix (f): when global ``skill_view`` misses, fall back to the
+    per-user skill file, global-first on a name collision.
+    """
+
+    _USER_ID = "U028GE7EN13"
+    _CONTENT = "---\nname: ucsb-daily-news\ndescription: UCSB news\n---\n\n# UCSB Daily News\nRun the script and format the output.\n"
+
+    def _missing_skill_view(self, name: str) -> str:
+        return json.dumps({"success": False, "error": f"Skill '{name}' not found."})
+
+    def _stage_user_skill(self, home, name: str, content: str):
+        skill_dir = home / "artemis" / self._USER_ID / "skills"
+        skill_dir.mkdir(parents=True, exist_ok=True)
+        (skill_dir / f"{name}.md").write_text(content, encoding="utf-8")
+
+    def _job(self, skills):
+        return {
+            "name": "UCSB weekly news",
+            "skills": skills,
+            "prompt": "deliver the digest",
+            "origin": {"platform": "slack", "chat_id": "D0AU2BTJUDV", "user_id": self._USER_ID},
+        }
+
+    def test_per_user_skill_loaded_when_global_misses(self, tmp_path, monkeypatch):
+        """Global skill_view misses, but the user's own skill file exists →
+        its content is inlined and NO not-found warning is emitted."""
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        self._stage_user_skill(tmp_path, "ucsb-daily-news", self._CONTENT)
+        with patch("tools.skills_tool.skill_view", side_effect=self._missing_skill_view):
+            result = _build_job_prompt(self._job(["ucsb-daily-news"]))
+        assert "format the output" in result, "per-user skill content should be inlined"
+        assert "not found" not in result.lower() and "skipped" not in result.lower(), (
+            "no skip warning when the per-user skill is found via fallback"
+        )
+
+    def test_warning_only_when_both_global_and_per_user_miss(self, tmp_path, monkeypatch):
+        """Neither global nor per-user has the skill → the honest not-found
+        warning is preserved."""
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        (tmp_path / "artemis" / self._USER_ID / "skills").mkdir(parents=True, exist_ok=True)
+        with patch("tools.skills_tool.skill_view", side_effect=self._missing_skill_view):
+            result = _build_job_prompt(self._job(["truly-absent-skill"]))
+        assert "truly-absent-skill" in result
+        assert "not found" in result.lower() or "skipped" in result.lower()
+
+    def test_global_wins_on_name_collision(self, tmp_path, monkeypatch):
+        """A user skill sharing a name with a global skill must NOT override the
+        global one — the global briefing pipeline can't be hijacked by user input."""
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        self._stage_user_skill(
+            tmp_path, "artemis-briefing",
+            "---\nname: artemis-briefing\ndescription: hijack\n---\n\nUSER OVERRIDE BODY\n",
+        )
+
+        def _global_has_briefing(name: str) -> str:
+            if name == "artemis-briefing":
+                return json.dumps({"success": True, "content": "GLOBAL BRIEFING BODY"})
+            return json.dumps({"success": False, "error": f"Skill '{name}' not found."})
+
+        with patch("tools.skills_tool.skill_view", side_effect=_global_has_briefing):
+            result = _build_job_prompt(self._job(["artemis-briefing"]))
+        assert "GLOBAL BRIEFING BODY" in result
+        assert "USER OVERRIDE BODY" not in result
+
+
 class TestBuildJobPromptArtemisFooter:
     """Verify FOOTER_REQUIRED injection for the artemis-briefing skill."""
 
