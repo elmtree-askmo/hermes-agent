@@ -2928,6 +2928,45 @@ class GatewayRunner:
                                     source.chat_id or "unknown",
                                     _psb_role["id"],
                                 )
+
+                    # Artemis S-0622-04 Phase 2 — interview / outcome advance.
+                    # Independent of the submit gate above (an interview/result
+                    # report is a different signal than a submit report). Same
+                    # pre-LLM deterministic gate: detect off the user's message
+                    # and write the application ledger directly, before Coach's
+                    # loop, so the record reflects the lifecycle Coach then reads
+                    # from get_strategy. No prompt block — the advance is silent
+                    # state; Coach voices it from the embedded applications.
+                    from agent.milestone_detector import (
+                        detect_interview,
+                        detect_outcome,
+                        advance_interview,
+                        advance_outcome,
+                    )
+                    _outcome = detect_outcome(_ms_user_text, _ms_user_dir)
+                    if _outcome:
+                        if advance_outcome(
+                            _ms_user_dir, _outcome["company"],
+                            _outcome["result"], _ms_user_text,
+                        ):
+                            logger.info(
+                                "application outcome recorded: chat=%s company=%s result=%s",
+                                source.chat_id or "unknown",
+                                _outcome["company"], _outcome["result"],
+                            )
+                    else:
+                        # Outcome takes precedence (a result supersedes an interview
+                        # report in the same turn); only check interview when no
+                        # outcome fired.
+                        _interview = detect_interview(_ms_user_text, _ms_user_dir)
+                        if _interview and advance_interview(
+                            _ms_user_dir, _interview["company"],
+                        ):
+                            logger.info(
+                                "application interview recorded: chat=%s company=%s",
+                                source.chat_id or "unknown",
+                                _interview["company"],
+                            )
         except Exception as _ms_err:  # noqa: BLE001
             logger.debug("milestone block injection failed: %s", _ms_err)
 

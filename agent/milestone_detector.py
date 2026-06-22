@@ -178,3 +178,173 @@ def mark_milestone_affirmed(user_dir: Path, tier: str) -> None:
         strategy_path.write_text(json.dumps(strategy, indent=2), encoding="utf-8")
     except (OSError, ValueError):
         return
+
+
+# ===== S-0622-04 Phase 2: interview / outcome detection + advance =====
+#
+# Same pre-LLM deterministic gate as the milestone affirm: the gateway detects
+# the user-report signal off the user's own message and writes the applications
+# ledger directly, before Coach's agent loop runs (so this can't be an MCP
+# tool_call — there is no loop yet). The fork reaches Artemis data by direct file
+# I/O only (it never imports the Artemis MCP server), so the narrow company
+# normalizer below MIRRORS Artemis tools/applications.py `_canonical_company`;
+# `test_canonical_company_mirrors_artemis` locks the two in sync.
+
+import re  # noqa: E402
+import unicodedata  # noqa: E402
+from datetime import datetime, timezone  # noqa: E402
+
+_INTERVIEW_SIGNALS = (
+    "screen", "phone screen", "interview", "interviewed", "got out of",
+    "first round", "second round", "spoke with", "talked to",
+)
+_OUTCOME_SIGNALS = {
+    "rejected": (
+        "said no", "passed on", "didn't get", "did not get", "not moving forward",
+        "moving forward with other", "rejected", "turned me down", "no thanks",
+        "went with someone else",
+    ),
+}
+_ACTIVE_STATUSES = frozenset({"submitted", "interviewed"})
+
+
+def _canonical_company(name) -> str:
+    """The application record key: lowercase, ascii-folded, hyphenated.
+
+    MIRROR of Artemis tools/applications.py `_canonical_company` — kept in sync by
+    test_canonical_company_mirrors_artemis. The fork can't import the Artemis
+    module, so the normalizer is duplicated here (narrow, 6 lines)."""
+    if not name or not isinstance(name, str):
+        return ""
+    folded = unicodedata.normalize("NFKD", name)
+    folded = folded.encode("ascii", "ignore").decode("ascii")
+    folded = folded.replace("'", "").replace("’", "").replace('"', "")
+    return re.sub(r"[^a-z0-9]+", "-", folded.lower()).strip("-")
+
+
+def _load_applications_raw(user_dir: Path) -> list[dict]:
+    path = Path(user_dir) / "applications.json"
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    records = raw.get("applications") if isinstance(raw, dict) else raw
+    return records if isinstance(records, list) else []
+
+
+def _active_applications(user_dir: Path) -> list[dict]:
+    """Records still awaiting a result: status in {submitted, interviewed} and no
+    terminal outcome. These are the only records a user-report can map to."""
+    return [
+        r for r in _load_applications_raw(user_dir)
+        if isinstance(r, dict)
+        and r.get("status") in _ACTIVE_STATUSES
+        and not r.get("outcome")
+    ]
+
+
+def _match_company(text: str, user_dir: Path) -> str | None:
+    """Map the user's free text to a known active application's canonical key.
+
+    Canonical-folds the text and each active record's display_name/company, then
+    looks for a hyphen-segment-bounded containment (so "target" won't match inside
+    "my-target"). On no named match, falls back to the most-recent active record
+    (spec § Known limitation — the one probabilistic edge). Returns None when there
+    are no active applications at all."""
+    active = _active_applications(user_dir)
+    if not active:
+        return None
+    folded_text = _canonical_company(text)
+    text_segs = set(folded_text.split("-"))
+    for rec in active:
+        key = rec.get("company") or _canonical_company(rec.get("display_name") or "")
+        for cand in (key, _canonical_company(rec.get("display_name") or "")):
+            if not cand:
+                continue
+            cand_segs = cand.split("-")
+            # all segments of the company name present as whole segments in the text
+            if cand_segs and all(seg in text_segs for seg in cand_segs):
+                return key
+    # No named company — fall back to most-recent active (max submitted_at / updated_at).
+    return max(
+        active, key=lambda r: r.get("submitted_at") or r.get("updated_at") or ""
+    ).get("company")
+
+
+def detect_interview(text, user_dir: Path) -> dict | None:
+    """Detect a user-reported interview and map it to a known application.
+
+    Returns {"company": <canonical key>} or None. Conservative: requires both an
+    interview signal word AND at least one active application to map to."""
+    if not text or not isinstance(text, str):
+        return None
+    low = text.lower()
+    if not any(sig in low for sig in _INTERVIEW_SIGNALS):
+        return None
+    company = _match_company(text, user_dir)
+    return {"company": company} if company else None
+
+
+def detect_outcome(text, user_dir: Path) -> dict | None:
+    """Detect a user-reported terminal outcome and map it to a known application.
+
+    Returns {"company": <key>, "result": <result>} or None. This round only
+    `rejected` is produced (Maya scene-4's only outcome); the result value is open
+    for future outcomes without a code change here."""
+    if not text or not isinstance(text, str):
+        return None
+    low = text.lower()
+    result = next(
+        (res for res, sigs in _OUTCOME_SIGNALS.items() if any(s in low for s in sigs)),
+        None,
+    )
+    if result is None:
+        return None
+    company = _match_company(text, user_dir)
+    return {"company": company, "result": result} if company else None
+
+
+def _write_applications_raw(user_dir: Path, records: list[dict]) -> None:
+    payload = {
+        "applications": records,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    path = Path(user_dir) / "applications.json"
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    tmp.replace(path)
+
+
+def advance_interview(user_dir: Path, company: str) -> bool:
+    """Advance the matching application to `interviewed`. Returns True on a write,
+    False on no-match / missing ledger. Best-effort: never raises in the gateway."""
+    try:
+        records = _load_applications_raw(user_dir)
+        key = _canonical_company(company)
+        for rec in records:
+            if rec.get("company") == key:
+                rec["status"] = "interviewed"
+                rec["updated_at"] = datetime.now(timezone.utc).isoformat()
+                _write_applications_raw(user_dir, records)
+                return True
+        return False
+    except (OSError, ValueError):
+        return False
+
+
+def advance_outcome(user_dir: Path, company: str, result: str, note) -> bool:
+    """Set the terminal outcome on the matching application (status unchanged —
+    outcome != null IS the terminal signal). Returns True on a write."""
+    try:
+        records = _load_applications_raw(user_dir)
+        key = _canonical_company(company)
+        for rec in records:
+            if rec.get("company") == key:
+                now = datetime.now(timezone.utc).isoformat()
+                rec["outcome"] = {"result": result, "at": now, "note": note}
+                rec["updated_at"] = now
+                _write_applications_raw(user_dir, records)
+                return True
+        return False
+    except (OSError, ValueError):
+        return False

@@ -278,3 +278,138 @@ class TestUserReportedCompletion:
     ])
     def test_generic_turns_not_detected(self, text):
         assert user_reported_completion(text) is False
+
+
+# ---- S-0622-04 Phase 2: interview / outcome detection + advance ----
+#
+# Company mapping strategy: the detector does NOT do open entity extraction. It
+# canonical-folds each KNOWN active application's display_name and the user text
+# to the same form (lowercase, ascii-fold, hyphenate) and looks for a hyphen-
+# segment-bounded match. So variants fold and match (L'Oréal / loreal / Coca-Cola
+# / coca cola), and a company not in the ledger can't be invented. When the text
+# names no known application, it falls back to the spec's heuristic: the most-
+# recent active application (the one genuinely-probabilistic edge, spec § Known
+# limitation).
+
+from agent.milestone_detector import (  # noqa: E402
+    detect_interview,
+    detect_outcome,
+    advance_interview,
+    advance_outcome,
+)
+
+
+def _seed(tmp_path, records):
+    ud = tmp_path / "artemis" / "U1"
+    ud.mkdir(parents=True)
+    _write_applications(ud, records)
+    return ud
+
+
+class TestDetectInterview:
+    @pytest.mark.parametrize("display,text,key", [
+        ("Glossier", "just got out of the glossier screen", "glossier"),
+        ("Topicals", "had my phone screen with Topicals today", "topicals"),
+        ("Warby Parker", "just interviewed at Warby Parker", "warby-parker"),
+        ("L'Oréal", "first round with loreal went ok", "loreal"),
+        ("Coca-Cola", "had the coca cola interview", "coca-cola"),
+    ])
+    def test_interview_phrasing_maps_to_known_record(self, tmp_path, display, text, key):
+        ud = _seed(tmp_path, [_apprec(key, "submitted")])
+        # seed display_name so folding can match the user's surface form
+        recs = json.loads((ud / "applications.json").read_text())["applications"]
+        recs[0]["display_name"] = display
+        _write_applications(ud, recs)
+        res = detect_interview(text, ud)
+        assert res is not None
+        assert res["company"] == key
+
+    @pytest.mark.parametrize("text", [
+        "what's next", "send the warby parker materials", "thanks", "", None,
+        "i submitted the glossier one",  # submit phrasing, not interview
+    ])
+    def test_non_interview_turns_not_detected(self, tmp_path, text):
+        ud = _seed(tmp_path, [_apprec("glossier", "submitted")])
+        assert detect_interview(text, ud) is None
+
+    def test_unknown_company_with_interview_phrasing_falls_back_to_recent(self, tmp_path):
+        """Interview phrasing but no named company -> most-recent active record."""
+        g = _apprec("glossier", "submitted"); g["submitted_at"] = "2026-06-18"
+        t = _apprec("topicals", "submitted"); t["submitted_at"] = "2026-06-20"
+        ud = _seed(tmp_path, [g, t])
+        res = detect_interview("just got out of the screen", ud)
+        assert res is not None
+        assert res["company"] == "topicals"  # most recent submitted_at
+
+
+class TestDetectOutcome:
+    @pytest.mark.parametrize("text,key,result", [
+        ("glossier said no", "glossier", "rejected"),
+        ("topicals passed on me", "topicals", "rejected"),
+        ("didn't get the glossier role", "glossier", "rejected"),
+        ("glossier — moving forward with other candidates", "glossier", "rejected"),
+    ])
+    def test_rejection_maps_to_known_record(self, tmp_path, text, key, result):
+        ud = _seed(tmp_path, [_apprec("glossier", "interviewed"),
+                              _apprec("topicals", "submitted")])
+        res = detect_outcome(text, ud)
+        assert res is not None
+        assert res["company"] == key
+        assert res["result"] == result
+
+    @pytest.mark.parametrize("text", [
+        "what's next", "just got out of the glossier screen", "thanks", "", None,
+    ])
+    def test_non_outcome_turns_not_detected(self, tmp_path, text):
+        ud = _seed(tmp_path, [_apprec("glossier", "submitted")])
+        assert detect_outcome(text, ud) is None
+
+
+class TestAdvanceInterview:
+    def test_advances_submitted_to_interviewed(self, tmp_path):
+        ud = _seed(tmp_path, [_apprec("glossier", "submitted")])
+        assert advance_interview(ud, "glossier") is True
+        recs = json.loads((ud / "applications.json").read_text())["applications"]
+        assert recs[0]["status"] == "interviewed"
+
+    def test_no_matching_record_is_noop(self, tmp_path):
+        ud = _seed(tmp_path, [_apprec("glossier", "submitted")])
+        assert advance_interview(ud, "nonexistent") is False
+        recs = json.loads((ud / "applications.json").read_text())["applications"]
+        assert recs[0]["status"] == "submitted"
+
+    def test_missing_ledger_is_noop(self, tmp_path):
+        ud = tmp_path / "artemis" / "U1"
+        ud.mkdir(parents=True)
+        assert advance_interview(ud, "glossier") is False
+
+
+class TestAdvanceOutcome:
+    def test_sets_outcome_keeps_status(self, tmp_path):
+        ud = _seed(tmp_path, [_apprec("glossier", "interviewed")])
+        assert advance_outcome(ud, "glossier", "rejected",
+                               "moving forward with other candidates") is True
+        rec = json.loads((ud / "applications.json").read_text())["applications"][0]
+        assert rec["status"] == "interviewed"  # terminal lives in outcome
+        assert rec["outcome"]["result"] == "rejected"
+        assert rec["outcome"]["note"] == "moving forward with other candidates"
+
+    def test_company_canonicalization_matches(self, tmp_path):
+        ud = _seed(tmp_path, [_apprec("warby-parker", "submitted")])
+        assert advance_outcome(ud, "Warby Parker", "rejected", None) is True
+        rec = json.loads((ud / "applications.json").read_text())["applications"][0]
+        assert rec["outcome"]["result"] == "rejected"
+
+
+@pytest.mark.parametrize("raw,expected", [
+    ("L'Oréal", "loreal"), ("loreal", "loreal"), ("L'Oreal", "loreal"),
+    ("Coca-Cola", "coca-cola"), ("coca-cola", "coca-cola"),
+    ("Estée Lauder", "estee-lauder"), ("Warby Parker", "warby-parker"),
+    ("", ""), (None, ""),
+])
+def test_canonical_company_mirrors_artemis(raw, expected):
+    """The fork's narrow _canonical_company MUST fold identically to Artemis's
+    (the two are duplicated across the repo boundary — this locks them in sync so
+    a record written by one side is found by the other; no fracture)."""
+    from agent.milestone_detector import _canonical_company
+    assert _canonical_company(raw) == expected
