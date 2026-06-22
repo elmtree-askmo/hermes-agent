@@ -159,9 +159,9 @@ def _write_applications(user_dir, records):
     )
 
 
-def _apprec(company, status):
+def _apprec(company, status, submitted_at=None):
     return {"company": company, "display_name": company, "status": status,
-            "artifacts": [], "outcome": None}
+            "artifacts": [], "outcome": None, "submitted_at": submitted_at}
 
 
 class TestCountSubmittedApplications:
@@ -294,8 +294,10 @@ class TestUserReportedCompletion:
 from agent.milestone_detector import (  # noqa: E402
     detect_interview,
     detect_outcome,
+    detect_submit,
     advance_interview,
     advance_outcome,
+    advance_submitted,
 )
 
 
@@ -399,6 +401,49 @@ class TestAdvanceOutcome:
         assert advance_outcome(ud, "Warby Parker", "rejected", None) is True
         rec = json.loads((ud / "applications.json").read_text())["applications"][0]
         assert rec["outcome"]["result"] == "rejected"
+
+
+class TestDetectSubmit:
+    """User-report submit class (spec line 134, moved into Phase 2). Reuses the
+    submit word-list (user_reported_completion) for the signal and maps the
+    company against the known materials_ready records."""
+
+    @pytest.mark.parametrize("text,key", [
+        ("just sent the glossier application", "glossier"),
+        ("submitted warby parker", "warby-parker"),
+    ])
+    def test_submit_phrasing_maps_to_known_materials_ready(self, tmp_path, text, key):
+        ud = _seed(tmp_path, [_apprec(key, "materials_ready")])
+        recs = json.loads((ud / "applications.json").read_text())["applications"]
+        recs[0]["display_name"] = key.replace("-", " ").title()
+        _write_applications(ud, recs)
+        res = detect_submit(text, ud)
+        assert res is not None and res["company"] == key
+
+    @pytest.mark.parametrize("text", ["what's next", "thanks", "", None])
+    def test_non_submit_turns_not_detected(self, tmp_path, text):
+        ud = _seed(tmp_path, [_apprec("glossier", "materials_ready")])
+        assert detect_submit(text, ud) is None
+
+
+class TestAdvanceSubmitted:
+    def test_advances_materials_ready_to_submitted(self, tmp_path):
+        ud = _seed(tmp_path, [_apprec("glossier", "materials_ready")])
+        assert advance_submitted(ud, "glossier") is True
+        rec = json.loads((ud / "applications.json").read_text())["applications"][0]
+        assert rec["status"] == "submitted"
+        assert rec["submitted_at"]  # stamped
+
+    def test_no_matching_record_is_noop(self, tmp_path):
+        ud = _seed(tmp_path, [_apprec("glossier", "materials_ready")])
+        assert advance_submitted(ud, "nonexistent") is False
+
+    def test_idempotent_on_already_submitted(self, tmp_path):
+        ud = _seed(tmp_path, [_apprec("glossier", "submitted", submitted_at="2026-06-18")])
+        assert advance_submitted(ud, "glossier") is True
+        rec = json.loads((ud / "applications.json").read_text())["applications"][0]
+        assert rec["status"] == "submitted"
+        assert rec["submitted_at"] == "2026-06-18"  # not overwritten
 
 
 @pytest.mark.parametrize("raw,expected", [

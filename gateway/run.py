@@ -2892,8 +2892,21 @@ class GatewayRunner:
                         render_milestone_block,
                         mark_milestone_affirmed,
                         user_reported_completion,
+                        detect_submit,
+                        advance_submitted,
                     )
                     if user_reported_completion(_ms_user_text):
+                        # Artemis S-0622-04 Phase 2 — user-report submit advance.
+                        # The materials_ready -> submitted transition is driven by
+                        # the user saying they sent it (Executor finishing the draft
+                        # only reaches materials_ready). Advance BEFORE the milestone
+                        # count below so the count reflects this submit.
+                        _submit = detect_submit(_ms_user_text, _ms_user_dir)
+                        if _submit and advance_submitted(_ms_user_dir, _submit["company"]):
+                            logger.info(
+                                "application submit recorded: chat=%s company=%s",
+                                source.chat_id or "unknown", _submit["company"],
+                            )
                         _ms = detect_milestone(_ms_user_dir)
                         if _ms:
                             _ms_block = render_milestone_block(_ms)

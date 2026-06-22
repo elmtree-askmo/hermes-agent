@@ -232,26 +232,28 @@ def _load_applications_raw(user_dir: Path) -> list[dict]:
     return records if isinstance(records, list) else []
 
 
-def _active_applications(user_dir: Path) -> list[dict]:
-    """Records still awaiting a result: status in {submitted, interviewed} and no
-    terminal outcome. These are the only records a user-report can map to."""
+def _active_applications(user_dir: Path, statuses=_ACTIVE_STATUSES) -> list[dict]:
+    """Records still awaiting a result: status in `statuses` and no terminal
+    outcome. These are the records a user-report can map to. `statuses` widens for
+    the submit class (which maps against materials_ready records)."""
     return [
         r for r in _load_applications_raw(user_dir)
         if isinstance(r, dict)
-        and r.get("status") in _ACTIVE_STATUSES
+        and r.get("status") in statuses
         and not r.get("outcome")
     ]
 
 
-def _match_company(text: str, user_dir: Path) -> str | None:
-    """Map the user's free text to a known active application's canonical key.
+def _match_company(text: str, user_dir: Path, statuses=_ACTIVE_STATUSES) -> str | None:
+    """Map the user's free text to a known application's canonical key.
 
-    Canonical-folds the text and each active record's display_name/company, then
+    Canonical-folds the text and each candidate record's display_name/company, then
     looks for a hyphen-segment-bounded containment (so "target" won't match inside
-    "my-target"). On no named match, falls back to the most-recent active record
+    "my-target"). On no named match, falls back to the most-recent candidate record
     (spec § Known limitation — the one probabilistic edge). Returns None when there
-    are no active applications at all."""
-    active = _active_applications(user_dir)
+    are no candidate applications at all. `statuses` selects the candidate set
+    (submit maps against materials_ready too; interview/outcome do not)."""
+    active = _active_applications(user_dir, statuses)
     if not active:
         return None
     folded_text = _canonical_company(text)
@@ -343,6 +345,45 @@ def advance_outcome(user_dir: Path, company: str, result: str, note) -> bool:
                 now = datetime.now(timezone.utc).isoformat()
                 rec["outcome"] = {"result": result, "at": now, "note": note}
                 rec["updated_at"] = now
+                _write_applications_raw(user_dir, records)
+                return True
+        return False
+    except (OSError, ValueError):
+        return False
+
+
+def detect_submit(text, user_dir: Path) -> dict | None:
+    """Detect a user-reported submit and map it to a known application.
+
+    The submit SIGNAL reuses `user_reported_completion` (the existing submit
+    word-list); the company maps against the known active records. Returns
+    {"company": <key>} or None. This is spec line 134's user-report submit class:
+    the materials_ready -> submitted advance is now driven by the user saying they
+    sent it (not by Executor finishing the draft)."""
+    if not user_reported_completion(text):
+        return None
+    # Submit maps against materials_ready (the drafted-but-not-sent record) as well
+    # as already-active ones (a user re-reporting a submit).
+    company = _match_company(
+        text, user_dir, statuses=frozenset({"materials_ready"}) | _ACTIVE_STATUSES
+    )
+    return {"company": company} if company else None
+
+
+def advance_submitted(user_dir: Path, company: str) -> bool:
+    """Advance the matching application to `submitted`, stamping `submitted_at`
+    (date) the first time. Idempotent: an already-submitted record keeps its
+    original submitted_at. Returns True on a write, False on no-match."""
+    try:
+        records = _load_applications_raw(user_dir)
+        key = _canonical_company(company)
+        for rec in records:
+            if rec.get("company") == key:
+                now = datetime.now(timezone.utc)
+                rec["status"] = "submitted"
+                if not rec.get("submitted_at"):
+                    rec["submitted_at"] = now.date().isoformat()
+                rec["updated_at"] = now.isoformat()
                 _write_applications_raw(user_dir, records)
                 return True
         return False
