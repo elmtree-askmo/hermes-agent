@@ -155,6 +155,19 @@ exchanges, decide the **dispatch shape** this turn needs.
   - `surface_item_ids` is meaningful ONLY for surface_existing; omit it (or
     empty) for every other dispatch type.
 
+  **DELIVER vs REPLAY — set `surface_deliver`.** A surface_existing pull
+  is one of two intents:
+  - **Replay** (default) → the user wants to UNDERSTAND the work: "walk me
+    through the changes", "what did the team do", "show me what you found".
+    The summary text IS the answer. Set `surface_deliver: false`.
+  - **Deliver** → the user wants to RECEIVE the file itself: "send me the
+    PDF", "can you send the resume so I can upload it", "send me the file".
+    They need the artifact attached, not described. Set
+    `surface_deliver: true`.
+  Judge by whether the user wants the work explained (replay) or the file
+  in hand (deliver). When unsure, default to `false` (replay). Meaningful
+  ONLY for surface_existing.
+
 **How to judge multi vs single:**
 
 1. Read current user line + last few exchanges to understand context.
@@ -280,6 +293,7 @@ Return STRICT JSON, no prose, no markdown fence:
         and for surface_existing)
   ],
   "surface_item_ids": ["<archive id>", ...],
+  "surface_deliver": true | false,
   "lead_in": "<short Coach-voice opener, or null>",
   "capability_bucket": "non_capability" | 1 | 2 | 3 | 4,
   "user_action_required": true | false,
@@ -289,7 +303,9 @@ Return STRICT JSON, no prose, no markdown fence:
   "reasoning": "<one short sentence>"
 }
 
-(`surface_item_ids`: empty list except on a DIRECTED surface_existing pull.)
+(`surface_item_ids`: empty list except on a DIRECTED surface_existing pull.
+ `surface_deliver`: true only when the user wants the FILE itself, not an
+ explanation — meaningful only on surface_existing.)
 
 Team work on record (for resolving a directed surface_existing pull;
 each line is one archive item — empty when nothing is on record):
@@ -595,6 +611,16 @@ def detect_turn_intent(
         if isinstance(raw_ids, list):
             surface_item_ids = [i for i in raw_ids if isinstance(i, str) and i]
 
+    # surface_deliver (B-0623-05) — on a surface_existing pull, distinguishes
+    # "deliver the artifact" ("send me the PDF") from "replay the summary"
+    # ("walk me through the changes"). Only the former attaches the on-disk
+    # file. Strict-true coerce; cleared off any non-surface_existing turn so a
+    # leaked flag can't trigger an attachment path downstream.
+    surface_deliver = (
+        dispatch_type == "surface_existing"
+        and parsed.get("surface_deliver") is True
+    )
+
     lead_in = parsed.get("lead_in")
     if isinstance(lead_in, str):
         lead_in = lead_in.strip() or None
@@ -641,6 +667,7 @@ def detect_turn_intent(
     out["dispatch_type"] = dispatch_type
     out["dispatches"] = dispatches
     out["surface_item_ids"] = surface_item_ids
+    out["surface_deliver"] = surface_deliver
     out["lead_in"] = lead_in
     out["capability_bucket"] = capability_bucket
     out["user_action_required"] = user_action_required
@@ -1086,6 +1113,11 @@ def execute_via_helper(
             payload_dict["surface_item_ids"] = [
                 i for i in _sids if isinstance(i, str) and i
             ]
+        # B-0623-05: forward the deliver-vs-replay flag. Only when true — a
+        # replay pull (the default) omits the key so the helper attaches no
+        # file, preserving the walkthrough's summary-only shape.
+        if detection.get("surface_deliver") is True:
+            payload_dict["surface_deliver"] = True
     elif push_lead_in and detection.get("lead_in"):
         payload_dict["lead_in"] = detection["lead_in"]
     payload = json.dumps(payload_dict)

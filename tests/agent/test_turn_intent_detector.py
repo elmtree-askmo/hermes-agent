@@ -250,6 +250,88 @@ class TestDetectTurnIntent:
         assert result["dispatch_type"] == "surface_existing"
         assert result["affect_report"] is False
 
+    # ---------------------------------------------------------------------
+    # surface_deliver (B-0623-05) — a surface_existing pull splits two ways:
+    #   - replay summary (default): "walk me through the changes" → text only
+    #   - deliver artifact: "send me the PDF" → text + the on-disk file
+    # The detector (already reading the turn semantically) sets surface_deliver
+    # so the helper knows to attach the artifact. Default False; only
+    # meaningful on a surface_existing turn.
+    # ---------------------------------------------------------------------
+
+    def test_surface_deliver_true_on_send_file_pull(self, monkeypatch):
+        """A pull that asks to RECEIVE the file ("send me the PDF") sets
+        surface_deliver=True so the helper attaches the artifact."""
+        monkeypatch.setattr(
+            "agent.auxiliary_client.call_llm",
+            lambda **kw: _fake_response(
+                '{"dispatch_type": "surface_existing", "dispatches": [], '
+                '"surface_item_ids": ["tailor-resume-healthcare-ds"], '
+                '"surface_deliver": true, '
+                '"lead_in": "Here is the resume.", '
+                '"confidence": "high", "reasoning": "user wants the file"}'
+            ),
+            raising=False,
+        )
+        result = tid.detect_turn_intent(
+            "can you send me the healthcare resume PDF so I can upload it"
+        )
+        assert result["dispatch_type"] == "surface_existing"
+        assert result["surface_deliver"] is True
+
+    def test_surface_deliver_false_on_walkthrough_pull(self, monkeypatch):
+        """A pull that asks to UNDERSTAND ("walk me through the changes")
+        leaves surface_deliver False — summary replay, no attachment."""
+        monkeypatch.setattr(
+            "agent.auxiliary_client.call_llm",
+            lambda **kw: _fake_response(
+                '{"dispatch_type": "surface_existing", "dispatches": [], '
+                '"surface_deliver": false, '
+                '"lead_in": "Here\'s what changed.", '
+                '"confidence": "high", "reasoning": "user wants the reframe explained"}'
+            ),
+            raising=False,
+        )
+        result = tid.detect_turn_intent(
+            "walk me through the changes before I send anything"
+        )
+        assert result["dispatch_type"] == "surface_existing"
+        assert result["surface_deliver"] is False
+
+    def test_surface_deliver_defaults_false_when_absent(self, monkeypatch):
+        """No surface_deliver key → False (replay summary, the safe default)."""
+        monkeypatch.setattr(
+            "agent.auxiliary_client.call_llm",
+            lambda **kw: _fake_response(
+                '{"dispatch_type": "surface_existing", "dispatches": [], '
+                '"lead_in": "Here you go.", '
+                '"confidence": "high", "reasoning": "x"}'
+            ),
+            raising=False,
+        )
+        result = tid.detect_turn_intent("show me the docs you made")
+        assert result["surface_deliver"] is False
+
+    def test_surface_deliver_cleared_off_surface_existing(self, monkeypatch):
+        """surface_deliver is only meaningful on a surface_existing turn. A
+        leaked true on any other dispatch_type is cleared so a stray flag
+        can't trigger an attachment path downstream."""
+        monkeypatch.setattr(
+            "agent.auxiliary_client.call_llm",
+            lambda **kw: _fake_response(
+                '{"dispatch_type": "single", '
+                '"dispatches": [{"sub_agent": "publicist", '
+                '"id_slug": "draft-x", "action": "Draft", '
+                '"announcement": "On it."}], '
+                '"surface_deliver": true, '
+                '"confidence": "high", "reasoning": "new work"}'
+            ),
+            raising=False,
+        )
+        result = tid.detect_turn_intent("draft me a cover letter for acme")
+        assert result["dispatch_type"] == "single"
+        assert result["surface_deliver"] is False
+
     def test_invalid_sub_agent_dropped(self, monkeypatch):
         """Dispatch with invalid sub_agent gets dropped from list."""
         monkeypatch.setattr(
@@ -922,6 +1004,52 @@ class TestExecuteViaHelper:
         )
         assert result["ok"] is True
         assert result["has_ids_key"] is False
+
+    def test_surface_deliver_true_forwarded(self, tmp_path):
+        """B-0623-05: a deliver pull forwards surface_deliver=True so the
+        helper attaches the artifact."""
+        helper = tmp_path / "exec.py"
+        helper.write_text(
+            "#!/usr/bin/env python3\n"
+            "import json, sys\n"
+            "payload = json.loads(sys.stdin.read())\n"
+            "print(json.dumps({'ok': True, "
+            "'deliver_seen': payload.get('surface_deliver'), 'surfaced': []}))\n"
+        )
+        helper.chmod(0o755)
+        result = tid.execute_via_helper(
+            "U_TEST",
+            {
+                "dispatch_type": "surface_existing",
+                "dispatches": [],
+                "surface_item_ids": ["tailor-resume-healthcare-ds"],
+                "surface_deliver": True,
+            },
+            helper_path=str(helper),
+        )
+        assert result["ok"] is True
+        assert result["deliver_seen"] is True
+
+    def test_surface_deliver_false_omits_key(self, tmp_path):
+        """A replay pull (surface_deliver False/absent) forwards no key →
+        helper attaches nothing, summary-only walkthrough shape preserved."""
+        helper = tmp_path / "exec.py"
+        helper.write_text(
+            "#!/usr/bin/env python3\n"
+            "import json, sys\n"
+            "payload = json.loads(sys.stdin.read())\n"
+            "print(json.dumps({'ok': True, "
+            "'has_deliver_key': 'surface_deliver' in payload, 'surfaced': []}))\n"
+        )
+        helper.chmod(0o755)
+        result = tid.execute_via_helper(
+            "U_TEST",
+            {"dispatch_type": "surface_existing", "dispatches": [],
+             "surface_deliver": False},
+            helper_path=str(helper),
+        )
+        assert result["ok"] is True
+        assert result["has_deliver_key"] is False
 
     def test_single_dispatch_helper_success(self, tmp_path):
         helper = tmp_path / "exec.py"
