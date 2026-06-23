@@ -245,21 +245,51 @@ def _active_applications(user_dir: Path, statuses=_ACTIVE_STATUSES) -> list[dict
     ]
 
 
-def _match_company(text: str, user_dir: Path, statuses=_ACTIVE_STATUSES) -> str | None:
+def _has_resume(rec: dict) -> bool:
+    """True when the record carries a resume artifact — a resume-ready application
+    the user could have submitted even without a cover letter."""
+    return any(
+        isinstance(a, dict) and a.get("kind") == "resume"
+        for a in rec.get("artifacts", [])
+    )
+
+
+def _match_company(
+    text: str,
+    user_dir: Path,
+    statuses=_ACTIVE_STATUSES,
+    fallback_statuses=None,
+) -> str | None:
     """Map the user's free text to a known application's canonical key.
 
     Canonical-folds the text and each candidate record's display_name/company, then
     looks for a hyphen-segment-bounded containment (so "target" won't match inside
-    "my-target"). On no named match, falls back to the most-recent candidate record
-    (spec § Known limitation — the one probabilistic edge). Returns None when there
-    are no candidate applications at all. `statuses` selects the candidate set
-    (submit maps against materials_ready too; interview/outcome do not)."""
-    active = _active_applications(user_dir, statuses)
-    if not active:
+    "my-target"). On no named match, falls back to the most-recent record in
+    `fallback_statuses` (spec § Known limitation — the one probabilistic edge).
+    Returns None when there are no candidate applications at all.
+
+    `statuses` selects the NAMED-match candidate set; the submit class widens it to
+    include `materials_ready` and resume-ready `identified` records (an application
+    can be submitted with only a resume — no cover letter — so it sits at
+    `identified`). A bare `identified` record with no resume artifact is not yet a
+    prepared application and is excluded.
+
+    `fallback_statuses` (defaults to `statuses` minus `identified`) is the narrower
+    set the no-named-company fallback may reach — the fallback must NOT silently mark
+    a merely-drafted `identified` record submitted, so `identified` never enters it."""
+    if fallback_statuses is None:
+        fallback_statuses = frozenset(statuses) - {"identified"}
+    candidates = _active_applications(user_dir, statuses)
+    # Exclude identified records with no resume — not yet a prepared application.
+    candidates = [
+        r for r in candidates
+        if r.get("status") != "identified" or _has_resume(r)
+    ]
+    if not candidates:
         return None
     folded_text = _canonical_company(text)
     text_segs = set(folded_text.split("-"))
-    for rec in active:
+    for rec in candidates:
         key = rec.get("company") or _canonical_company(rec.get("display_name") or "")
         for cand in (key, _canonical_company(rec.get("display_name") or "")):
             if not cand:
@@ -268,9 +298,13 @@ def _match_company(text: str, user_dir: Path, statuses=_ACTIVE_STATUSES) -> str 
             # all segments of the company name present as whole segments in the text
             if cand_segs and all(seg in text_segs for seg in cand_segs):
                 return key
-    # No named company — fall back to most-recent active (max submitted_at / updated_at).
+    # No named company — fall back to most-recent record in the narrow fallback set
+    # (never an identified record, even a resume-ready one).
+    fallback = [r for r in candidates if r.get("status") in fallback_statuses]
+    if not fallback:
+        return None
     return max(
-        active, key=lambda r: r.get("submitted_at") or r.get("updated_at") or ""
+        fallback, key=lambda r: r.get("submitted_at") or r.get("updated_at") or ""
     ).get("company")
 
 
@@ -363,10 +397,17 @@ def detect_submit(text, user_dir: Path) -> dict | None:
     sent it (not by Executor finishing the draft)."""
     if not user_reported_completion(text):
         return None
-    # Submit maps against materials_ready (the drafted-but-not-sent record) as well
-    # as already-active ones (a user re-reporting a submit).
+    # Submit maps against materials_ready (drafted, both pieces) as well as
+    # resume-ready `identified` (a resume tailored, no cover letter — still a
+    # submit-trackable application) and already-active ones (a user re-reporting a
+    # submit). The named match reaches all three; the no-named-company fallback
+    # stays narrow (materials_ready/active only) so a merely-drafted identified
+    # record is never silently marked submitted.
     company = _match_company(
-        text, user_dir, statuses=frozenset({"materials_ready"}) | _ACTIVE_STATUSES
+        text,
+        user_dir,
+        statuses=frozenset({"materials_ready", "identified"}) | _ACTIVE_STATUSES,
+        fallback_statuses=frozenset({"materials_ready"}) | _ACTIVE_STATUSES,
     )
     return {"company": company} if company else None
 

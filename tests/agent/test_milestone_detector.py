@@ -425,6 +425,38 @@ class TestDetectSubmit:
         ud = _seed(tmp_path, [_apprec("glossier", "materials_ready")])
         assert detect_submit(text, ud) is None
 
+    def test_named_submit_maps_to_resume_only_identified(self, tmp_path):
+        """A user can submit an application that has only a resume (no cover
+        letter), so it sits at `identified` rather than `materials_ready`. A
+        NAMED submit report must still map to it — the resume-ready record is a
+        real, submit-trackable application."""
+        rec = _apprec("acme-analytics", "identified")
+        rec["display_name"] = "Acme Analytics"
+        rec["artifacts"] = [{"kind": "resume", "name": "acme-analytics-ds"}]
+        ud = _seed(tmp_path, [rec])
+        res = detect_submit("just submitted the Acme Analytics application", ud)
+        assert res is not None and res["company"] == "acme-analytics"
+
+    def test_named_submit_skips_identified_with_no_resume(self, tmp_path):
+        """An `identified` record with no resume artifact is not yet a prepared
+        application (nothing tailored). A named submit must NOT map to it."""
+        rec = _apprec("placeholder-co", "identified")
+        rec["display_name"] = "Placeholder Co"
+        rec["artifacts"] = []
+        ud = _seed(tmp_path, [rec])
+        assert detect_submit("just submitted the Placeholder Co application", ud) is None
+
+    def test_unnamed_submit_does_not_fallback_to_identified(self, tmp_path):
+        """The no-named-company fallback must NOT reach into `identified` records
+        — only materials_ready/active ones. A resume-only `identified` record the
+        user merely had drafted should not be silently marked submitted by a
+        generic 'submitted it' with no company named."""
+        rec = _apprec("acme-analytics", "identified")
+        rec["display_name"] = "Acme Analytics"
+        rec["artifacts"] = [{"kind": "resume", "name": "acme-analytics-ds"}]
+        ud = _seed(tmp_path, [rec])
+        assert detect_submit("ok submitted it", ud) is None
+
 
 class TestAdvanceSubmitted:
     def test_advances_materials_ready_to_submitted(self, tmp_path):
