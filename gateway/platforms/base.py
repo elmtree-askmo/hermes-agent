@@ -467,6 +467,68 @@ _RETRYABLE_ERROR_PATTERNS = (
 MessageHandler = Callable[[MessageEvent], Awaitable[Optional[str]]]
 
 
+def merge_pending_message_event(
+    pending_messages: Dict[str, MessageEvent],
+    session_key: str,
+    event: MessageEvent,
+    *,
+    merge_text: bool = False,
+) -> None:
+    """Store or merge a pending event for a session (B-0623-03 backport).
+
+    Photo bursts/albums often arrive as multiple near-simultaneous PHOTO
+    events. Merge those into the existing queued event so the next turn sees
+    the whole burst.
+
+    When ``merge_text`` is enabled, rapid follow-up TEXT events are appended
+    instead of replacing the pending turn — so a multi-part user thought (a
+    burst / double-text) is not silently truncated to only the last queued
+    fragment. Ported from upstream NousResearch/hermes-agent.
+    """
+    existing = pending_messages.get(session_key)
+    if existing:
+        existing_is_photo = getattr(existing, "message_type", None) == MessageType.PHOTO
+        incoming_is_photo = event.message_type == MessageType.PHOTO
+        existing_has_media = bool(existing.media_urls)
+        incoming_has_media = bool(event.media_urls)
+
+        if existing_is_photo and incoming_is_photo:
+            existing.media_urls.extend(event.media_urls)
+            existing.media_types.extend(event.media_types)
+            if event.text:
+                existing.text = BasePlatformAdapter._merge_caption(existing.text, event.text)
+            return
+
+        if existing_has_media or incoming_has_media:
+            if incoming_has_media:
+                existing.media_urls.extend(event.media_urls)
+                existing.media_types.extend(event.media_types)
+            if event.text:
+                if existing.text:
+                    existing.text = BasePlatformAdapter._merge_caption(existing.text, event.text)
+                else:
+                    existing.text = event.text
+            if existing_is_photo or incoming_is_photo:
+                existing.message_type = MessageType.PHOTO
+            elif (
+                getattr(existing, "message_type", None) == MessageType.TEXT
+                and event.message_type != MessageType.TEXT
+            ):
+                existing.message_type = event.message_type
+            return
+
+        if (
+            merge_text
+            and getattr(existing, "message_type", None) == MessageType.TEXT
+            and event.message_type == MessageType.TEXT
+        ):
+            if event.text:
+                existing.text = f"{existing.text}\n{event.text}" if existing.text else event.text
+            return
+
+    pending_messages[session_key] = event
+
+
 class BasePlatformAdapter(ABC):
     """
     Base class for platform adapters.
@@ -1196,19 +1258,14 @@ class BasePlatformAdapter(ABC):
             # then process them immediately after the current task finishes.
             if event.message_type == MessageType.PHOTO:
                 logger.debug("[%s] Queuing photo follow-up for session %s without interrupt", self.name, session_key)
-                existing = self._pending_messages.get(session_key)
-                if existing and existing.message_type == MessageType.PHOTO:
-                    existing.media_urls.extend(event.media_urls)
-                    existing.media_types.extend(event.media_types)
-                    if event.text:
-                        existing.text = self._merge_caption(existing.text, event.text)
-                else:
-                    self._pending_messages[session_key] = event
+                merge_pending_message_event(self._pending_messages, session_key, event)
                 return  # Don't interrupt now - will run after current task completes
 
-            # Default behavior for non-photo follow-ups: interrupt the running agent
+            # Default behavior for non-photo follow-ups: interrupt the running agent.
+            # B-0623-03: merge (not overwrite) so a rapid burst of follow-ups is
+            # not silently truncated to only the last queued fragment.
             logger.debug("[%s] New message while session %s is active — triggering interrupt", self.name, session_key)
-            self._pending_messages[session_key] = event
+            merge_pending_message_event(self._pending_messages, session_key, event, merge_text=True)
             # Signal the interrupt (the processing task checks this)
             self._active_sessions[session_key].set()
             return  # Don't process now - will be handled after current task finishes

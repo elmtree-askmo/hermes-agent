@@ -8138,8 +8138,15 @@ class GatewayRunner:
                     first_response = result.get("final_response", "")
                     if first_response and not _already_streamed:
                         try:
+                            # B-0623-03: `event` is not in scope here — build thread
+                            # metadata from the in-scope source/message id (mirrors the
+                            # canonical `_thread_parent` pattern) so the first response
+                            # threads under the user's message instead of raising
+                            # NameError and being dropped.
+                            _first_thread = source.thread_id or event_message_id
+                            _first_meta = {"thread_id": _first_thread} if _first_thread else None
                             await adapter.send(source.chat_id, first_response,
-                                               metadata=getattr(event, "metadata", None))
+                                               metadata=_first_meta)
                         except Exception as e:
                             logger.warning("Failed to send first response before queued message: %s", e)
                 # else: interrupted — discard the interrupted response ("Operation
