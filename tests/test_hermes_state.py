@@ -16,6 +16,31 @@ def db(tmp_path):
     session_db.close()
 
 
+class TestLatestSessionForUser:
+    """get_latest_session_for_user (B-0624-04): offline backfill scripts get
+    only a user_id (run-strategist.sh), so they need to resolve the user's most
+    recent session without a user_id->session index existing elsewhere."""
+
+    def test_returns_most_recent_for_user(self, db):
+        db.create_session(session_id="old", source="slack", user_id="U1")
+        time.sleep(0.01)
+        db.create_session(session_id="new", source="slack", user_id="U1")
+        got = db.get_latest_session_for_user("U1")
+        assert got is not None
+        assert got["id"] == "new"
+
+    def test_scopes_to_the_user(self, db):
+        db.create_session(session_id="a", source="slack", user_id="U1")
+        time.sleep(0.01)
+        db.create_session(session_id="b", source="slack", user_id="U2")
+        got = db.get_latest_session_for_user("U1")
+        assert got is not None
+        assert got["id"] == "a"  # U2's newer session must not leak
+
+    def test_none_when_no_session(self, db):
+        assert db.get_latest_session_for_user("nobody") is None
+
+
 # =========================================================================
 # Session lifecycle
 # =========================================================================

@@ -3727,6 +3727,48 @@ class GatewayRunner:
                     "onboarding-complete hook failed: %s", _onb_err
                 )
 
+            # Artemis B-0624-04 — Layer 2 (timely) sharpening-preference backfill.
+            # Independent of the onboarding-complete hook above (which short-circuits
+            # once intros are pushed). When onboarding has completed but
+            # profile.preferences is still empty — Coach deferred/skipped the
+            # per-turn save during the sharpening series — fire the backfill helper
+            # to extract the stated preferences from this conversation and write
+            # them server-side, before the user leaves. Fire-and-forget; the
+            # consumption-point layer (run-strategist.sh) is the certainty net.
+            try:
+                import os as _bf_os
+                _bf_enabled = str(
+                    _bf_os.environ.get("HERMES_ARTEMIS_ENABLED", "")
+                ).strip().lower() in ("1", "true", "yes", "on")
+                _bf_uid = getattr(source, "user_id", "") or ""
+                if _bf_enabled and _bf_uid and response:
+                    from pathlib import Path as _BFPath
+                    import json as _bfjson
+                    from agent.sharpening_backfill import (
+                        should_backfill as _bf_should,
+                        spawn_backfill as _bf_spawn,
+                    )
+                    _bf_hh = _bf_os.environ.get("HERMES_HOME") or str(_BFPath.home() / ".hermes")
+                    _bf_pp = _BFPath(_bf_hh) / "artemis" / _bf_uid / "profile.json"
+                    _bf_profile = None
+                    try:
+                        if _bf_pp.exists():
+                            _bf_profile = _bfjson.loads(_bf_pp.read_text(encoding="utf-8"))
+                    except Exception:  # noqa: BLE001
+                        _bf_profile = None
+                    if _bf_should(_bf_uid, _bf_profile):
+                        _bf_res = _bf_spawn(
+                            _bf_uid,
+                            getattr(session_entry, "session_id", None),
+                        )
+                        logger.info(
+                            "sharpening-backfill(L2): chat=%s spawned=%s",
+                            source.chat_id or "unknown",
+                            _bf_res.get("ok"),
+                        )
+            except Exception as _bf_err:  # noqa: BLE001
+                logger.debug("sharpening-backfill(L2) hook failed: %s", _bf_err)
+
             # Surface error details when the agent failed silently (final_response=None)
             if not response and agent_result.get("failed"):
                 error_detail = agent_result.get("error", "unknown error")

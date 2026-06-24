@@ -948,6 +948,26 @@ class SessionDB:
             result.append(msg)
         return result
 
+    def get_latest_session_for_user(self, user_id: str) -> Optional[Dict[str, Any]]:
+        """Return the most recent session row for a user, or None.
+
+        Added for Artemis B-0624-04: offline backfill scripts (run-strategist.sh)
+        receive only a user_id and must resolve that user's most recent session
+        to read its transcript — no user_id->session index exists elsewhere
+        (search_sessions / list_sessions_rich filter by source, not user_id).
+        Uses the existing idx_sessions_started index.
+        """
+        if not user_id:
+            return None
+        with self._lock:
+            cursor = self._conn.execute(
+                "SELECT * FROM sessions WHERE user_id = ? "
+                "ORDER BY started_at DESC LIMIT 1",
+                (user_id,),
+            )
+            row = cursor.fetchone()
+        return dict(row) if row else None
+
     def get_messages_as_conversation(self, session_id: str) -> List[Dict[str, Any]]:
         """
         Load messages in the OpenAI conversation format (role + content dicts).
