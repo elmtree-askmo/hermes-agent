@@ -42,10 +42,14 @@ import json
 import re
 from typing import Any
 
-# Auxiliary call budget. Mirrors onboarding_complete_detector: cheap
-# "compression" task, low temperature, short ceiling, hard timeout so a slow
-# aux provider can never stall the briefing script or the gateway turn.
-_EXTRACT_TIMEOUT_S = 10.0
+# Auxiliary call budget. Cheap "compression" task, low temperature, short
+# ceiling, hard timeout so a slow aux provider can never stall the briefing
+# script or the gateway turn. Timeout is wider than the sibling detectors'
+# 10s — this reads a full ~24-message transcript and emits a multi-key dict,
+# which on dev (Qwen via OpenRouter) was observed to hit 10s and time out
+# (B-0624-04 dev verify). 20s keeps the Layer-1 synchronous wait bounded while
+# giving the extraction room; a timeout still degrades fail-safe to no-write.
+_EXTRACT_TIMEOUT_S = 20.0
 _MAX_TOKENS = 600
 _TEMPERATURE = 0.2
 
