@@ -2543,6 +2543,9 @@ class GatewayRunner:
                 _conf = _raw_conf.lower() if isinstance(_raw_conf, str) else ""
                 _dispatch_type = _detection.get("dispatch_type")
                 _dispatches = _detection.get("dispatches") or []
+                # B-0624-03: did the user state a goal/direction this turn,
+                # even if nothing is dispatchable? Gates the cold-start block.
+                _direction_present = _detection.get("direction_present", False)
                 _uid = getattr(source, "user_id", "") or ""
 
                 # S-0617-01: mark the non-blocking path at the GOAL turn. Coach
@@ -2550,7 +2553,7 @@ class GatewayRunner:
                 # briefing turn (where onboarding-complete fires) classifies as
                 # 'none'. A session-level flag set here lets the producer at
                 # onboarding-complete still recognize the non-blocking path.
-                if _uid and _dispatch_type in ("single", "multi"):
+                if _uid and (_dispatch_type in ("single", "multi") or _direction_present):
                     try:
                         import os as _dpos
                         from pathlib import Path as _DPPath
@@ -2784,8 +2787,10 @@ class GatewayRunner:
                     # goal actually arrives). "No direction yet" = the detector
                     # saw nothing dispatchable AND the profile has no goal yet.
                     _cs_dt = locals().get("_dispatch_type")
-                    _cs_no_direction = (
-                        _cs_dt in (None, "none") and not _cs_has_goal
+                    _cs_dir = locals().get("_direction_present", False)
+                    from agent.onboarding_preference_detector import cold_start_no_direction
+                    _cs_no_direction = cold_start_no_direction(
+                        _cs_dt, _cs_has_goal, _cs_dir
                     )
                     if _cs_no_direction:
                         _cs_block = (

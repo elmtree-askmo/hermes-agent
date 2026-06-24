@@ -51,3 +51,20 @@ def has_onboarding_direction_present(user_dir: Path) -> bool:
         return (Path(user_dir) / _DIRECTION_FLAG).exists()
     except OSError:
         return False
+
+
+def cold_start_no_direction(
+    dispatch_type, has_goal: bool, direction_present: bool
+) -> bool:
+    """B-0624-03: True iff the cold-start user has given no direction this turn.
+
+    "No direction" = no dispatchable action this turn (dispatch_type in
+    {None, "none"}) AND no goal already saved in the profile AND the user did
+    not state a goal/direction this turn (``direction_present``).
+
+    The ``direction_present`` term is the fix: a goal stated as a question
+    ("i want X, can you help?") classifies as dispatch ``none`` with an empty
+    cold-start profile, which previously mis-routed to the "user hasn't told you
+    their goal / don't brief the team" block and contradicted the message.
+    """
+    return dispatch_type in (None, "none") and not has_goal and not direction_present

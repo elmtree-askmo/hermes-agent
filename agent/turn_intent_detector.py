@@ -299,9 +299,16 @@ Return STRICT JSON, no prose, no markdown fence:
   "user_action_required": true | false,
   "off_domain_no_fallback": true | false,
   "affect_report": true | false,
+  "direction_present": true | false,
   "confidence": "high|medium|low",
   "reasoning": "<one short sentence>"
 }
+
+(`direction_present`: true if the user expressed a career goal or direction
+this turn — a target role, field, or "I want to do / get into X" — even when
+there is nothing dispatchable yet (e.g. a goal stated as a question). false
+for a bare greeting or a message with no stated direction. This is about the
+user naming where they want to go, not about whether a sub-agent fires.)
 
 (`surface_item_ids`: empty list except on a DIRECTED surface_existing pull.
  `surface_deliver`: true only when the user wants the FILE itself, not an
@@ -523,6 +530,7 @@ def detect_turn_intent(
         "user_action_required": False,
         "off_domain_no_fallback": False,
         "affect_report": False,
+        "direction_present": False,
         "confidence": None,
         "reasoning": None,
     }
@@ -673,6 +681,11 @@ def detect_turn_intent(
     out["user_action_required"] = user_action_required
     out["off_domain_no_fallback"] = off_domain_no_fallback
     out["affect_report"] = affect_report
+    # B-0624-03: did the user express a career goal/direction this turn,
+    # independent of whether it's dispatchable? Feeds the cold-start
+    # onboarding-block gate so a goal stated as a question isn't mis-read as
+    # "no direction yet".
+    out["direction_present"] = parsed.get("direction_present") is True
     out["confidence"] = parsed.get("confidence") or None
     out["reasoning"] = parsed.get("reasoning") or None
     return out
