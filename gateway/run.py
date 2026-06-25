@@ -3771,8 +3771,20 @@ class GatewayRunner:
                                 _fu_briefing_text = _fu_latest.get("formatted_output")
                     except Exception:
                         _fu_briefing_text = None
+                    # Read action_queue so the detector can skip a company that
+                    # already has an in-flight follow-up (Coach may have fired
+                    # its own this turn). Best-effort.
+                    _fu_queue = None
+                    try:
+                        _fu_sp = _FuPath(_fu_hh) / "artemis" / _fu_uid / "strategy.json"
+                        if _fu_sp.exists():
+                            _fu_st = _fu_json.loads(_fu_sp.read_text(encoding="utf-8"))
+                            _fu_queue = _fu_st.get("action_queue")
+                    except Exception:
+                        _fu_queue = None
                     _fu = detect_followup_acceptance(
                         _fu_msg, _fu_briefing_text, response, _fu_uid,
+                        action_queue=_fu_queue,
                     )
                     _log_fu(source.chat_id or "", _fu)
                     if _fu.get("trigger"):

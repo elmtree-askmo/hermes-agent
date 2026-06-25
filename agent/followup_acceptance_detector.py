@@ -131,6 +131,27 @@ def _slug_for_company(company: str | None) -> str | None:
     return slug or None
 
 
+def _company_in_flight(action_queue: Any, company_slug: str) -> bool:
+    """True when the action_queue already carries a follow-up dispatch for this
+    company — so the detector must not fire a second one (the double-fire guard,
+    hermes.md § Follow-up-draft offer trigger). Matches both id shapes that
+    represent a follow-up draft for a company:
+      - coach-commit-followup-<company>          (this detector's helper)
+      - coach-commit-draft-<company>-follow-up   (Coach's own enqueue, observed)
+    """
+    if not isinstance(action_queue, list) or not company_slug:
+        return False
+    helper_id = f"coach-commit-followup-{company_slug}"
+    coach_id = f"coach-commit-draft-{company_slug}-follow-up"
+    for item in action_queue:
+        if not isinstance(item, dict):
+            continue
+        item_id = item.get("id")
+        if item_id in (helper_id, coach_id):
+            return True
+    return False
+
+
 def is_followup_dispatched(user_id: str, company_slug: str) -> bool:
     """Per-offer dedup flag at
     <hermes_home>/artemis/<uid>/followup_dispatched_<company_slug>.flag. Keyed
@@ -150,6 +171,7 @@ def detect_followup_acceptance(
     briefing_text: str | None,
     coach_reply: str,
     user_id: str | None = None,
+    action_queue: Any = None,
 ) -> dict[str, Any]:
     """Classify whether the user's message accepts a follow-up-draft offer.
 
@@ -240,6 +262,16 @@ def detect_followup_acceptance(
     # accepted=true but no company → demote: without a company there is no
     # offer to bind the dispatch to (no slug to enqueue / dedup on).
     trigger = accepted and bool(action_slug)
+    # Double-fire guard: Coach may have fired its own follow-up dispatch this
+    # same turn (its behavior is probabilistic). If the action_queue already
+    # carries an in-flight follow-up for this company, do NOT fire a second.
+    # Mirrors hermes.md § Follow-up-draft offer ('no live follow-up dispatch
+    # already in flight for that company').
+    if trigger and _company_in_flight(action_queue, slug):
+        out["checked"] = True
+        out["skipped"] = "already_in_flight"
+        out["trigger"] = False
+        return out
     # Dedup: an already-dispatched offer for this company must not re-fire.
     # Keyed on the company slug (not the full action slug) so the helper's
     # flag write and this check agree.

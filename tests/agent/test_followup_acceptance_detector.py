@@ -147,6 +147,47 @@ class TestDetectFollowupAcceptance:
         assert result["trigger"] is False
         assert result["action_slug"] is None
 
+    def test_in_flight_dispatch_demotes(self, monkeypatch):
+        """Coach may have fired its own follow-up dispatch this same turn (its
+        behavior is probabilistic — sometimes it fires, sometimes it doesn't).
+        If the action_queue already carries an in-flight follow-up dispatch for
+        this company, the detector must NOT fire a second one (the double-fire
+        the gateway would otherwise cause). Mirrors hermes.md § Follow-up-draft
+        offer trigger ('AND no live follow-up dispatch already in flight for
+        that company'). Demote after classify (slug only known post-aux)."""
+        monkeypatch.setattr(
+            "agent.auxiliary_client.call_llm",
+            lambda **kw: _fake_response(_TRIGGER_JSON),
+            raising=False,
+        )
+        # Coach's own enqueue this turn uses the coach-commit-draft-<co>-follow-up
+        # id shape (observed live); detector's helper would use
+        # coach-commit-followup-<co>. Either must count as in-flight.
+        queue = [{"id": "coach-commit-draft-manulife-follow-up", "status": "pending"}]
+        result = fad.detect_followup_acceptance(
+            "yeah do it", _OFFER_BRIEFING, "Drafting it.", action_queue=queue,
+        )
+        assert result["checked"] is True
+        assert result["skipped"] == "already_in_flight"
+        assert result["trigger"] is False
+        assert result["action_slug"] is None
+
+    def test_in_flight_different_company_still_fires(self, monkeypatch):
+        """An in-flight follow-up for a DIFFERENT company must not block this
+        one — the guard is per-company."""
+        monkeypatch.setattr(
+            "agent.auxiliary_client.call_llm",
+            lambda **kw: _fake_response(_TRIGGER_JSON),
+            raising=False,
+        )
+        queue = [{"id": "coach-commit-followup-acme", "status": "pending"}]
+        result = fad.detect_followup_acceptance(
+            "yeah do it", _OFFER_BRIEFING, "Drafting it.", action_queue=queue,
+        )
+        assert result["checked"] is True
+        assert result["trigger"] is True
+        assert result["action_slug"] == "coach-commit-followup-manulife"
+
     def test_trigger_with_company(self, monkeypatch):
         monkeypatch.setattr(
             "agent.auxiliary_client.call_llm",
@@ -254,6 +295,28 @@ class TestSlugForCompany:
         assert fad._slug_for_company("") is None
         assert fad._slug_for_company("   ") is None
         assert fad._slug_for_company(None) is None
+
+
+class TestCompanyInFlight:
+    def test_matches_helper_id_shape(self):
+        q = [{"id": "coach-commit-followup-manulife"}]
+        assert fad._company_in_flight(q, "manulife") is True
+
+    def test_matches_coach_draft_id_shape(self):
+        q = [{"id": "coach-commit-draft-manulife-follow-up"}]
+        assert fad._company_in_flight(q, "manulife") is True
+
+    def test_different_company_no_match(self):
+        q = [{"id": "coach-commit-followup-acme"}]
+        assert fad._company_in_flight(q, "manulife") is False
+
+    def test_non_followup_action_ignored(self):
+        q = [{"id": "tailor-resume-manulife"}, {"id": "scout-recheck-manulife"}]
+        assert fad._company_in_flight(q, "manulife") is False
+
+    def test_empty_or_none(self):
+        assert fad._company_in_flight([], "manulife") is False
+        assert fad._company_in_flight(None, "manulife") is False
 
 
 class TestHasOfferLine:
