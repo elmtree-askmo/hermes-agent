@@ -3727,6 +3727,84 @@ class GatewayRunner:
                     "onboarding-complete hook failed: %s", _onb_err
                 )
 
+            # Artemis B-0625-04 — follow-up-draft acceptance dispatch.
+            # When a recent briefing offered to draft a recruiter follow-up and
+            # the user's message accepts it, fire the Publicist dispatch
+            # (enqueue_action + announce_subagent) deterministically here — so
+            # Coach can't narrate a dispatch it skipped (the regression: Coach
+            # wrote a faked "✍️ Publicist:" line with zero tool calls). Same
+            # env gate, fire-and-forget helper, silent failures as onboarding.
+            try:
+                if not _onb_enabled:
+                    raise _ArtemisDisabled  # caught silently below
+                from agent.followup_acceptance_detector import (
+                    detect_followup_acceptance,
+                    execute_via_helper as _fu_execute,
+                    log_result as _log_fu,
+                )
+                _fu_uid = getattr(source, "user_id", "") or ""
+                _fu_msg = message_text or ""
+                if _fu_uid and response and _fu_msg:
+                    # Read the most-recent briefing's formatted_output from disk
+                    # (the offer lives there — same source Coach scans). Newest
+                    # by briefing_timestamp. Read-only, best-effort.
+                    import os as _fu_os
+                    import json as _fu_json
+                    from pathlib import Path as _FuPath
+                    _fu_hh = _fu_os.environ.get("HERMES_HOME") or str(_FuPath.home() / ".hermes")
+                    _fu_briefing_text = None
+                    try:
+                        _fu_dir = _FuPath(_fu_hh) / "artemis" / _fu_uid / "briefings"
+                        if _fu_dir.exists():
+                            _fu_latest = None
+                            _fu_latest_ts = ""
+                            for _fu_p in _fu_dir.glob("*.json"):
+                                try:
+                                    _fu_e = _fu_json.loads(_fu_p.read_text(encoding="utf-8"))
+                                except Exception:
+                                    continue
+                                _fu_ts = _fu_e.get("briefing_timestamp", "")
+                                if _fu_ts >= _fu_latest_ts:
+                                    _fu_latest_ts = _fu_ts
+                                    _fu_latest = _fu_e
+                            if _fu_latest:
+                                _fu_briefing_text = _fu_latest.get("formatted_output")
+                    except Exception:
+                        _fu_briefing_text = None
+                    _fu = detect_followup_acceptance(
+                        _fu_msg, _fu_briefing_text, response, _fu_uid,
+                    )
+                    _log_fu(source.chat_id or "", _fu)
+                    if _fu.get("trigger"):
+                        _fu_ann = f"Drafting your {_fu['ref_company']} follow-up."
+                        _fu_result = _fu_execute(
+                            _fu_uid,
+                            ref_company=_fu["ref_company"],
+                            action_slug=_fu["action_slug"],
+                            announcement=_fu_ann,
+                            session_id=getattr(session_entry, "session_id", None),
+                        )
+                        if _fu_result.get("ok"):
+                            logger.info(
+                                "followup-acceptance: chat=%s dispatched slug=%s",
+                                source.chat_id or "unknown",
+                                _fu_result.get("slug"),
+                            )
+                        else:
+                            logger.warning(
+                                "followup-acceptance: chat=%s dispatch_failed "
+                                "stage=%s err=%s",
+                                source.chat_id or "unknown",
+                                _fu_result.get("stage"),
+                                _fu_result.get("error"),
+                            )
+            except _ArtemisDisabled:
+                pass  # Non-Artemis fork deployment — feature off by design.
+            except Exception as _fu_err:  # noqa: BLE001
+                logger.debug(
+                    "followup-acceptance hook failed: %s", _fu_err
+                )
+
             # Artemis B-0624-04 — Layer 2 (timely) sharpening-preference backfill.
             # Independent of the onboarding-complete hook above (which short-circuits
             # once intros are pushed). When onboarding has completed but
