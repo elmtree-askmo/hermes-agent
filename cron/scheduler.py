@@ -119,7 +119,14 @@ def _quiet_day_resume_short_circuit(user_id: str) -> bool:
       - the user has a resume on file (`resumes/*.json` exists), AND
       - no follow-up is due today (channel=='briefing', when <= today), AND
       - no pending/in_progress action has a deadline within the next 2 days, AND
-      - there is no pending/in_progress action at all.
+      - there is no pending/in_progress action at all, AND
+      - no application has tailored materials ready-but-unsubmitted
+        (applications.json entry with a resume artifact + submitted_at is null +
+        status not yet submitted/outcome). "Materials ready, go submit" is the
+        single highest-value push — never suppress it as a quiet day. (Surfaced
+        2026-06-25: once B-0624-02 let distinct-company tailors all complete, the
+        action_queue went empty with two resumes staged, and the guard wrongly
+        emitted "Nothing urgent" alongside the same briefing's job cards.)
 
     That is the "resume already on file + genuinely empty day" subset — exactly
     where the prompt-only guard (artemis-briefing SKILL.md) let the model solicit
@@ -177,6 +184,27 @@ def _quiet_day_resume_short_circuit(user_id: str) -> bool:
             if act.get("status") not in ("pending", "in_progress"):
                 continue
             return False  # genuine pending work — not an empty day
+
+        # ready-but-unsubmitted tailored materials? (S-0622-04 ledger is the truth
+        # source for submit state). A completed tailor leaves the action_queue but
+        # stages a resume the user still needs to send — the highest-value push,
+        # never a quiet day.
+        apps_path = base / "applications.json"
+        if apps_path.exists():
+            apps_doc = json.loads(apps_path.read_text(encoding="utf-8"))
+            for app in (apps_doc.get("applications") or []):
+                if not isinstance(app, dict):
+                    continue
+                if app.get("submitted_at"):
+                    continue  # already submitted — not pending
+                if app.get("status") in ("submitted", "interviewing", "interviewed", "offer", "rejected", "withdrawn"):
+                    continue  # past the submit step
+                artifacts = app.get("artifacts") or []
+                has_resume = any(
+                    isinstance(a, dict) and a.get("kind") == "resume" for a in artifacts
+                )
+                if has_resume:
+                    return False  # materials ready, not yet sent — push, don't suppress
 
         return True
     except (OSError, json.JSONDecodeError, ValueError, TypeError) as exc:

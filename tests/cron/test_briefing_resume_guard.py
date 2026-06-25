@@ -27,8 +27,8 @@ pytestmark = pytest.mark.xdist_group("cron_scheduler")
 _USER = "U0616TEST"
 
 
-def _write_state(tmp_path, *, resume: bool, follow_ups=None, action_queue=None):
-    """Build ~/.hermes/artemis/<user>/{strategy.json, resumes/} under tmp_path."""
+def _write_state(tmp_path, *, resume: bool, follow_ups=None, action_queue=None, applications=None):
+    """Build ~/.hermes/artemis/<user>/{strategy.json, resumes/, applications.json} under tmp_path."""
     base = tmp_path / "artemis" / _USER
     base.mkdir(parents=True, exist_ok=True)
     strategy = {
@@ -40,6 +40,20 @@ def _write_state(tmp_path, *, resume: bool, follow_ups=None, action_queue=None):
     if resume:
         (base / "resumes").mkdir(exist_ok=True)
         (base / "resumes" / "general.json").write_text('{"name": "Test"}', encoding="utf-8")
+    if applications is not None:
+        (base / "applications.json").write_text(
+            json.dumps({"applications": applications}), encoding="utf-8"
+        )
+
+
+def _ready_material_app(company="jerry", submitted_at=None, status="identified"):
+    """An applications.json entry with a tailored resume artifact (ready material)."""
+    return {
+        "company": company,
+        "status": status,
+        "submitted_at": submitted_at,
+        "artifacts": [{"kind": "resume", "name": f"{company}-data-scientist"}],
+    }
 
 
 def _today():
@@ -111,6 +125,56 @@ def test_done_actions_and_future_followup_short_circuits(patch_home):
         resume=True,
         follow_ups=[{"what": "future check", "when": _in_n_days(10), "channel": "briefing"}],
         action_queue=[{"id": "a1", "status": "done", "deadline": _in_n_days(1)}],
+    )
+    assert _quiet_day_resume_short_circuit(_USER) is True
+
+
+# --- ready-but-unsubmitted materials must NOT short-circuit (the Scene-2 bug) ---
+# Regression: all tailor actions completed (action_queue empty) + future follow-up,
+# BUT applications.json has tailored resumes ready and not yet submitted. The old
+# guard saw "empty queue + future follow-up" and emitted "Nothing urgent" — wrong,
+# the highest-value push is "your materials are ready, go submit". Surfaced live
+# 2026-06-25 (Maya walkthrough) once B-0624-02 let distinct-company tailors all
+# complete, first time the queue went genuinely empty with materials staged.
+
+def test_ready_unsubmitted_materials_does_not_short_circuit(patch_home):
+    _write_state(
+        patch_home,
+        resume=True,
+        action_queue=[],  # all tailors done
+        follow_ups=[{"what": "check submissions", "when": _in_n_days(7), "channel": "briefing"}],
+        applications=[
+            _ready_material_app("jerry", submitted_at=None),
+            _ready_material_app("scale-jobs", submitted_at=None),
+        ],
+    )
+    assert _quiet_day_resume_short_circuit(_USER) is False
+
+
+# --- once materials are submitted, the day IS quiet again → short-circuit ok ---
+
+def test_all_materials_submitted_short_circuits(patch_home):
+    _write_state(
+        patch_home,
+        resume=True,
+        action_queue=[],
+        follow_ups=[{"what": "check", "when": _in_n_days(7), "channel": "briefing"}],
+        applications=[
+            _ready_material_app("jerry", submitted_at=_today(), status="submitted"),
+        ],
+    )
+    assert _quiet_day_resume_short_circuit(_USER) is True
+
+
+# --- application without a resume artifact (identified only) is not "ready" → quiet ok ---
+
+def test_identified_without_artifact_short_circuits(patch_home):
+    _write_state(
+        patch_home,
+        resume=True,
+        action_queue=[],
+        follow_ups=[{"what": "check", "when": _in_n_days(7), "channel": "briefing"}],
+        applications=[{"company": "jerry", "status": "identified", "submitted_at": None, "artifacts": []}],
     )
     assert _quiet_day_resume_short_circuit(_USER) is True
 
