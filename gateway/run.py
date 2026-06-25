@@ -8199,7 +8199,13 @@ class GatewayRunner:
             # Get pending message from adapter.
             # Use session_key (not source.chat_id) to match adapter's storage keys.
             pending = None
-            if result and adapter and session_key:
+            # B-0623-03 Tier B: in busy_text_mode=queue, the base adapter's
+            # turn-end drain owns the merged pending so the cascade reply anchors
+            # to the LAST burst message. run.py must NOT consume it here (the
+            # _dequeue path keeps only the text and reuses this turn's anchor →
+            # reply lands under the FIRST message). Skip; let base.py drain it.
+            _queue_owns_pending = getattr(adapter, "_busy_text_mode", "interrupt") == "queue"
+            if result and adapter and session_key and not _queue_owns_pending:
                 if result.get("interrupted"):
                     pending = _dequeue_pending_text(adapter, session_key)
                     if not pending and result.get("interrupt_message"):

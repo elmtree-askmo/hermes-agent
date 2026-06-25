@@ -94,3 +94,86 @@ class TestBurstMessageMerge:
         assert pending is not None
         for fragment in ("hi", "whats up today", "any good jobs available today"):
             assert fragment in pending.text, f"burst fragment dropped: {fragment!r}"
+
+
+def _make_event_id(text, message_id, chat_id="12345"):
+    # Same source shape as _session_key() so handle_message's computed key matches.
+    source = SessionSource(platform=Platform.TELEGRAM, chat_id=chat_id, chat_type="dm")
+    return MessageEvent(
+        text=text, message_type=MessageType.TEXT, source=source, message_id=message_id
+    )
+
+
+class TestQueueModeDebounce:
+    """Tier B (B-0623-03 follow-on): BUSY_TEXT_MODE=queue debounces a burst into
+    one ordered pending turn, without interrupting the running turn, and anchors
+    the reply to the latest message (message_id bumped to the last fragment)."""
+
+    @pytest.mark.asyncio
+    async def test_queue_mode_coalesces_burst_in_order(self):
+        adapter = _make_adapter()
+        adapter._busy_text_mode = "queue"
+        adapter._busy_text_debounce_seconds = 0.05
+        adapter._busy_text_hard_cap_seconds = 0.3
+        sk = _session_key()
+        adapter._active_sessions[sk] = asyncio.Event()  # a turn is in flight
+
+        await adapter.handle_message(_make_event_id("msg one", "1.0"))
+        await adapter.handle_message(_make_event_id("msg two", "2.0"))
+        await adapter.handle_message(_make_event_id("msg three", "3.0"))
+
+        # Buffered in the debounce window: not yet in pending, and the running
+        # turn is NOT interrupted (the Tier A failure mode).
+        assert sk not in adapter._pending_messages, "queue mode must not merge into pending immediately"
+        assert not adapter._active_sessions[sk].is_set(), "queue mode must not interrupt the running turn"
+
+        await asyncio.sleep(0.25)  # let the debounce window elapse + flush
+
+        pending = adapter._pending_messages.get(sk)
+        assert pending is not None, "burst never flushed to pending"
+        assert pending.text == "msg one\nmsg two\nmsg three", f"order/merge wrong: {pending.text!r}"
+        assert str(pending.message_id) == "3.0", "message_id not bumped to latest (reply would thread under wrong msg)"
+        assert not adapter._active_sessions[sk].is_set(), "queue mode must not interrupt the running turn"
+
+    @pytest.mark.asyncio
+    async def test_queue_mode_reorders_scrambled_arrival_by_ts(self):
+        """Burst A repro: the async pre-handle awaits in _handle_slack_message can
+        deliver a later-sent message BEFORE an earlier-sent one. Flush must
+        re-sort by Slack ts (message_id) so the merged text is in send order and
+        the reply anchors to the truly last-SENT message, not the last-arrived."""
+        adapter = _make_adapter()
+        adapter._busy_text_mode = "queue"
+        adapter._busy_text_debounce_seconds = 0.05
+        adapter._busy_text_hard_cap_seconds = 0.3
+        sk = _session_key()
+        adapter._active_sessions[sk] = asyncio.Event()  # a turn is in flight
+
+        # SCRAMBLED arrival: msg3 (ts 3.0) reaches handle_message before msg2
+        # (ts 2.0) because msg2's pre-handle network awaits were slower.
+        await adapter.handle_message(_make_event_id("third sent", "3.0"))
+        await adapter.handle_message(_make_event_id("second sent", "2.0"))
+
+        await asyncio.sleep(0.25)  # let the window elapse + flush
+
+        pending = adapter._pending_messages.get(sk)
+        assert pending is not None, "burst never flushed to pending"
+        assert pending.text == "second sent\nthird sent", (
+            f"flush did not re-sort by ts: {pending.text!r}"
+        )
+        assert str(pending.message_id) == "3.0", (
+            "anchor must be the latest-SENT message (max ts), not the last-arrived"
+        )
+
+    @pytest.mark.asyncio
+    async def test_default_interrupt_mode_unchanged(self):
+        """With the default mode, Tier A behavior is preserved (merge + interrupt)."""
+        adapter = _make_adapter()  # _busy_text_mode defaults to "interrupt"
+        sk = _session_key()
+        adapter._active_sessions[sk] = asyncio.Event()
+
+        await adapter.handle_message(_make_event_id("a", "1.0"))
+        await adapter.handle_message(_make_event_id("b", "2.0"))
+
+        pending = adapter._pending_messages.get(sk)
+        assert pending is not None and "a" in pending.text and "b" in pending.text
+        assert adapter._active_sessions[sk].is_set(), "interrupt mode must still interrupt"
