@@ -764,6 +764,40 @@ class TestAffectReportBlock:
         assert "before" in low
 
 
+class TestAffectGateBlock:
+    def test_returns_none_when_not_checked(self):
+        assert tid.render_affect_gate_block({"checked": False}) is None
+
+    def test_returns_none_when_gate_none(self):
+        assert tid.render_affect_gate_block({
+            "checked": True,
+            "affect_gate": "none",
+        }) is None
+
+    def test_renders_empathy_then_gate(self):
+        block = tid.render_affect_gate_block({
+            "checked": True,
+            "affect_gate": "empathy_then_gate",
+        })
+        assert block is not None
+        low = block.lower()
+        # Load-bearing: empathy first, a gate offer, defer the synthesis.
+        assert "feel" in low or "empath" in low or "acknowledg" in low
+        assert "gate" in low or "want me" in low or "offer" in low
+        assert "next turn" in low or "hold" in low or "defer" in low
+
+    def test_renders_empathy_direct(self):
+        block = tid.render_affect_gate_block({
+            "checked": True,
+            "affect_gate": "empathy_direct",
+        })
+        assert block is not None
+        low = block.lower()
+        # Load-bearing: skip the gate, give a COMPRESSED reframe (not full synthesis).
+        assert "compress" in low or "short" in low or "brief" in low
+        assert "not" in low and ("full" in low or "synthesis" in low or "dump" in low)
+
+
 # =========================================================================
 # Prompt substitution safety — regression for codex round 5 P2
 # (chained .replace re-templates injected content)

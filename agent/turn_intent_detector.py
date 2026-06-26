@@ -873,6 +873,60 @@ def render_affect_report_block(detection: dict[str, Any]) -> str | None:
     ])
 
 
+def render_affect_gate_block(detection: dict[str, Any]) -> str | None:
+    """Render the mixed-turn affect-gate block (S-0626-01).
+
+    Fires when the auxiliary classifier flagged a MIXED turn — strong
+    affect AND an explicit progress/assessment ask in the same message,
+    so the turn dispatches (single/multi/surface_existing) rather than
+    landing on `none`. `affect_gate` is one of:
+
+      - "empathy_then_gate": lead with empathy + a gate offer; hold the
+        synthesis for the next turn.
+      - "empathy_direct": skip the gate (the user signalled permission or
+        it's a comparison spiral); give a COMPRESSED reframe now, not the
+        full multi-agent synthesis.
+
+    Returns None when not checked or affect_gate is "none". This is the
+    sibling of render_affect_report_block: that one governs pure-affect
+    `none` turns; this one governs affect-bearing work turns. The two are
+    mutually exclusive by construction.
+    """
+    if not detection.get("checked"):
+        return None
+    gate = detection.get("affect_gate")
+    if gate == "empathy_then_gate":
+        return "\n".join([
+            "",
+            "**Mixed-affect turn — empathy first, then gate** (auxiliary "
+            "classifier flagged strong affect alongside a progress/"
+            "assessment ask; the team is working, but do NOT open with the "
+            "synthesis):",
+            "  - Open with ONE specific feeling-acknowledgment beat (name "
+            "the affect — not a generic \"I hear you\").",
+            "  - Then ONE gate line offering the read or the space (e.g. "
+            "\"want me to give you the straight read, or sit with it "
+            "first?\").",
+            "  - HOLD the full progress synthesis for the NEXT turn, after "
+            "they answer. Do not stack the analysis onto this turn.",
+        ])
+    if gate == "empathy_direct":
+        return "\n".join([
+            "",
+            "**Mixed-affect turn — empathy, then a compressed read** "
+            "(auxiliary classifier flagged strong affect with an explicit "
+            "permission cue or a comparison spiral; skip the permission "
+            "gate):",
+            "  - Open with ONE specific feeling-acknowledgment beat, then "
+            "give the reframe directly — they asked for it.",
+            "  - Keep the reframe COMPRESSED: a short read built on the one "
+            "or two load-bearing facts. This is NOT the full Scout/Analyst/"
+            "Publicist synthesis or a numbers dump — detail follows only if "
+            "they ask.",
+        ])
+    return None
+
+
 def render_injection_block(detection: dict[str, Any]) -> str | None:
     """Render the FALLBACK system-prompt injection block.
 
