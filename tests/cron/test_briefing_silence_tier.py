@@ -103,17 +103,13 @@ class TestSilenceTierRender:
     }
 
     def test_silence_tier_renders_body(self):
-        with patch("cron.scheduler._parse_step0_output", return_value=dict(self._PKG)), \
-             patch("cron.scheduler._briefing_write_call",
-                   side_effect=lambda take, opener, job_id="?": (take, opener)):
+        with patch("cron.scheduler._parse_step0_output", return_value=dict(self._PKG)):
             out = _run_briefing_render("<json>", "j", silence_tier="day5")
         assert out is not None
         assert "patience is the strategy" in out
 
     def test_no_silence_tier_renders_body(self):
-        with patch("cron.scheduler._parse_step0_output", return_value=dict(self._PKG)), \
-             patch("cron.scheduler._briefing_write_call",
-                   side_effect=lambda take, opener, job_id="?": (take, opener)):
+        with patch("cron.scheduler._parse_step0_output", return_value=dict(self._PKG)):
             out = _run_briefing_render("<json>", "j")
         assert out is not None
         assert "patience is the strategy" in out

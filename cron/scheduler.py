@@ -420,31 +420,8 @@ def _voice_scan_check(text: str, job_id: str = "?") -> tuple[bool, str]:
     return True, ""
 
 
-_BRIEFING_WRITE_PROMPT = """You are a name-stripping repair pass for a career-coaching briefing.
-You receive a `take` (the Coach's message body) and an `opener` (a greeting line, may be null).
-
-Your ONLY job: return the same content with EVERY person's name removed — both the user's own name
-and any third-party person's name (contacts, recruiters, friends, family). For each removed name,
-replace the reference with "they"/"their" or rephrase to second person ("you"/"your"), or drop the
-referent entirely when a company/role/place in the same sentence already makes the meaning clear.
-
-Hard rules:
-- KEEP company, role, product, and place names EXACTLY as they are — those are not person names.
-- PRESERVE the meaning, the warmth, and any A/B closing choice EXACTLY. Do not shorten, re-order,
-  re-structure, summarize, add content, or re-render anything beyond removing person names.
-- Address the user in second person only; never she/he/they for the user.
-- No preamble, no labels, no reasoning. Output only the JSON object.
-
-Return a JSON object with exactly these keys:
-{{"take": "<the take with all person names removed>", "opener": "<the opener with names removed, or null if the input opener was null>"}}
-
-INPUT:
-take: {take}
-opener: {opener}"""
-
-
 def _parse_step0_output(text: str, job_id: str = "?") -> dict | None:
-    """Parse step-0's structured JSON output (S-0626-02 Plan B).
+    """Parse step-0's structured JSON output (S-0626-02 Plan C).
 
     step-0 (the artemis-briefing agent session) emits a single JSON object
     {coaches_take, opener, response_window_checkin} directly — no decide LLM.
@@ -470,113 +447,40 @@ def _parse_step0_output(text: str, job_id: str = "?") -> dict | None:
     return pkg
 
 
-def _briefing_write_call(
-    take: str, opener: str | None, job_id: str = "?",
-) -> tuple[str | None, str | None]:
-    """S-0626-02 Plan B — name-strip repair pass over step-0's take + opener.
-
-    Its ONLY job is to remove third-party + user person names while preserving
-    the take's meaning, warmth, and A/B closer exactly (the gate showed qwen
-    scrubs names reliably as a narrow task even though it leaks them while
-    authoring). Returns (clean_take, clean_opener), or (None, None) on any
-    failure so the caller falls back to the raw step-0 fields.
-
-    Runs on qwen by default (gate: 9/9 leak-free as a repair pass vs gemini 3/9).
-    """
-    api_key = os.getenv("OPENROUTER_API_KEY")
-    if not api_key:
-        return None, None
-
-    model = os.getenv("BRIEFING_WRITE_MODEL", "qwen/qwen3.7-plus")
-    prompt = _BRIEFING_WRITE_PROMPT.format(
-        take=json.dumps(take or "", ensure_ascii=False),
-        opener=json.dumps(opener, ensure_ascii=False),
-    )
-
-    import urllib.request
-    import urllib.error
-
-    body = json.dumps({
-        "model": model,
-        "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0,
-        "max_tokens": 800,
-        "response_format": {"type": "json_object"},
-    }).encode("utf-8")
-    req = urllib.request.Request(
-        "https://openrouter.ai/api/v1/chat/completions",
-        data=body,
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-            "HTTP-Referer": "https://github.com/elmtree-askmo/artemis",
-            "X-Title": "Artemis briefing-write",
-        },
-    )
-
-    try:
-        with urllib.request.urlopen(req, timeout=20) as resp:
-            payload = json.loads(resp.read().decode("utf-8"))
-    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError) as exc:
-        logger.warning("Job '%s': briefing_write_call HTTP/parse error — %s", job_id, exc)
-        return None, None
-
-    try:
-        content = payload["choices"][0]["message"]["content"]
-        if content is None:
-            raise ValueError("content is None")
-        raw = content.strip()
-        if raw.startswith("```"):
-            raw = raw.strip("`").lstrip("json").strip()
-        obj = json.loads(raw)
-        clean_take = (obj.get("take") or "").strip()
-        if not clean_take:
-            raise ValueError("empty take")
-        clean_opener = obj.get("opener")
-        if clean_opener is not None:
-            clean_opener = str(clean_opener).strip() or None
-        return clean_take, clean_opener
-    except (KeyError, IndexError, TypeError, ValueError, json.JSONDecodeError) as exc:
-        logger.warning("Job '%s': briefing_write_call bad repair output — %s", job_id, exc)
-        return None, None
-
-
-def _assemble_briefing_body(clean_take: str, checkin: str | None) -> str:
-    """Assemble the briefing body: name-stripped take, then the verbatim
-    response-window check-in as its own beat below it (S-0626-02 Plan B).
-
-    The check-in is appended deterministically — it never passes through the
-    LLM — so its server-computed wording reaches the user byte-exact (fixes
-    Finding 4-3). opener / attribution / job-cards / milestone are prepended
-    by the deterministic render layer downstream.
-    """
-    parts = [(clean_take or "").strip()]
-    c = (checkin or "").strip()
-    if c:
-        parts.append(c)
-    return "\n\n".join(p for p in parts if p)
-
-
 def _run_briefing_render(
     raw_output: str, job_id: str = "?", silence_tier: str | None = None,
     capture: dict | None = None, user_id: str | None = None,
 ) -> str | None:
-    """S-0626-02 Plan B — parse step-0 JSON, name-strip-repair, assemble body.
+    """S-0626-02 Plan C — parse step-0 JSON, return the take body (no name-strip).
 
     Flow: parse step-0's {coaches_take, opener, response_window_checkin} →
-    name-strip the take + opener via the write-repair LLM → assemble the body
-    (repaired take, with the verbatim response-window check-in appended below).
-    Returns the assembled body, or None on parse/empty failure (caller falls
-    back to the Phase-5 voice-scan path on the raw output). Never raises.
+    return `coaches_take` as the body and stash the opener + verbatim check-in
+    on `capture` for the scheduler to render around the voice-scan. Returns the
+    take body, or None on parse/empty failure (caller falls back to the Phase-5
+    voice-scan path on the raw output). Never raises.
+
+    Voice (recipient in second person, third-party names kept) is handled by
+    the identity-anchored step-0 prompt (L1) + the Phase-5 voice-scan backstop
+    (L2) that the caller runs on this take body — there is no name-strip repair
+    LLM in this path (the old unconditional strip mis-targeted third-party
+    names; a FAIL-only repair is deferred until a measured FAIL rate justifies
+    it — see spec S-0626-02 § Plan C).
+
+    The verbatim `response_window_checkin` is NOT folded into the returned body:
+    the voice-scan prompt is calibrated to judge only the take beat (system-
+    added parts come after the scan), and the check-in is fixed second-person
+    server copy that is structurally voice-clean. So it is stashed on
+    `capture["checkin"]` and appended by the scheduler AFTER the voice-scan,
+    byte-exact (fixes Finding 4-3).
 
     `silence_tier` (day1/day5/day8) is the deterministic tier computed by code;
     the hard job-card/attribution suppression is enforced in the render layer
     (Phase 1), so the tier is kept on the package for any downstream use but the
     step-0 prompt already shaped the silence voice into coaches_take.
 
-    `capture["opener"]` is populated with the name-stripped opener, which the
-    scheduler prepends above the attribution block (server controls ordering +
-    supplies a count-based fallback).
+    `capture["opener"]` is populated with step-0's opener, which the scheduler
+    prepends above the attribution block (server controls ordering + supplies a
+    count-based fallback).
 
     `user_id` lets the server set `pkg["fresh_materials"]` from the archive
     (deterministic walkthrough A/B signal — same source as attribution).
@@ -591,30 +495,18 @@ def _run_briefing_render(
     if user_id and _has_fresh_reviewable_products(user_id):
         pkg["fresh_materials"] = True
 
-    # Name-strip repair pass (qwen, 9/9 leak-free as a narrow task). Fail-open to
-    # the raw step-0 fields if the repair call dies — the Phase-5 voice-scan
-    # downstream still catches a surviving leak by substituting the quiet-day
-    # fallback.
-    clean_take, clean_opener = _briefing_write_call(
-        pkg.get("coaches_take") or "", pkg.get("opener"), job_id,
-    )
-    if clean_take is None:
-        clean_take = pkg.get("coaches_take") or ""
-        clean_opener = pkg.get("opener")
-        logger.info("Job '%s': write-repair failed — using raw step-0 take", job_id)
-
-    if capture is not None:
-        capture["opener"] = clean_opener
-
-    # The response-window check-in is appended verbatim AFTER the LLM repair so
-    # its server-computed wording cannot be paraphrased (Finding 4-3).
-    body = _assemble_briefing_body(clean_take, pkg.get("response_window_checkin"))
-    if not body:
-        logger.info("Job '%s': empty briefing body after assembly — Phase 5 fallback", job_id)
+    take = (pkg.get("coaches_take") or "").strip()
+    if not take:
+        logger.info("Job '%s': empty coaches_take — Phase 5 fallback", job_id)
         return None
 
-    logger.info("Job '%s': briefing render succeeded (Plan B: parse→repair→assemble)", job_id)
-    return body
+    if capture is not None:
+        capture["opener"] = pkg.get("opener")
+        _checkin = pkg.get("response_window_checkin")
+        capture["checkin"] = _checkin.strip() if isinstance(_checkin, str) else None
+
+    logger.info("Job '%s': briefing render succeeded (Plan C: parse→take body)", job_id)
+    return take
 
 
 # ---------------------------------------------------------------------------
@@ -2330,12 +2222,14 @@ def tick(verbose: bool = True, adapters=None, loop=None) -> int:
                     _s_tier, _s_speak = _briefing_silence(job)
                     _silence_tier = _s_tier if (_s_tier not in (None, "engaged") and _s_speak) else None
 
-                # S-0626-02 Plan B — single-step briefing render: parse step-0
-                # JSON, name-strip-repair the take + opener, assemble the body
-                # (verbatim response-window check-in appended below). On any
-                # failure _run_briefing_render returns None and deliver_content
-                # flows through Phase 5 voice-scan unchanged.
-                _briefing_opener_llm = None  # name-stripped opener, captured below
+                # S-0626-02 Plan C — single-step briefing render: parse step-0
+                # JSON, assemble the body (verbatim response-window check-in
+                # appended below). Voice is handled by the identity-anchored
+                # step-0 prompt + the Phase-5 voice-scan run on deliver_content
+                # below — no name-strip LLM. On any failure _run_briefing_render
+                # returns None and deliver_content flows through Phase 5 unchanged.
+                _briefing_opener_llm = None  # step-0 opener, captured below
+                _briefing_checkin = None  # verbatim response-window check-in, appended post-scan
                 if should_deliver and success and _is_briefing_job(job) and not _resume_guard_fired:
                     _two_step_uid = (_resolve_origin(job) or {}).get("user_id")
                     _two_step_capture: dict = {}
@@ -2346,6 +2240,7 @@ def tick(verbose: bool = True, adapters=None, loop=None) -> int:
                     if two_step_result is not None:
                         deliver_content = two_step_result
                         _briefing_opener_llm = _two_step_capture.get("opener")
+                        _briefing_checkin = _two_step_capture.get("checkin")
 
                     # S-0626-02 — quality-gate the ASSEMBLED briefing body (the
                     # raw-output gate above is skipped for briefing jobs because
@@ -2360,9 +2255,12 @@ def tick(verbose: bool = True, adapters=None, loop=None) -> int:
                             )
                             should_deliver = False
 
-                # Artemis B-0510-01 Phase 5 — semantic voice-scan.
-                # Last-resort catch for write-call drift or two-step failure.
-                # Briefing-only, fail-open on any LLM/HTTP/parse error.
+                # Artemis B-0510-01 Phase 5 — semantic voice-scan (Plan C L2).
+                # Last-resort catch for a recipient-in-third-person leak the
+                # identity-anchored step-0 prompt (L1) missed. Briefing-only,
+                # fail-open on any LLM/HTTP/parse error. Scans only the take body
+                # (the verbatim check-in is appended below, after this scan, by
+                # design — see _run_briefing_render docstring).
                 if should_deliver and success and _is_briefing_job(job) and not _resume_guard_fired:
                     vs_clean, vs_reason = _voice_scan_check(deliver_content, job["id"])
                     if not vs_clean:
@@ -2373,6 +2271,20 @@ def tick(verbose: bool = True, adapters=None, loop=None) -> int:
                             job["id"], vs_reason, deliver_content[:200],
                         )
                         deliver_content = _quiet_day_fallback()
+
+                # S-0626-02 Plan C / Finding 4-3 — append the verbatim response-
+                # window check-in AFTER the voice-scan. It is fixed second-person
+                # server copy (structurally voice-clean), so it bypasses the scan
+                # by design and reaches the user byte-exact. Skipped when the
+                # voice-scan substituted the quiet-day fallback (the fallback
+                # reads complete on its own and a check-in would contradict it).
+                if (
+                    should_deliver
+                    and _is_briefing_job(job)
+                    and _briefing_checkin
+                    and deliver_content != _quiet_day_fallback()
+                ):
+                    deliver_content = f"{deliver_content}\n\n{_briefing_checkin}"
 
                 # Artemis briefing — deterministic team attribution paragraph.
                 # See _render_team_attribution_for_briefing docstring for why

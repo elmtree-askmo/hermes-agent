@@ -314,9 +314,8 @@ def test_fresh_materials_flag_injected_server_side(tmp_path):
     def _fake_parse(raw, job_id="?"):
         return {"coaches_take": "take", "opener": None, "response_window_checkin": None}
 
-    # No write-repair / network: stub the repair call to echo the take back.
+    # Plan C: no write-repair LLM — _run_briefing_render returns coaches_take as-is.
     with patch.object(sched, "_parse_step0_output", _fake_parse), \
-         patch.object(sched, "_briefing_write_call", lambda t, o, j="?": (t, o)), \
          patch.object(sched, "_has_fresh_reviewable_products", return_value=True) as fresh:
         body = sched._run_briefing_render("{}", "j1", user_id="U123")
     assert fresh.called
