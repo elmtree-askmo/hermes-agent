@@ -53,6 +53,15 @@ class ProgressCaptureAdapter(BasePlatformAdapter):
     async def get_chat_info(self, chat_id: str):
         return {"id": chat_id}
 
+    def resolve_thread_parent(self, thread_id, message_id, chat_type=None):
+        # Mirror the real per-platform behavior so progress threading is
+        # exercised through the same convergence point production uses:
+        # SlackAdapter applies the DM-flat rule (S-0620-01); everyone else
+        # (Telegram here) keeps the base default.
+        if self.platform == Platform.SLACK and chat_type == "dm":
+            return thread_id  # None for top-level → flat
+        return super().resolve_thread_parent(thread_id, message_id, chat_type)
+
 
 class FakeAgent:
     def __init__(self, **kwargs):
@@ -141,10 +150,15 @@ async def test_run_agent_progress_stays_in_originating_topic(monkeypatch, tmp_pa
     )
 
     assert result["final_response"] == "done"
+    # Resolve the tool emoji the same way the gateway does, so this test is
+    # robust to registry/skin state (the prefix emoji is not what we're
+    # asserting here — the topic/thread metadata is).
+    from agent.display import get_tool_emoji
+    _term_emoji = get_tool_emoji("terminal", default="⚙️")
     assert adapter.sent == [
         {
             "chat_id": "-1001",
-            "content": '💻 terminal: "pwd"',
+            "content": f'{_term_emoji} terminal: "pwd"',
             "reply_to": None,
             "metadata": {"thread_id": "17585"},
         }
@@ -196,8 +210,10 @@ async def test_run_agent_progress_does_not_use_event_message_id_for_telegram_dm(
 
 
 @pytest.mark.asyncio
-async def test_run_agent_progress_uses_event_message_id_for_slack_dm(monkeypatch, tmp_path):
-    """Slack DM progress should keep event ts fallback threading."""
+async def test_run_agent_progress_slack_dm_toplevel_lands_flat(monkeypatch, tmp_path):
+    """S-0620-01: Slack DM top-level progress must land flat (metadata None),
+    no event-ts fallback threading, so the whole turn sits on the single DM
+    timeline. (Was: progress reused event ts as thread anchor.)"""
     monkeypatch.setenv("HERMES_TOOL_PROGRESS_MODE", "all")
 
     fake_dotenv = types.ModuleType("dotenv")
@@ -228,6 +244,51 @@ async def test_run_agent_progress_uses_event_message_id_for_slack_dm(monkeypatch
         source=source,
         session_id="sess-3",
         session_key="agent:main:slack:dm:D123",
+        event_message_id="1234567890.000001",
+    )
+
+    assert result["final_response"] == "done"
+    assert adapter.sent
+    assert adapter.sent[0]["metadata"] is None, (
+        f"Slack DM top-level progress should be flat, got {adapter.sent[0]['metadata']}"
+    )
+    assert all(call["metadata"] is None for call in adapter.typing)
+
+
+@pytest.mark.asyncio
+async def test_run_agent_progress_slack_channel_keeps_thread_fallback(monkeypatch, tmp_path):
+    """Slack channel top-level progress keeps the event-ts fallback so it
+    threads under the user's message — channel behavior unchanged by S-0620-01."""
+    monkeypatch.setenv("HERMES_TOOL_PROGRESS_MODE", "all")
+
+    fake_dotenv = types.ModuleType("dotenv")
+    fake_dotenv.load_dotenv = lambda *args, **kwargs: None
+    monkeypatch.setitem(sys.modules, "dotenv", fake_dotenv)
+
+    fake_run_agent = types.ModuleType("run_agent")
+    fake_run_agent.AIAgent = FakeAgent
+    monkeypatch.setitem(sys.modules, "run_agent", fake_run_agent)
+
+    adapter = ProgressCaptureAdapter(platform=Platform.SLACK)
+    runner = _make_runner(adapter)
+    gateway_run = importlib.import_module("gateway.run")
+    monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
+    monkeypatch.setattr(gateway_run, "_resolve_runtime_agent_kwargs", lambda: {"api_key": "***"})
+
+    source = SessionSource(
+        platform=Platform.SLACK,
+        chat_id="C123",
+        chat_type="channel",
+        thread_id=None,
+    )
+
+    result = await runner._run_agent(
+        message="hello",
+        context_prompt="",
+        history=[],
+        source=source,
+        session_id="sess-4",
+        session_key="agent:main:slack:channel:C123",
         event_message_id="1234567890.000001",
     )
 

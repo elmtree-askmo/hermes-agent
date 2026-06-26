@@ -1328,17 +1328,23 @@ class TestFallbackPreservesThreadContext:
 # ---------------------------------------------------------------------------
 
 class TestProgressMessageThread:
-    """Verify that progress messages go to the correct thread.
+    """Verify inbound DM parsing and the adapter's send-threading contract.
 
-    Issue #2954: For Slack DM top-level messages, source.thread_id is None
-    but the final reply is threaded under the user's message via reply_to.
-    Progress messages must use the same thread anchor (the original message's
-    ts) so they appear in the thread instead of the DM root.
+    Issue #2954 originally threaded DM progress under the user's message.
+    S-0620-01 reverses that *at the run.py derivation level* (top-level Slack
+    DMs now keep thread_id=None so the whole turn lands flat — see
+    test_run_progress_topics.py). This class covers the two invariants that did
+    NOT change: (1) inbound parsing of a top-level DM (source.thread_id stays
+    None, message_id == event ts); (2) the adapter's send() contract — when it
+    IS given a thread_id in metadata (a genuine thread reply, or a channel), it
+    still threads. run.py simply no longer produces that metadata for top-level
+    DMs.
     """
 
     @pytest.mark.asyncio
-    async def test_dm_toplevel_progress_uses_message_ts_as_thread(self, adapter):
-        """Progress messages for a top-level DM should go into the reply thread."""
+    async def test_dm_toplevel_inbound_parsing_and_adapter_threads_when_told(self, adapter):
+        """Top-level DM parses with thread_id None + message_id == ts; and the
+        adapter still threads when metadata explicitly carries a thread_id."""
         # Simulate a top-level DM: no thread_ts in the event
         event = {
             "channel": "D_DM",
@@ -1367,26 +1373,23 @@ class TestProgressMessageThread:
             "so they share one continuous session"
         )
 
-        # The message_id should be the event's ts — this is what the gateway
-        # passes as event_message_id so progress messages can thread correctly
-        assert msg_event.message_id == "1234567890.000001", (
-            "message_id must equal the event ts so _run_agent can use it as "
-            "the fallback thread anchor for progress messages"
-        )
+        # The message_id should be the event's ts.
+        assert msg_event.message_id == "1234567890.000001"
 
-        # Verify that the Slack send() method correctly threads a message
-        # when metadata contains thread_id equal to the original ts
+        # Adapter contract (unchanged): when metadata explicitly carries a
+        # thread_id, send() threads. This path is hit for genuine thread
+        # replies and channels — NOT top-level DMs, for which run.py no longer
+        # supplies a thread_id (S-0620-01).
         adapter._app.client.chat_postMessage = AsyncMock(return_value={"ts": "reply_ts"})
         result = await adapter.send(
             chat_id="D_DM",
-            content="⚙️ working...",
-            metadata={"thread_id": msg_event.message_id},
+            content="some reply",
+            metadata={"thread_id": "1234500000.000000"},  # a real thread parent
         )
         assert result.success
         call_kwargs = adapter._app.client.chat_postMessage.call_args[1]
-        assert call_kwargs.get("thread_ts") == "1234567890.000001", (
-            "send() must pass thread_ts when metadata has thread_id, "
-            "ensuring progress messages land in the thread"
+        assert call_kwargs.get("thread_ts") == "1234500000.000000", (
+            "send() must still pass thread_ts when metadata explicitly has one"
         )
 
     @pytest.mark.asyncio
@@ -1418,6 +1421,44 @@ class TestProgressMessageThread:
             "so each @mention starts its own thread"
         )
         assert msg_event.message_id == "2000000000.000001"
+
+
+class TestResolveThreadParent:
+    """S-0620-01: SlackAdapter.resolve_thread_parent is the single convergence
+    point for outbound thread-parent resolution (main reply, progress/status,
+    media, out-of-band pushes). DM top-level → flat; channels + genuine thread
+    replies keep their thread parent."""
+
+    def test_dm_toplevel_returns_none_flat(self, adapter):
+        # Top-level DM: thread_id None, chat_type dm → flat (no message_id fallback)
+        assert adapter.resolve_thread_parent(None, "1234567890.000001", "dm") is None
+
+    def test_dm_thread_reply_keeps_thread_id(self, adapter):
+        # Genuine DM thread reply: explicit thread_id preserved
+        assert (
+            adapter.resolve_thread_parent("1700000000.111", "1234567890.000001", "dm")
+            == "1700000000.111"
+        )
+
+    def test_channel_toplevel_falls_back_to_message_id(self, adapter):
+        # Channel top-level: fall back to message_id so the reply threads under it
+        assert (
+            adapter.resolve_thread_parent(None, "2000000000.000001", "channel")
+            == "2000000000.000001"
+        )
+
+    def test_channel_thread_reply_keeps_thread_id(self, adapter):
+        assert (
+            adapter.resolve_thread_parent("1500000000.222", "2000000000.000001", "channel")
+            == "1500000000.222"
+        )
+
+    def test_no_chat_type_defaults_to_fallback(self, adapter):
+        # Unknown chat_type behaves like the base default (thread_id or message_id)
+        assert (
+            adapter.resolve_thread_parent(None, "3000000000.000001", None)
+            == "3000000000.000001"
+        )
 
 
 class TestThreadContextBotParent:

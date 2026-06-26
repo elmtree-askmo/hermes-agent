@@ -146,6 +146,87 @@ class TestBasePlatformTopicSessions:
         ]
 
     @pytest.mark.asyncio
+    async def test_slack_dm_typing_anchored_on_message_id(self):
+        """S-0620-01 typing decouple: a Slack top-level DM lands its reply flat
+        (thread_id None via resolve_thread_parent) but the assistant status must
+        still anchor on the user's message_id — else setStatus has no thread_ts
+        and silently no-ops, dropping the "is thinking..." indicator."""
+        adapter = DummyTelegramAdapter()
+        typing_calls = []
+
+        async def handler(_event):
+            await asyncio.sleep(0)
+            return "ack"
+
+        async def hold_typing(_chat_id, interval=2.0, metadata=None):
+            typing_calls.append({"chat_id": _chat_id, "metadata": metadata})
+            await asyncio.Event().wait()
+
+        adapter.set_message_handler(handler)
+        adapter._keep_typing = hold_typing
+        # Mirror SlackAdapter.resolve_thread_parent's DM-flat rule so the reply
+        # placement matches production: top-level DM → None (flat).
+        adapter.resolve_thread_parent = (
+            lambda thread_id, message_id, chat_type=None: (
+                thread_id if chat_type == "dm" else (thread_id or message_id)
+            )
+        )
+
+        event = MessageEvent(
+            text="hello",
+            source=SessionSource(
+                platform=Platform.SLACK,
+                chat_id="D123",
+                chat_type="dm",
+                thread_id=None,
+            ),
+            message_id="1700000000.000001",
+        )
+        await adapter._process_message_background(event, build_session_key(event.source))
+
+        # Reply lands flat (resolve_thread_parent → None for top-level DM)…
+        assert adapter.sent[0]["metadata"] is None
+        assert adapter.sent[0]["reply_to"] is None
+        # …but typing anchors on the user's message_id, not None.
+        assert typing_calls == [
+            {"chat_id": "D123", "metadata": {"thread_id": "1700000000.000001"}}
+        ]
+
+    @pytest.mark.asyncio
+    async def test_non_slack_dm_typing_stays_none(self):
+        """The Slack-gated anchor must not leak to other platforms: a Telegram
+        top-level DM (thread_id None) keeps typing metadata None — Telegram's
+        message_thread_id is forum-topic-only and a DM message_id there causes
+        send failures."""
+        adapter = DummyTelegramAdapter()
+        typing_calls = []
+
+        async def handler(_event):
+            await asyncio.sleep(0)
+            return "ack"
+
+        async def hold_typing(_chat_id, interval=2.0, metadata=None):
+            typing_calls.append({"chat_id": _chat_id, "metadata": metadata})
+            await asyncio.Event().wait()
+
+        adapter.set_message_handler(handler)
+        adapter._keep_typing = hold_typing
+
+        event = MessageEvent(
+            text="hello",
+            source=SessionSource(
+                platform=Platform.TELEGRAM,
+                chat_id="555",
+                chat_type="private",
+                thread_id=None,
+            ),
+            message_id="42",
+        )
+        await adapter._process_message_background(event, build_session_key(event.source))
+
+        assert typing_calls == [{"chat_id": "555", "metadata": None}]
+
+    @pytest.mark.asyncio
     async def test_process_message_background_marks_total_send_failure_unsuccessful(self):
         adapter = DummyTelegramAdapter()
 

@@ -2384,17 +2384,26 @@ class GatewayRunner:
 
         # S-0518-01 (thread consistency): bind the asyncio-task-local thread_ts
         # that out-of-band server pushes (MCP tools like announce_subagent /
-        # post_activity_log) will use to land in the same Slack thread Coach's
-        # main reply uses. Mirrors base.py:_thread_parent — when the user
-        # message is already inside a thread, use its parent; otherwise the
-        # user message itself becomes the thread root.
+        # post_activity_log) will use to land in the same place Coach's main
+        # reply lands. Resolved via the adapter so it tracks the reply exactly:
+        # channels thread under the user's message; Slack DMs stay flat
+        # (S-0620-01) so out-of-band pushes don't thread while the reply is
+        # flat and split the DM timeline.
         try:
             from tools.session_context import set_thread_ts as _ctx_set_thread_ts
-            _thread_root = (
-                event.source.thread_id
-                if getattr(event.source, "thread_id", None)
-                else event.message_id
-            )
+            _root_adapter = self.adapters.get(event.source.platform)
+            if _root_adapter is not None:
+                _thread_root = _root_adapter.resolve_thread_parent(
+                    getattr(event.source, "thread_id", None),
+                    event.message_id,
+                    getattr(event.source, "chat_type", None),
+                )
+            else:
+                _thread_root = (
+                    event.source.thread_id
+                    if getattr(event.source, "thread_id", None)
+                    else event.message_id
+                )
             _ctx_set_thread_ts(_thread_root or None)
         except Exception:
             pass
@@ -5325,14 +5334,14 @@ class GatewayRunner:
             _, cleaned = adapter.extract_images(response)
             local_files, _ = adapter.extract_local_files(cleaned)
 
-            # Fall back to message_id so media attachments thread under the
-            # user's original message even when the platform left
-            # source.thread_id blank (e.g. Slack DM top-level messages,
-            # where thread_id is intentionally None but the text reply path
-            # still threads via reply_to).  Without this fallback the file
-            # upload lands as a separate top-level message, split away from
-            # the text that references it.
-            _thread_parent = event.source.thread_id or event.message_id
+            # Thread anchor for media attachments — resolved by the adapter so
+            # the file lands wherever the turn's reply lands (channels thread
+            # under the trigger message; Slack DMs stay flat, S-0620-01).
+            _thread_parent = adapter.resolve_thread_parent(
+                event.source.thread_id,
+                event.message_id,
+                getattr(event.source, "chat_type", None),
+            )
             _thread_meta = {"thread_id": _thread_parent} if _thread_parent else None
 
             _AUDIO_EXTS = {'.ogg', '.opus', '.mp3', '.wav', '.m4a'}
@@ -7356,12 +7365,22 @@ class GatewayRunner:
         # Accumulates tool lines into a single message that gets edited.
         #
         # Threading metadata is platform-specific:
-        # - Slack DM threading needs event_message_id fallback (reply thread)
+        # - Slack channels thread under the trigger message; Slack DMs land
+        #   flat (S-0620-01) — both handled by the adapter's
+        #   resolve_thread_parent so progress/status sit wherever the reply
+        #   does. Job-match cards are posted by a separate Artemis-side hook
+        #   and stay threaded — the only content left in DM threads.
         # - Telegram uses message_thread_id only for forum topics; passing a
-        #   normal DM/group message id as thread_id causes send failures
-        # - Other platforms should use explicit source.thread_id only
-        if source.platform == Platform.SLACK:
-            _progress_thread_id = source.thread_id or event_message_id
+        #   normal DM/group message id as thread_id causes send failures, so
+        #   non-Slack platforms keep the explicit source.thread_id only (no
+        #   message_id fallback).
+        _progress_adapter = self.adapters.get(source.platform)
+        if source.platform == Platform.SLACK and _progress_adapter is not None:
+            _progress_thread_id = _progress_adapter.resolve_thread_parent(
+                source.thread_id,
+                event_message_id,
+                getattr(source, "chat_type", None),
+            )
         else:
             _progress_thread_id = source.thread_id
         _progress_metadata = {"thread_id": _progress_thread_id} if _progress_thread_id else None
@@ -8281,12 +8300,17 @@ class GatewayRunner:
                     first_response = result.get("final_response", "")
                     if first_response and not _already_streamed:
                         try:
-                            # B-0623-03: `event` is not in scope here — build thread
-                            # metadata from the in-scope source/message id (mirrors the
-                            # canonical `_thread_parent` pattern) so the first response
-                            # threads under the user's message instead of raising
+                            # B-0623-03: `event` is not in scope here — resolve the
+                            # thread parent from the in-scope source/message id via the
+                            # adapter so the first response lands wherever the turn's
+                            # reply lands (channels thread under the user's message;
+                            # Slack DMs stay flat, S-0620-01) instead of raising
                             # NameError and being dropped.
-                            _first_thread = source.thread_id or event_message_id
+                            _first_thread = adapter.resolve_thread_parent(
+                                source.thread_id,
+                                event_message_id,
+                                getattr(source, "chat_type", None),
+                            ) if adapter is not None else (source.thread_id or event_message_id)
                             _first_meta = {"thread_id": _first_thread} if _first_thread else None
                             await adapter.send(source.chat_id, first_response,
                                                metadata=_first_meta)

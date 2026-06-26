@@ -743,6 +743,24 @@ class BasePlatformAdapter(ABC):
         """
         pass
 
+    def resolve_thread_parent(
+        self,
+        thread_id: Optional[str],
+        message_id: Optional[str],
+        chat_type: Optional[str] = None,
+    ) -> Optional[str]:
+        """Resolve the thread parent ts for an outbound reply to a turn.
+
+        Default: reply inside the trigger message's thread when one exists,
+        otherwise fall back to the trigger message id so the reply threads
+        under it. This is the single convergence point for outbound
+        thread-parent resolution — main reply, progress/status, media, and
+        error paths all route through it. Platform adapters override to apply
+        platform-specific threading semantics (see SlackAdapter for the
+        DM-flat rule, S-0620-01).
+        """
+        return thread_id or message_id
+
     async def edit_message(
         self,
         chat_id: str,
@@ -1574,10 +1592,36 @@ class BasePlatformAdapter(ABC):
         interrupt_event = self._active_sessions.get(session_key) or asyncio.Event()
         self._active_sessions[session_key] = interrupt_event
         
-        # Start continuous typing indicator (refreshes every 2 seconds)
-        _thread_parent = event.source.thread_id or event.message_id
+        # Reply/media landing spot. Slack DMs land flat (resolve_thread_parent
+        # -> None, S-0620-01); channels + genuine thread replies keep their
+        # parent. This metadata drives the actual message placement below
+        # (reply_to / send metadata), so it must stay as resolve_thread_parent
+        # returns it — do NOT reuse it for the typing anchor (see below).
+        _thread_parent = self.resolve_thread_parent(
+            event.source.thread_id,
+            event.message_id,
+            getattr(event.source, "chat_type", None),
+        )
         _thread_metadata = {"thread_id": _thread_parent} if _thread_parent else None
-        typing_task = asyncio.create_task(self._keep_typing(event.source.chat_id, metadata=_thread_metadata))
+
+        # Start continuous typing indicator (refreshes every 2 seconds).
+        #
+        # The typing anchor is decoupled from the reply landing spot. A Slack
+        # top-level DM resolves flat (_thread_parent None) so the reply lands
+        # on the DM timeline — but Slack's loading status
+        # (`assistant.threads.setStatus`, rendered as the rotating in-flow
+        # status under the bot name) needs a valid thread_ts or it silently
+        # no-ops, dropping the status. So for Slack we anchor the status on
+        # the user's message (thread_id or message_id), independent of where
+        # the reply lands. Other platforms keep source.thread_id only:
+        # Telegram's message_thread_id is valid for forum topics only, and a
+        # normal DM message id there causes send failures.
+        if event.source.platform == Platform.SLACK:
+            _typing_thread = event.source.thread_id or event.message_id
+        else:
+            _typing_thread = event.source.thread_id
+        _typing_metadata = {"thread_id": _typing_thread} if _typing_thread else None
+        typing_task = asyncio.create_task(self._keep_typing(event.source.chat_id, metadata=_typing_metadata))
         
         try:
             await self._run_processing_hook("on_processing_start", event)
@@ -1648,10 +1692,16 @@ class BasePlatformAdapter(ABC):
                 # Send the text portion
                 if text_content:
                     logger.info("[%s] Sending response (%d chars) to %s", self.name, len(text_content), event.source.chat_id)
+                    # When the adapter resolves the turn flat (Slack DM
+                    # top-level, S-0620-01), drop reply_to too — otherwise
+                    # _resolve_thread_ts would fall back to it and re-thread the
+                    # reply. Every other path keeps the trigger message id so
+                    # platforms that quote/reply behave unchanged.
+                    _reply_to = event.message_id if _thread_parent is not None else None
                     result = await self._send_with_retry(
                         chat_id=event.source.chat_id,
                         content=text_content,
-                        reply_to=event.message_id,
+                        reply_to=_reply_to,
                         metadata=_thread_metadata,
                     )
                     _record_delivery(result)
@@ -1812,7 +1862,11 @@ class BasePlatformAdapter(ABC):
             try:
                 error_type = type(e).__name__
                 error_detail = str(e)[:300] if str(e) else "no details available"
-                _thread_parent = event.source.thread_id or event.message_id
+                _thread_parent = self.resolve_thread_parent(
+                    event.source.thread_id,
+                    event.message_id,
+                    getattr(event.source, "chat_type", None),
+                )
                 _thread_metadata = {"thread_id": _thread_parent} if _thread_parent else None
                 await self.send(
                     chat_id=event.source.chat_id,

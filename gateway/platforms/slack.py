@@ -438,6 +438,29 @@ class SlackAdapter(BasePlatformAdapter):
                 return metadata["thread_ts"]
         return reply_to
 
+    def resolve_thread_parent(
+        self,
+        thread_id: Optional[str],
+        message_id: Optional[str],
+        chat_type: Optional[str] = None,
+    ) -> Optional[str]:
+        """S-0620-01: Slack DMs land flat.
+
+        A top-level DM message carries ``thread_id=None`` by design (DM
+        conversations share one continuous session). The base class would
+        fall back to ``message_id`` and thread the reply under the user's
+        message; in a DM that splits a single timeline into a thread the
+        product sim never shows. So for top-level DMs return ``None`` — the
+        whole turn (reply + progress/status + media) sits flat on the DM
+        timeline. Channels keep the message_id fallback (reply threads under
+        the trigger), and genuine DM thread replies keep their real
+        thread_id. Job-match cards are posted by a separate Artemis-side hook
+        and stay threaded — the only content left in DM threads.
+        """
+        if chat_type == "dm":
+            return thread_id  # None for top-level → flat; real thread kept
+        return thread_id or message_id
+
     async def _upload_file(
         self,
         chat_id: str,
