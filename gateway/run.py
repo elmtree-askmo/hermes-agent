@@ -2479,6 +2479,8 @@ class GatewayRunner:
                     render_already_executed_block,
                     render_team_dispatch_executed_block,
                     render_short_circuit_transcript_text,
+                    render_progress_ledger_block,
+                    extract_submitted_apps,
                     execute_via_helper,
                     log_result as _log_turn_intent,
                 )
@@ -2754,10 +2756,68 @@ class GatewayRunner:
                         _chat, _detection.get("affect_gate"),
                         len(_gate_block),
                     )
+
+                # Progress-ledger grounding (S-0626-02) — independent of the
+                # dispatch chain. A surface_existing pull is silently skipped
+                # whenever a pending announcement is in flight (the guard's
+                # `not _pending_announce` term), which left Coach narrating
+                # progress blind (finding 5-1). Inject the real ledger here so
+                # grounding never depends on the branch running. Read failures
+                # degrade to None → render returns None → silent (no crash).
+                if _detection.get("dispatch_type") == "surface_existing" and _uid:
+                    _ledger = None
+                    try:
+                        import os as _plos
+                        from pathlib import Path as _PLPath
+                        _pl_home = _plos.environ.get("HERMES_HOME") or str(
+                            _PLPath.home() / ".hermes"
+                        )
+                        _pl_base = _PLPath(_pl_home) / "artemis" / _uid
+                        _pl_strat = _pl_base / "strategy.json"
+                        _pl_apps = _pl_base / "applications.json"
+                        _pl_top = None
+                        if _pl_strat.exists():
+                            with open(_pl_strat, encoding="utf-8") as _plf:
+                                _pl_top = (json.load(_plf) or {}).get(
+                                    "top_recommendation"
+                                )
+                        _pl_submitted = []
+                        if _pl_apps.exists():
+                            with open(_pl_apps, encoding="utf-8") as _plf:
+                                _pl_apps_data = json.load(_plf) or {}
+                            _pl_submitted = extract_submitted_apps(_pl_apps_data)
+                        _ledger = {
+                            "top_recommendation": _pl_top,
+                            "submitted": _pl_submitted,
+                        }
+                    except Exception as _pl_err:  # noqa: BLE001
+                        logger.warning(
+                            "turn-intent: chat=%s progress_ledger_read_failed: %s",
+                            _chat, _pl_err,
+                        )
+                    _ledger_block = render_progress_ledger_block(_detection, _ledger)
+                    if _ledger_block:
+                        context_prompt = context_prompt + "\n" + _ledger_block
+                        logger.info(
+                            "turn-intent: chat=%s progress_ledger_block_len=%d "
+                            "submitted_n=%d",
+                            _chat, len(_ledger_block),
+                            len((_ledger or {}).get("submitted") or []),
+                        )
         except _ArtemisDisabled:
             pass  # Non-Artemis fork deployment — feature off by design.
         except Exception as _tid_err:  # noqa: BLE001
-            logger.debug("turn-intent detector failed: %s", _tid_err)
+            # S-0626-02: this except swallowed turn-intent failures at DEBUG
+            # (off in prod), so a turn that should have surfaced grounding
+            # data but raised left NO operational trace — Coach narrated
+            # blind and got progress facts wrong (finding 5-1). Log with the
+            # stack so the failing line is diagnosable. `_chat` is assigned
+            # inside the try (:_chat = source.chat_id) so it may be unbound
+            # if the failure happened earlier — read it defensively.
+            logger.exception(
+                "turn-intent detector failed (chat=%s): %s",
+                locals().get("_chat", "unknown"), _tid_err,
+            )
 
         # S-0518-01 Type A — cold-start (pre-onboarding) prompt block.
         # While the user has not yet seen the team introduce itself

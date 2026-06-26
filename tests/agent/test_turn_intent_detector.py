@@ -1710,3 +1710,133 @@ class TestBuildArchiveIndex:
         assert tid.build_archive_index([]) == []
         assert tid.build_archive_index(None) == []
         assert tid.build_archive_index("nope") == []
+
+
+# =========================================================================
+# render_progress_ledger_block (S-0626-02 — unconditional grounding for
+# surface_existing turns, so Coach never narrates progress blind)
+# =========================================================================
+
+class TestRenderProgressLedgerBlock:
+    """On a surface_existing turn the gateway injects a server-computed
+    progress ledger (submitted apps + the strategy narrative) so Coach's
+    'what have I gotten done' answer is grounded in real data regardless of
+    whether the dispatch branch ran. Pure formatter: gateway reads the
+    ledger dict, this renders it."""
+
+    _LEDGER = {
+        "top_recommendation": "The pipeline has not stalled: Manulife and GE "
+                              "HealthCare tailors can finish this week.",
+        "submitted": [
+            {"display_name": "Jerry", "role": "Data Scientist", "status": "submitted"},
+            {"display_name": "Scale.jobs", "role": "Business Data Analyst", "status": "submitted"},
+        ],
+    }
+
+    def test_none_when_not_surface_existing(self):
+        for dt in ("none", "single", "multi"):
+            assert tid.render_progress_ledger_block(
+                {"checked": True, "dispatch_type": dt}, self._LEDGER
+            ) is None
+
+    def test_none_when_unchecked(self):
+        assert tid.render_progress_ledger_block(
+            {"checked": False, "dispatch_type": "surface_existing"}, self._LEDGER
+        ) is None
+
+    def test_renders_submitted_apps_for_surface_existing(self):
+        block = tid.render_progress_ledger_block(
+            {"checked": True, "dispatch_type": "surface_existing"}, self._LEDGER
+        )
+        assert block is not None
+        # The submitted apps — the facts 5-1 omitted — must be in the block.
+        assert "Jerry" in block
+        assert "Scale.jobs" in block
+        assert "Business Data Analyst" in block
+
+    def test_includes_strategy_narrative(self):
+        block = tid.render_progress_ledger_block(
+            {"checked": True, "dispatch_type": "surface_existing"}, self._LEDGER
+        )
+        assert "pipeline has not stalled" in block
+
+    def test_renders_with_narrative_only_when_no_submitted(self):
+        # Empty submitted list but a strategy narrative still grounds Coach.
+        block = tid.render_progress_ledger_block(
+            {"checked": True, "dispatch_type": "surface_existing"},
+            {"top_recommendation": "Two tailors in progress.", "submitted": []},
+        )
+        assert block is not None
+        assert "Two tailors in progress." in block
+
+    def test_none_when_ledger_empty(self):
+        # No grounding data at all → nothing to inject (silent, like siblings).
+        assert tid.render_progress_ledger_block(
+            {"checked": True, "dispatch_type": "surface_existing"},
+            {"top_recommendation": None, "submitted": []},
+        ) is None
+
+    def test_none_when_ledger_is_none(self):
+        # Gateway read failed → ledger None → silent (no crash).
+        assert tid.render_progress_ledger_block(
+            {"checked": True, "dispatch_type": "surface_existing"}, None
+        ) is None
+
+
+# =========================================================================
+# extract_submitted_apps (S-0626-03 — parse applications.json into the
+# ledger's `submitted` list; the real on-disk shape is
+# {"applications": [...records...], "updated_at": ...})
+# =========================================================================
+
+class TestExtractSubmittedApps:
+    """The gateway reads applications.json and needs the submitted/interviewed
+    records. The real shape wraps records under an `applications` key — a
+    naive `.values()` over the top dict yields the list + timestamp string,
+    not the records, silently producing zero submitted (the dev bug behind
+    submitted_n=0)."""
+
+    _REAL = {
+        "applications": [
+            {"company": "jerry", "display_name": "Jerry", "role": "Data Scientist",
+             "status": "rejected"},
+            {"company": "scale-jobs", "display_name": "Scale.jobs",
+             "role": "Business Data Analyst", "status": "submitted"},
+            {"company": "pwc", "display_name": "PwC", "role": "Analyst",
+             "status": "interviewed"},
+            {"company": "ge", "display_name": "GE HealthCare", "role": "DS",
+             "status": "identified"},
+        ],
+        "updated_at": "2026-06-27T00:00:00Z",
+    }
+
+    def test_real_shape_applications_key(self):
+        out = tid.extract_submitted_apps(self._REAL)
+        names = {a["display_name"] for a in out}
+        # submitted + interviewed kept; rejected / identified dropped.
+        assert names == {"Scale.jobs", "PwC"}
+
+    def test_record_fields_mapped(self):
+        out = tid.extract_submitted_apps(self._REAL)
+        scale = next(a for a in out if a["display_name"] == "Scale.jobs")
+        assert scale["role"] == "Business Data Analyst"
+        assert scale["status"] == "submitted"
+
+    def test_display_name_falls_back_to_company(self):
+        data = {"applications": [
+            {"company": "acme", "status": "submitted"},  # no display_name
+        ]}
+        out = tid.extract_submitted_apps(data)
+        assert out[0]["display_name"] == "acme"
+
+    def test_empty_or_missing(self):
+        assert tid.extract_submitted_apps({}) == []
+        assert tid.extract_submitted_apps({"applications": []}) == []
+        assert tid.extract_submitted_apps(None) == []
+        assert tid.extract_submitted_apps({"applications": "garbage"}) == []
+
+    def test_bare_list_shape_still_supported(self):
+        # Defensive: if a future/legacy file is a bare list of records.
+        data = [{"company": "x", "display_name": "X", "status": "submitted"}]
+        out = tid.extract_submitted_apps(data)
+        assert out[0]["display_name"] == "X"

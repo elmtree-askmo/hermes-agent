@@ -1149,6 +1149,97 @@ def render_short_circuit_transcript_text(
     return ""
 
 
+def extract_submitted_apps(apps_data: Any) -> list[dict[str, Any]]:
+    """Pull the submitted/interviewed records out of applications.json data
+    (S-0626-03).
+
+    The on-disk shape is ``{"applications": [ ...records... ], "updated_at": ...}``
+    — records live under the ``applications`` key, NOT as the top-level dict's
+    values. A naive ``.values()`` over the top dict yields the records *list*
+    plus the timestamp string (neither is a record dict), silently producing
+    zero submitted apps (the dev bug behind ``submitted_n=0``). A bare list is
+    also accepted defensively. Returns ``[{display_name, role, status}]`` for
+    records whose ``status`` is ``submitted`` or ``interviewed``.
+    """
+    if isinstance(apps_data, dict):
+        records = apps_data.get("applications")
+    elif isinstance(apps_data, list):
+        records = apps_data
+    else:
+        records = None
+    if not isinstance(records, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for r in records:
+        if not isinstance(r, dict):
+            continue
+        if r.get("status") in ("submitted", "interviewed"):
+            out.append({
+                "display_name": r.get("display_name") or r.get("company"),
+                "role": r.get("role"),
+                "status": r.get("status"),
+            })
+    return out
+
+
+def render_progress_ledger_block(
+    detection: dict[str, Any],
+    ledger: dict[str, Any] | None,
+) -> str | None:
+    """Render the progress-ledger grounding block for a surface_existing turn
+    (S-0626-02).
+
+    A `surface_existing` pull ("what have I gotten done?") must be grounded in
+    real progress data REGARDLESS of whether the dispatch branch ran — the
+    branch is silently skipped when a pending announcement is in flight, which
+    left Coach narrating blind (finding 5-1). This block is injected
+    independently of the dispatch chain (like `render_affect_report_block` /
+    `render_capability_block`), so the facts are always in context.
+
+    `ledger` is read gateway-side from the user's strategy.json / applications
+    ledger and passed in (this function is a pure formatter — easy to test):
+
+        {"top_recommendation": str | None,
+         "submitted": [{"display_name": str, "role": str, "status": str}, ...]}
+
+    Returns None (silent) when the turn is not a surface_existing pull, the
+    detector didn't run, or there is no grounding data at all.
+    """
+    if not detection.get("checked"):
+        return None
+    if detection.get("dispatch_type") != "surface_existing":
+        return None
+    if not ledger:
+        return None
+
+    submitted = ledger.get("submitted") or []
+    narrative = (ledger.get("top_recommendation") or "").strip()
+    if not submitted and not narrative:
+        return None
+
+    lines = [
+        "",
+        "**Progress on record for this turn** (server-computed from the "
+        "user's real applications/strategy ledger — the user is asking what "
+        "they've gotten done; ground your answer in THESE facts, do not "
+        "describe the team as 'still scanning' if apps are already out):",
+    ]
+    for app in submitted:
+        if not isinstance(app, dict):
+            continue
+        _name = (app.get("display_name") or app.get("company") or "").strip()
+        _role = (app.get("role") or "").strip()
+        _status = (app.get("status") or "").strip()
+        if not _name:
+            continue
+        _role_part = f" — {_role}" if _role else ""
+        _status_part = f" ({_status})" if _status else ""
+        lines.append(f"  - {_name}{_role_part}{_status_part}")
+    if narrative:
+        lines.append(f"  - Strategy note: {narrative}")
+    return "\n".join(lines)
+
+
 def execute_via_helper(
     user_id: str,
     detection: dict[str, Any],
