@@ -420,44 +420,6 @@ def _voice_scan_check(text: str, job_id: str = "?") -> tuple[bool, str]:
     return True, ""
 
 
-# ---------------------------------------------------------------------------
-# B-0510-01 Phase 6 — two-step briefing: decide + write
-# ---------------------------------------------------------------------------
-#
-# Root cause of all A/A'/A''/B failures: Coach's reasoning and its deliverable
-# share the same token stream. Two-step call makes the leak structurally
-# impossible: decide call outputs JSON only (reasoning stays in fields), write
-# call receives only the JSON package and has nothing to reason about.
-
-_BRIEFING_DECIDE_PROMPT = """You receive the raw output of a Coach LLM that wrote a daily career briefing.
-The raw output may contain reasoning leaks, planning narration, or third-person references.
-Your job: extract the SIGNAL — ignore all reasoning, extract only the user-facing content.
-
-Return a JSON object with EXACTLY these fields:
-{{
-  "briefing_type": "quiet_day" | "content",
-  "opener": "<one short greeting line — team-summary OR situational, or null>",
-  "follow_ups": ["<item>", ...],
-  "coaches_take": "<first-person judgment + a forward A/B choice, second-person-addressed, no reasoning>",
-  "emotional_checkin": "<a brief 'how are you feeling'-style line ONLY at an emotional inflection (post-interview, post-rejection, a motivation dip, or a clear win); else null>",
-  "observation": "<if the Coach proactively named a recurring CROSS-SESSION pattern the user did NOT raise this turn, copy that WHOLE beat VERBATIM — the across-our-conversations framing + the substance/affect + its correction invitation; else null>",
-  "tone_signal": "low_pressure" | "neutral" | "urgent"
-}}
-
-Rules:
-- briefing_type: "quiet_day" if nothing actionable today; "content" if follow_ups or new roles present.
-- opener: ONE short, natural greeting line — vary it by the day's content. It can be a TEAM-SUMMARY greeting ("Morning. Your team ran 3 things overnight." / "Morning. Analyst finished something interesting overnight.") OR a SITUATIONAL opener when that fits the day better ("Coming back to Warby Parker — you said you'd look Tuesday, then passed again." / "Something I've been noticing across our conversations."). Do NOT state an exact count unless clearly correct (the server adds a count-based fallback if you omit this). null on a quiet day with no team work.
-- follow_ups: list of concrete actionable items from the briefing. Empty list [] if none. (Used only by the silence check-in path; the normal briefing does not render a follow-ups block.)
-- coaches_take: this is the take beat. Distil the core JUDGMENT to 1-3 sentences AND end with a forward A/B choice — two concrete next actions the user can pick between. Lead with a point of view (lean a direction), don't just summarize. (The server may turn one of the two choices into a "walk you through it" review option when fresh materials exist — you don't decide that; just give a sound judgment + two reasonable next steps.) MUST be first-person Coach voice ("I'll...", "My read is...", "You've done..."). NEVER include any person's name (first or last). No third-person pronouns (she/he/they) referring to the user. Replace any name with "they" or rephrase to second-person ("you"). Do NOT put the proactive cross-session observation here — that goes in `observation`, intact.
-- emotional_checkin: set this ONLY when the day is an emotional inflection point — right after an interview/phone screen, after a rejection, during a visible motivation dip or comparison spiral, or on a clear win. A short, warm line that makes space for how they feel (e.g. "How are you feeling about it?"). On a routine task-focused day, leave it null — do NOT force a feelings check-in every day.
-- observation: if the raw output proactively surfaces a recurring CROSS-SESSION pattern (the Coach naming something the user did NOT raise this turn — e.g. "one thing I've noticed across our conversations…", a recurring emotional theme, a pattern in how the user talks about their work), copy that WHOLE beat VERBATIM into this field: the across-sessions framing, the substance/affect, AND its correction invitation ("tell me if I'm wrong" / "push back" / "flip it back"). null if absent. Do NOT distil, paraphrase, soften, or fold it into coaches_take — it is a Coach-initiated observation; its exact framing + correction handle must reach the user intact.
-- tone_signal: emotional register the Coach intended.
-
-Do NOT output any reasoning. Your entire response must be valid JSON and nothing else.
-
-RAW OUTPUT:
-{text}"""
-
 _BRIEFING_WRITE_PROMPT = """You are a name-stripping repair pass for a career-coaching briefing.
 You receive a `take` (the Coach's message body) and an `opener` (a greeting line, may be null).
 
@@ -505,78 +467,6 @@ def _parse_step0_output(text: str, job_id: str = "?") -> dict | None:
         return None
     pkg.setdefault("opener", None)
     pkg.setdefault("response_window_checkin", None)
-    return pkg
-
-
-def _briefing_decide_call(text: str, job_id: str = "?") -> dict | None:
-    """Phase 6 — Step 1: distil raw Coach output into a structured decision package.
-
-    Returns a dict with keys: briefing_type, opener, follow_ups, coaches_take,
-    emotional_checkin, observation, tone_signal. Returns None on any failure
-    (caller falls back to Phase 5 path).
-    """
-    api_key = os.getenv("OPENROUTER_API_KEY")
-    if not api_key:
-        return None
-
-    model = os.getenv("BRIEFING_DECIDE_MODEL", "google/gemini-3-flash-preview")
-    prompt = _BRIEFING_DECIDE_PROMPT.format(text=text)
-
-    import urllib.request
-    import urllib.error
-
-    body = json.dumps({
-        "model": model,
-        "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0,
-        "max_tokens": 600,
-        "response_format": {"type": "json_object"},
-    }).encode("utf-8")
-    req = urllib.request.Request(
-        "https://openrouter.ai/api/v1/chat/completions",
-        data=body,
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-            "HTTP-Referer": "https://github.com/elmtree-askmo/artemis",
-            "X-Title": "Artemis briefing-decide",
-        },
-    )
-
-    try:
-        with urllib.request.urlopen(req, timeout=20) as resp:
-            payload = json.loads(resp.read().decode("utf-8"))
-    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError) as exc:
-        logger.warning("Job '%s': briefing_decide_call HTTP/parse error — %s", job_id, exc)
-        return None
-
-    try:
-        content = payload["choices"][0]["message"]["content"]
-        if content is None:
-            raise ValueError("content is None")
-    except (KeyError, IndexError, TypeError, ValueError) as exc:
-        logger.warning("Job '%s': briefing_decide_call no content — %s", job_id, exc)
-        return None
-
-    raw = content.strip()
-    if raw.startswith("```"):
-        raw = raw.strip("`").lstrip("json").strip()
-    try:
-        pkg = json.loads(raw)
-    except json.JSONDecodeError:
-        logger.warning("Job '%s': briefing_decide_call non-JSON — %s", job_id, raw[:200])
-        return None
-
-    required = {"briefing_type", "follow_ups", "coaches_take", "tone_signal"}
-    if not required.issubset(pkg.keys()):
-        logger.warning("Job '%s': briefing_decide_call missing keys — got %s", job_id, list(pkg.keys()))
-        return None
-
-    # Sub-agent attribution is rendered server-side (_inject_attribution_block),
-    # not by the LLM. Drop any stray team_work the decide LLM may still emit so
-    # it can never reach the write call and produce a duplicate attribution block.
-    pkg.pop("team_work", None)
-
     return pkg
 
 

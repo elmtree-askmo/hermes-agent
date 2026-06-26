@@ -14,7 +14,7 @@ import pytest
 from cron.scheduler import (
     _briefing_silence_directive,
     _build_job_prompt,
-    _run_two_step_briefing,
+    _run_briefing_render,
 )
 
 pytestmark = pytest.mark.xdist_group("cron_scheduler")
@@ -90,42 +90,33 @@ class TestSilenceDirective:
             assert _briefing_silence_directive(_briefing_job()) == ""
 
 
-class TestTwoStepSilenceTier:
-    """Phase 2: the tier flows into the decide package deterministically (code
-    sets it), so the write call can branch copy — not inferred from raw output."""
+class TestSilenceTierRender:
+    """S-0626-02 Plan B: the deterministic silence tier is injected onto the
+    package inside _run_briefing_render. The package is now internal, so we
+    assert the observable behavior — the silence path renders a body without
+    crashing — rather than reaching into the (now private) package."""
 
     _PKG = {
-        "briefing_type": "quiet_day",
-        "follow_ups": [],
-        "coaches_take": "x",
-        "tone_signal": "low_pressure",
-        "team_work": {},
+        "coaches_take": "Day 1 of the wait — patience is the strategy.",
+        "opener": None,
+        "response_window_checkin": None,
     }
 
-    def test_silence_tier_injected_into_write_package(self):
-        captured = {}
+    def test_silence_tier_renders_body(self):
+        with patch("cron.scheduler._parse_step0_output", return_value=dict(self._PKG)), \
+             patch("cron.scheduler._briefing_write_call",
+                   side_effect=lambda take, opener, job_id="?": (take, opener)):
+            out = _run_briefing_render("<json>", "j", silence_tier="day5")
+        assert out is not None
+        assert "patience is the strategy" in out
 
-        def fake_write(pkg, job_id="?"):
-            captured["pkg"] = pkg
-            return "rendered"
-
-        with patch("cron.scheduler._briefing_decide_call", return_value=dict(self._PKG)), \
-             patch("cron.scheduler._briefing_write_call", side_effect=fake_write):
-            out = _run_two_step_briefing("raw", "j", silence_tier="day5")
-        assert out == "rendered"
-        assert captured["pkg"].get("silence_tier") == "day5"
-
-    def test_no_silence_tier_leaves_package_clean(self):
-        captured = {}
-
-        def fake_write(pkg, job_id="?"):
-            captured["pkg"] = pkg
-            return "rendered"
-
-        with patch("cron.scheduler._briefing_decide_call", return_value=dict(self._PKG)), \
-             patch("cron.scheduler._briefing_write_call", side_effect=fake_write):
-            _run_two_step_briefing("raw", "j")
-        assert "silence_tier" not in captured["pkg"]
+    def test_no_silence_tier_renders_body(self):
+        with patch("cron.scheduler._parse_step0_output", return_value=dict(self._PKG)), \
+             patch("cron.scheduler._briefing_write_call",
+                   side_effect=lambda take, opener, job_id="?": (take, opener)):
+            out = _run_briefing_render("<json>", "j")
+        assert out is not None
+        assert "patience is the strategy" in out
 
 
 class TestBuildJobPromptInjection:
@@ -140,18 +131,19 @@ class TestBuildJobPromptInjection:
         out = _build_job_prompt({"prompt": "some other cron job"})
         assert "SILENCE_AWARENESS" not in out
 
-    def test_silent_directive_follows_footer(self, tmp_path):
-        """When a new user (footer window) is also silent, [SILENT] wins by
-        coming last."""
+    def test_silent_directive_present_for_new_user(self, tmp_path):
+        """S-0626-02: the onboarding pause-reminder footer moved server-side
+        (step-0 emits JSON, so a footer line in the prompt would break
+        json.loads) — it's no longer a prompt directive. The silence-tier
+        [SILENT] directive is still appended to the built prompt."""
         gh, sr = _patch_script(tmp_path, {"tier": "day8", "speak": False, "reason": "x"})
         job = _briefing_job()
-        job["repeat"] = {"completed": 0}  # inside FOOTER_REQUIRED window
+        job["repeat"] = {"completed": 0}  # would have been inside the old footer window
         with gh, sr, patch("tools.skills_tool.skill_view",
                            return_value=json.dumps({"success": True, "content": "briefing skill"})):
             out = _build_job_prompt(job)
-        assert "FOOTER_REQUIRED" in out
-        assert "do not send a briefing today" in out  # the silent-gap directive
-        # silence directive comes after the footer so its [SILENT] instruction
-        # dominates. (Anchor on SILENCE_AWARENESS — the cron hint also mentions
-        # [SILENT] near the top of the prompt.)
-        assert out.index("FOOTER_REQUIRED") < out.index("SILENCE_AWARENESS")
+        # The footer is no longer injected into the prompt.
+        assert "FOOTER_REQUIRED" not in out
+        # The silent-gap silence directive still rides the trailing-directives path.
+        assert "SILENCE_AWARENESS" in out
+        assert "do not send a briefing today" in out

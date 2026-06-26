@@ -1182,58 +1182,89 @@ class TestBuildJobPromptPerUserSkillFallback:
 
 
 class TestBuildJobPromptArtemisFooter:
-    """Verify FOOTER_REQUIRED injection for the artemis-briefing skill."""
+    """S-0626-02 Plan B: the onboarding pause-reminder footer moved out of the
+    prompt (a FOOTER_REQUIRED directive in _build_job_prompt) and into the
+    server-side delivery path — step-0 now emits JSON, so a footer line after
+    the JSON object would break json.loads. These tests drive tick() and assert
+    the footer is appended to the DELIVERED content for the first 3 briefing
+    runs only, and never for non-briefing jobs."""
 
-    _FOOTER_LINE = (
-        'FOOTER_REQUIRED: append _(daily briefing — say "pause" anytime to stop)_'
+    _FOOTER_LINE = '_(daily briefing — say "pause" anytime to stop)_'
+
+    _BODY = (
+        "Day 1 of the wait — patience is the strategy. The drafts are ready and "
+        "I'll keep monitoring. Want me to nudge, or hold?"
     )
 
-    def _briefing_skill_view(self, name: str) -> str:
-        return json.dumps({"success": True, "content": "Briefing skill body."})
+    def _drive_delivery(self, job):
+        """Run tick() with a briefing job, capturing the delivered content.
+
+        _run_briefing_render is stubbed to pass the body through unchanged, the
+        voice-scan + quality gate pass, and silence stays engaged (no tier) so
+        the server-side footer block is the only thing that can alter the body.
+        """
+        captured = {}
+
+        def _fake_deliver(j, content, adapters=None, loop=None):
+            captured["content"] = content
+            return None
+
+        with patch("cron.scheduler.get_due_jobs", return_value=[job]), \
+             patch("cron.scheduler.advance_next_run"), \
+             patch("cron.scheduler.save_job_output", return_value="/tmp/x"), \
+             patch("cron.scheduler.mark_job_run"), \
+             patch("cron.scheduler.run_job", return_value=(True, "doc", self._BODY, None)), \
+             patch("cron.scheduler._briefing_silence", return_value=("engaged", True)), \
+             patch("cron.scheduler._run_briefing_render", side_effect=lambda content, *a, **k: content), \
+             patch("cron.scheduler._validate_output_quality", return_value=(True, "")), \
+             patch("cron.scheduler._voice_scan_check", return_value=(True, "")), \
+             patch("cron.scheduler._inject_attribution_block", side_effect=lambda c, *a, **k: c), \
+             patch("cron.scheduler._render_team_attribution_for_briefing", return_value=""), \
+             patch("cron.scheduler._render_milestone_block", return_value=""), \
+             patch("cron.scheduler._deliver_result", side_effect=_fake_deliver):
+            from cron.scheduler import tick
+            tick(verbose=False)
+        return captured.get("content")
+
+    def _briefing_job(self, completed=None):
+        job = {
+            "id": "JFOOT",
+            "name": "daily-briefing",
+            "skills": ["artemis-briefing"],
+            "prompt": "Run briefing",
+            "origin": {"platform": "slack", "chat_id": "D1", "user_id": "Ufoot"},
+        }
+        if completed is not None:
+            job["repeat"] = {"times": None, "completed": completed}
+        return job
 
     def test_footer_injected_for_first_briefing_run(self):
-        with patch("tools.skills_tool.skill_view", side_effect=self._briefing_skill_view):
-            result = _build_job_prompt({
-                "skills": ["artemis-briefing"],
-                "prompt": "Run briefing",
-                "repeat": {"times": None, "completed": 0},
-            })
+        result = self._drive_delivery(self._briefing_job(completed=0))
         assert self._FOOTER_LINE in result
 
     def test_footer_injected_at_third_run(self):
-        with patch("tools.skills_tool.skill_view", side_effect=self._briefing_skill_view):
-            result = _build_job_prompt({
-                "skills": ["artemis-briefing"],
-                "prompt": "Run briefing",
-                "repeat": {"times": None, "completed": 2},
-            })
+        result = self._drive_delivery(self._briefing_job(completed=2))
         assert self._FOOTER_LINE in result
 
     def test_footer_dropped_from_fourth_run_onward(self):
-        with patch("tools.skills_tool.skill_view", side_effect=self._briefing_skill_view):
-            result = _build_job_prompt({
-                "skills": ["artemis-briefing"],
-                "prompt": "Run briefing",
-                "repeat": {"times": None, "completed": 3},
-            })
-        assert "FOOTER_REQUIRED" not in result
+        result = self._drive_delivery(self._briefing_job(completed=3))
+        assert self._FOOTER_LINE not in result
 
     def test_footer_skipped_for_non_briefing_skill(self):
-        with patch("tools.skills_tool.skill_view", side_effect=self._briefing_skill_view):
-            result = _build_job_prompt({
-                "skills": ["some-other-skill"],
-                "prompt": "Run something else",
-                "repeat": {"times": None, "completed": 0},
-            })
-        assert "FOOTER_REQUIRED" not in result
+        job = {
+            "id": "JOTHER",
+            "name": "monitor",
+            "skills": ["some-other-skill"],
+            "prompt": "Run something else",
+            "origin": {"platform": "slack", "chat_id": "D1", "user_id": "Ufoot"},
+            "repeat": {"times": None, "completed": 0},
+        }
+        result = self._drive_delivery(job)
+        assert self._FOOTER_LINE not in result
 
     def test_footer_injected_when_repeat_missing(self):
         """Jobs without a repeat block default to completed=0 and still get the footer if briefing."""
-        with patch("tools.skills_tool.skill_view", side_effect=self._briefing_skill_view):
-            result = _build_job_prompt({
-                "skills": ["artemis-briefing"],
-                "prompt": "Run briefing",
-            })
+        result = self._drive_delivery(self._briefing_job(completed=None))
         assert self._FOOTER_LINE in result
 
 

@@ -234,7 +234,7 @@ def _run_tick_capturing(predicate_value):
                return_value=(True, "doc", _RESUME_SOLICIT_BRIEFING, None)), \
          patch("cron.scheduler._quiet_day_resume_short_circuit",
                return_value=predicate_value), \
-         patch("cron.scheduler._run_two_step_briefing", side_effect=_fake_two_step), \
+         patch("cron.scheduler._run_briefing_render", side_effect=_fake_two_step), \
          patch("cron.scheduler._voice_scan_check", return_value=(True, "")), \
          patch("cron.scheduler._deliver_result", side_effect=_fake_deliver):
         from cron.scheduler import tick
@@ -256,4 +256,8 @@ def test_tick_keeps_llm_path_when_predicate_false():
     delivered, two_step_n = _run_tick_capturing(predicate_value=False)
     # predicate False → normal path: two-step runs, original content flows
     assert two_step_n == 1
-    assert delivered == _RESUME_SOLICIT_BRIEFING
+    # The render output flows through unchanged; the server-side onboarding
+    # footer (S-0626-02) is appended below it on the first 3 runs (this job has
+    # no repeat block → completed=0). Assert the body survived rather than exact
+    # equality — the footer is covered by TestBuildJobPromptArtemisFooter.
+    assert delivered.startswith(_RESUME_SOLICIT_BRIEFING)
