@@ -484,6 +484,33 @@ DECISION PACKAGE:
 {package}"""
 
 
+def _parse_step0_output(text: str, job_id: str = "?") -> dict | None:
+    """Parse step-0's structured JSON output (S-0626-02 Plan B).
+
+    step-0 (the artemis-briefing agent session) emits a single JSON object
+    {coaches_take, opener, response_window_checkin} directly — no decide LLM.
+    Returns the dict (with opener / response_window_checkin defaulted to None
+    when absent), or None on any parse failure so the caller falls back to the
+    Phase-5 voice-scan path on the raw output.
+    """
+    raw = (text or "").strip()
+    if not raw:
+        return None
+    if raw.startswith("```"):
+        raw = raw.strip("`").lstrip("json").strip()
+    try:
+        pkg = json.loads(raw)
+    except json.JSONDecodeError:
+        logger.info("Job '%s': step-0 output not JSON — Phase 5 fallback", job_id)
+        return None
+    if not isinstance(pkg, dict) or not pkg.get("coaches_take"):
+        logger.info("Job '%s': step-0 JSON missing coaches_take — Phase 5 fallback", job_id)
+        return None
+    pkg.setdefault("opener", None)
+    pkg.setdefault("response_window_checkin", None)
+    return pkg
+
+
 def _briefing_decide_call(text: str, job_id: str = "?") -> dict | None:
     """Phase 6 — Step 1: distil raw Coach output into a structured decision package.
 
@@ -636,7 +663,7 @@ def _run_two_step_briefing(
     archive (deterministic walkthrough A/B signal — same source as attribution,
     not decide-inferred from raw text).
     """
-    pkg = _briefing_decide_call(raw_output, job_id)
+    pkg = _parse_step0_output(raw_output, job_id)
     if pkg is None:
         logger.info("Job '%s': two-step decide failed — falling back to Phase 5 path", job_id)
         return None
