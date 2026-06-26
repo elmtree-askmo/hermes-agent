@@ -728,7 +728,7 @@ _SUB_AGENT_ATTRIBUTION_ORDER = ("scout", "analyst", "publicist")
 _MILESTONE_DAY_MARKS = ((90, "90d"), (60, "60d"), (30, "30d"))
 
 
-def _render_team_attribution_for_briefing(user_id: str) -> str:
+def _render_team_attribution_for_briefing(user_id: str, silence_tier: str | None = None) -> str:
     """Render the briefing attribution paragraph from artemis strategy.json.
 
     Reads ~/.hermes/artemis/<user_id>/strategy.json, picks completed
@@ -736,9 +736,17 @@ def _render_team_attribution_for_briefing(user_id: str) -> str:
     and renders one line per sub-agent in canonical Scout → Analyst →
     Publicist order. Returns "" when no qualifying items exist.
 
+    S-0626-02: on a silence check-in tier (day1/day5/day8), returns "" regardless
+    of qualifying archive entries — silence-awareness.md (S-0525-02) prescribes
+    "No content push, no roles sections, no attribution lines". engaged / None
+    render normally. The gate lives here (the deterministic render layer), not
+    only in the LLM write-prompt branch, so the suppression can't be bypassed.
+
     Self-swallowing — any read / parse failure returns "" (briefing still
     delivers without the attribution paragraph rather than failing the job).
     """
+    if silence_tier not in (None, "engaged"):
+        return ""
     try:
         hermes_home_dyn = get_hermes_home()
         strategy_path = hermes_home_dyn / "artemis" / user_id / "strategy.json"
@@ -979,7 +987,7 @@ def _build_job_card_blocks(jobs: list) -> list:
     return blocks
 
 
-def _render_job_cards_for_briefing(user_id: str) -> list | None:
+def _render_job_cards_for_briefing(user_id: str, silence_tier: str | None = None) -> list | None:
     """Read TODAY's job-match artifact and render Block Kit cards.
 
     job-match is a per-day overwrite artifact (`job-match-<date>.json`): each
@@ -988,7 +996,13 @@ def _render_job_cards_for_briefing(user_id: str) -> list | None:
     most recent scan that day; if it doesn't (user paused / scan not run), the
     briefing simply has no card. Reading today's date (not a rolling window)
     means a stale prior-day artifact is never surfaced. Self-swallowing — any
-    read/parse failure returns None so the briefing text still delivers."""
+    read/parse failure returns None so the briefing text still delivers.
+
+    S-0626-02: on a silence check-in tier (day1/day5/day8), returns None
+    regardless of a valid artifact — a quiet-day check-in pushes no job cards
+    (silence-awareness.md "No content push"). engaged / None render normally."""
+    if silence_tier not in (None, "engaged"):
+        return None
     try:
         today = datetime.now(timezone.utc).strftime("%Y%m%d")
         artifact_path = (
@@ -2344,18 +2358,23 @@ def tick(verbose: bool = True, adapters=None, loop=None) -> int:
                             job["id"], _rg_uid,
                         )
 
+                # S-0525-02 Domain 6 / S-0626-02 — compute the effective silence
+                # tier ONCE for the whole delivery section. Both the two-step write
+                # call AND the deterministic render layer (attribution / job-cards)
+                # gate on it: a non-engaged speak-day check-in pushes no content.
+                # speak=False days emit [SILENT] at the raw stage (delivery already
+                # suppressed), so only engaged/day1/day5/day8 speak-days reach here.
+                _silence_tier = None
+                if should_deliver and success and _is_briefing_job(job):
+                    _s_tier, _s_speak = _briefing_silence(job)
+                    _silence_tier = _s_tier if (_s_tier not in (None, "engaged") and _s_speak) else None
+
                 # B-0510-01 Phase 6 — two-step briefing (decide + write).
                 # Unconditional for all briefing jobs. On any failure,
                 # _run_two_step_briefing returns None and deliver_content
                 # flows through Phase 5 voice-scan unchanged.
                 _briefing_opener_llm = None  # decide LLM's opener, captured below
                 if should_deliver and success and _is_briefing_job(job) and not _resume_guard_fired:
-                    # S-0525-02 Domain 6: pass the silence tier so the write call
-                    # branches into a graduated check-in. speak=False days emit
-                    # [SILENT] at the raw stage (delivery already suppressed), so
-                    # only engaged/day1/day5/day8 speak-days reach here.
-                    _s_tier, _s_speak = _briefing_silence(job)
-                    _silence_tier = _s_tier if (_s_tier not in (None, "engaged") and _s_speak) else None
                     _two_step_uid = (_resolve_origin(job) or {}).get("user_id")
                     _two_step_capture: dict = {}
                     two_step_result = _run_two_step_briefing(
@@ -2395,7 +2414,7 @@ def tick(verbose: bool = True, adapters=None, loop=None) -> int:
                     origin = _resolve_origin(job)
                     user_id_for_attr = (origin or {}).get("user_id")
                     if user_id_for_attr:
-                        attribution = _render_team_attribution_for_briefing(user_id_for_attr)
+                        attribution = _render_team_attribution_for_briefing(user_id_for_attr, silence_tier=_silence_tier)
                         if attribution:
                             deliver_content = _inject_attribution_block(deliver_content, attribution)
                             logger.info(
@@ -2441,7 +2460,7 @@ def tick(verbose: bool = True, adapters=None, loop=None) -> int:
                     _persist_briefing_output(job, deliver_content)
                     _origin = _resolve_origin(job)
                     _card_uid = (_origin or {}).get("user_id")
-                    _cards = _render_job_cards_for_briefing(_card_uid) if _card_uid else None
+                    _cards = _render_job_cards_for_briefing(_card_uid, silence_tier=_silence_tier) if _card_uid else None
                     if _cards:
                         _deliver_job_cards(job, _cards, loop=loop)
 
