@@ -458,30 +458,27 @@ Do NOT output any reasoning. Your entire response must be valid JSON and nothing
 RAW OUTPUT:
 {text}"""
 
-_BRIEFING_WRITE_PROMPT = """You are rendering a structured career briefing for delivery to a user via Slack.
-You have a decision package below. Render it as a concise Slack message.
+_BRIEFING_WRITE_PROMPT = """You are a name-stripping repair pass for a career-coaching briefing.
+You receive a `take` (the Coach's message body) and an `opener` (a greeting line, may be null).
 
-Rules:
-- Address the user in second person ("you", "your") ONLY. NEVER include any person's name (first or last) anywhere in the output. Never use she/he/they for the user. If a name appears in a follow-up item (e.g. "Amy's check-in"), replace with "their" or rephrase without the name.
-- Begin directly with the briefing content. No "Here is your briefing" preamble.
-- Do NOT render the opener/greeting line OR any sub-agent attribution lines (e.g. "Morning, your team...", "🔍 Scout ...", "✍️ Publicist ..."). The opener and attribution are added separately by the system — never write them yourself.
-- Do NOT render a Follow-ups block, a Pending block, or any dated to-do list. The whole briefing body is just the take below.
-- For quiet_day: one short paragraph in the same first-person take voice.
-- For content: render the coaches_take, lightly polished, preserving its judgment and its closing A/B choice.
-- The take: lead with a point of view (a direction you lean). Put the judgment in the first paragraph, then put the two-choice closer (offering the user two concrete next actions to pick between) in ITS OWN separate paragraph after a blank line. No lists.
-- WALKTHROUGH OPTION: if the package has "fresh_materials": true, the team just drafted reviewable material this cycle — make ONE of the two closer choices a "want me to walk you through it/the key changes first?" review option (the other stays a forward action). If fresh_materials is absent/false, use two forward-action choices and do NOT offer a walkthrough (there's nothing freshly drafted to review).
-- The "\U0001f4ac *My take:*" label is OPTIONAL, not required — use it on routine task-focused briefings where it aids scannability; you may omit it on conversational or strategic days where it reads more naturally as the Coach simply speaking. Either way the judgment + A/B closer must be present.
-- emotional_checkin: if non-null, render it as a short, warm beat (its own line) acknowledging the moment and making space for how they feel — placed naturally near the take. null → omit entirely (do not invent a feelings check-in).
-- observation: if non-null, render it as its OWN beat (its own short paragraph), VERBATIM — preserve the across-our-conversations framing, the substance/affect, and the correction invitation exactly. Do NOT paraphrase, shorten, soften, or merge it into the rest of the take. REQUIRED whenever present (it is a Coach-initiated observation and the user must get its exact framing + the handle to push back).
-- SILENCE CHECK-IN: if the package contains a "silence_tier" field, the user has gone quiet for days and this is a low-key re-engagement message, NOT a normal briefing. Override the format above entirely — plain text only, no code block, no roles sections, no attribution lines, no "My take:" label:
-  - "day1": one brief, warm line noting it's been quiet, plus at most ONE fresh lead drawn from follow_ups if present. 1-2 sentences total. Low-key, not a full briefing.
-  - "day5": 1-2 empathetic, no-agenda sentences checking in, and offer an explicit option to pause the daily updates. Do not list any follow-ups or roles.
-  - "day8": a single warm, lowest-bar re-entry line — invite them back with no pressure and the smallest possible action (a one-tap reply). No content, no agenda, nothing to do.
-  Address the user in second person, no names (the name rule above still holds). Phrase it naturally in your own words — do NOT output a fixed templated sentence.
-- No reasoning. No planning narration. Output the message and nothing else.
+Your ONLY job: return the same content with EVERY person's name removed — both the user's own name
+and any third-party person's name (contacts, recruiters, friends, family). For each removed name,
+replace the reference with "they"/"their" or rephrase to second person ("you"/"your"), or drop the
+referent entirely when a company/role/place in the same sentence already makes the meaning clear.
 
-DECISION PACKAGE:
-{package}"""
+Hard rules:
+- KEEP company, role, product, and place names EXACTLY as they are — those are not person names.
+- PRESERVE the meaning, the warmth, and any A/B closing choice EXACTLY. Do not shorten, re-order,
+  re-structure, summarize, add content, or re-render anything beyond removing person names.
+- Address the user in second person only; never she/he/they for the user.
+- No preamble, no labels, no reasoning. Output only the JSON object.
+
+Return a JSON object with exactly these keys:
+{{"take": "<the take with all person names removed>", "opener": "<the opener with names removed, or null if the input opener was null>"}}
+
+INPUT:
+take: {take}
+opener: {opener}"""
 
 
 def _parse_step0_output(text: str, job_id: str = "?") -> dict | None:
@@ -583,19 +580,28 @@ def _briefing_decide_call(text: str, job_id: str = "?") -> dict | None:
     return pkg
 
 
-def _briefing_write_call(decision_pkg: dict, job_id: str = "?") -> str | None:
-    """Phase 6 — Step 2: render decision package into final Slack message.
+def _briefing_write_call(
+    take: str, opener: str | None, job_id: str = "?",
+) -> tuple[str | None, str | None]:
+    """S-0626-02 Plan B — name-strip repair pass over step-0's take + opener.
 
-    The write call sees ONLY the structured package — no raw strategy/profile/mem0.
-    Returns the rendered text string, or None on any failure (caller falls back to
-    Phase 5 voice-scan on the original output).
+    Its ONLY job is to remove third-party + user person names while preserving
+    the take's meaning, warmth, and A/B closer exactly (the gate showed qwen
+    scrubs names reliably as a narrow task even though it leaks them while
+    authoring). Returns (clean_take, clean_opener), or (None, None) on any
+    failure so the caller falls back to the raw step-0 fields.
+
+    Runs on qwen by default (gate: 9/9 leak-free as a repair pass vs gemini 3/9).
     """
     api_key = os.getenv("OPENROUTER_API_KEY")
     if not api_key:
-        return None
+        return None, None
 
-    model = os.getenv("BRIEFING_WRITE_MODEL", "google/gemini-3-flash-preview")
-    prompt = _BRIEFING_WRITE_PROMPT.format(package=json.dumps(decision_pkg, ensure_ascii=False))
+    model = os.getenv("BRIEFING_WRITE_MODEL", "qwen/qwen3.7-plus")
+    prompt = _BRIEFING_WRITE_PROMPT.format(
+        take=json.dumps(take or "", ensure_ascii=False),
+        opener=json.dumps(opener, ensure_ascii=False),
+    )
 
     import urllib.request
     import urllib.error
@@ -605,6 +611,7 @@ def _briefing_write_call(decision_pkg: dict, job_id: str = "?") -> str | None:
         "messages": [{"role": "user", "content": prompt}],
         "temperature": 0,
         "max_tokens": 800,
+        "response_format": {"type": "json_object"},
     }).encode("utf-8")
     req = urllib.request.Request(
         "https://openrouter.ai/api/v1/chat/completions",
@@ -622,71 +629,102 @@ def _briefing_write_call(decision_pkg: dict, job_id: str = "?") -> str | None:
             payload = json.loads(resp.read().decode("utf-8"))
     except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError) as exc:
         logger.warning("Job '%s': briefing_write_call HTTP/parse error — %s", job_id, exc)
-        return None
+        return None, None
 
     try:
         content = payload["choices"][0]["message"]["content"]
         if content is None:
             raise ValueError("content is None")
-        text = content.strip()
-        if not text:
-            raise ValueError("empty content")
-        return text
-    except (KeyError, IndexError, TypeError, ValueError) as exc:
-        logger.warning("Job '%s': briefing_write_call no content — %s", job_id, exc)
-        return None
+        raw = content.strip()
+        if raw.startswith("```"):
+            raw = raw.strip("`").lstrip("json").strip()
+        obj = json.loads(raw)
+        clean_take = (obj.get("take") or "").strip()
+        if not clean_take:
+            raise ValueError("empty take")
+        clean_opener = obj.get("opener")
+        if clean_opener is not None:
+            clean_opener = str(clean_opener).strip() or None
+        return clean_take, clean_opener
+    except (KeyError, IndexError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        logger.warning("Job '%s': briefing_write_call bad repair output — %s", job_id, exc)
+        return None, None
 
 
+def _assemble_briefing_body(clean_take: str, checkin: str | None) -> str:
+    """Assemble the briefing body: name-stripped take, then the verbatim
+    response-window check-in as its own beat below it (S-0626-02 Plan B).
 
-def _run_two_step_briefing(
+    The check-in is appended deterministically — it never passes through the
+    LLM — so its server-computed wording reaches the user byte-exact (fixes
+    Finding 4-3). opener / attribution / job-cards / milestone are prepended
+    by the deterministic render layer downstream.
+    """
+    parts = [(clean_take or "").strip()]
+    c = (checkin or "").strip()
+    if c:
+        parts.append(c)
+    return "\n\n".join(p for p in parts if p)
+
+
+def _run_briefing_render(
     raw_output: str, job_id: str = "?", silence_tier: str | None = None,
     capture: dict | None = None, user_id: str | None = None,
 ) -> str | None:
-    """Phase 6 orchestrator — decide then write.
+    """S-0626-02 Plan B — parse step-0 JSON, name-strip-repair, assemble body.
 
-    Returns the write-rendered text on success, or None if either call fails
-    (caller falls back to Phase 5 voice-scan on the original raw output).
+    Flow: parse step-0's {coaches_take, opener, response_window_checkin} →
+    name-strip the take + opener via the write-repair LLM → assemble the body
+    (repaired take, with the verbatim response-window check-in appended below).
+    Returns the assembled body, or None on parse/empty failure (caller falls
+    back to the Phase-5 voice-scan path on the raw output). Never raises.
 
-    Never raises — all exceptions are caught inside the called functions.
+    `silence_tier` (day1/day5/day8) is the deterministic tier computed by code;
+    the hard job-card/attribution suppression is enforced in the render layer
+    (Phase 1), so the tier is kept on the package for any downstream use but the
+    step-0 prompt already shaped the silence voice into coaches_take.
 
-    S-0525-02 Domain 6: `silence_tier` (day1/day5/day8), when set, is injected
-    into the decide package deterministically so the write call branches the
-    briefing into a graduated silence check-in — the tier is computed by code,
-    never inferred by the decide LLM from raw output.
+    `capture["opener"]` is populated with the name-stripped opener, which the
+    scheduler prepends above the attribution block (server controls ordering +
+    supplies a count-based fallback).
 
-    `capture`, when given, is populated with side-channel fields the server
-    renders itself (not the write LLM) — currently `capture["opener"]` = the
-    decide LLM's opener line, which the scheduler prepends above the attribution
-    block (server controls ordering + supplies a count-based fallback).
-
-    `user_id`, when given, lets the server set `pkg["fresh_materials"]` from the
-    archive (deterministic walkthrough A/B signal — same source as attribution,
-    not decide-inferred from raw text).
+    `user_id` lets the server set `pkg["fresh_materials"]` from the archive
+    (deterministic walkthrough A/B signal — same source as attribution).
     """
     pkg = _parse_step0_output(raw_output, job_id)
     if pkg is None:
-        logger.info("Job '%s': two-step decide failed — falling back to Phase 5 path", job_id)
+        logger.info("Job '%s': step-0 parse failed — falling back to Phase 5 path", job_id)
         return None
 
     if silence_tier:
         pkg["silence_tier"] = silence_tier
-
-    # Walkthrough A/B signal — server-side, from the archive (NOT decide-inferred,
-    # which only sees raw text). Injected after decide, read by the write LLM —
-    # same deterministic-flag pattern as silence_tier.
     if user_id and _has_fresh_reviewable_products(user_id):
         pkg["fresh_materials"] = True
 
-    if capture is not None:
-        capture["opener"] = pkg.get("opener")
+    # Name-strip repair pass (qwen, 9/9 leak-free as a narrow task). Fail-open to
+    # the raw step-0 fields if the repair call dies — the Phase-5 voice-scan
+    # downstream still catches a surviving leak by substituting the quiet-day
+    # fallback.
+    clean_take, clean_opener = _briefing_write_call(
+        pkg.get("coaches_take") or "", pkg.get("opener"), job_id,
+    )
+    if clean_take is None:
+        clean_take = pkg.get("coaches_take") or ""
+        clean_opener = pkg.get("opener")
+        logger.info("Job '%s': write-repair failed — using raw step-0 take", job_id)
 
-    rendered = _briefing_write_call(pkg, job_id)
-    if rendered is None:
-        logger.info("Job '%s': two-step write failed — falling back to Phase 5 path", job_id)
+    if capture is not None:
+        capture["opener"] = clean_opener
+
+    # The response-window check-in is appended verbatim AFTER the LLM repair so
+    # its server-computed wording cannot be paraphrased (Finding 4-3).
+    body = _assemble_briefing_body(clean_take, pkg.get("response_window_checkin"))
+    if not body:
+        logger.info("Job '%s': empty briefing body after assembly — Phase 5 fallback", job_id)
         return None
 
-    logger.info("Job '%s': two-step briefing succeeded", job_id)
-    return rendered
+    logger.info("Job '%s': briefing render succeeded (Plan B: parse→repair→assemble)", job_id)
+    return body
 
 
 # ---------------------------------------------------------------------------
@@ -1695,10 +1733,10 @@ def _briefing_silence(job: dict) -> tuple[str | None, bool]:
 
 
 def _briefing_silence_directive(job: dict) -> str:
-    """Phase 1 raw-prompt directive derived from the silence tier ("" = engaged
-    / no change). Shapes the raw briefing toward the tier (and emits [SILENT] on
-    non-check-in silent days); the write call (Phase 2) does the reliable copy
-    branching via _run_two_step_briefing(silence_tier=...)."""
+    """Raw-prompt directive derived from the silence tier ("" = engaged / no
+    change). Shapes step-0's silence voice toward the tier (and emits [SILENT]
+    on non-check-in silent days); the hard job-card/attribution suppression is
+    enforced in the render layer via _run_briefing_render(silence_tier=...)."""
     tier, speak = _briefing_silence(job)
     if tier in (None, "engaged"):
         return ""
@@ -1862,20 +1900,13 @@ def _build_job_prompt(job: dict) -> str:
 
     skill_names = [str(name).strip() for name in skills if str(name).strip()]
 
-    # Onboarding footer for daily briefing: append a one-line opt-out reminder
-    # to the first 3 briefing runs so new users discover the pause path.
-    # Gated on skill=artemis-briefing to avoid leaking into other cron jobs.
-    footer_line = ""
+    # S-0626-02: the onboarding pause-reminder footer is appended SERVER-SIDE in
+    # the delivery section now, NOT via a prompt directive — step-0 emits JSON,
+    # and a footer line after the JSON object would break json.loads. See the
+    # delivery section's `_completed < 3` footer block.
     silence_directive = ""
     observation_directive = ""
     if "artemis-briefing" in skill_names:
-        completed = (job.get("repeat") or {}).get("completed", 0) or 0
-        if completed < 3:
-            footer_line = (
-                "FOOTER_REQUIRED: append "
-                "_(daily briefing — say \"pause\" anytime to stop)_ "
-                "as the absolute last line."
-            )
         # S-0525-02 Domain 6: tier the briefing by how long the user has been
         # silent (or suppress it via [SILENT] on non-check-in silent days).
         silence_directive = _briefing_silence_directive(job)
@@ -1894,7 +1925,7 @@ def _build_job_prompt(job: dict) -> str:
 
     # Trailing directives, applied to both the no-skills and skills paths below.
     # The [SILENT] directives go last so they dominate the footer.
-    trailers = [d for d in (footer_line, silence_directive, observation_directive, delivery_directive) if d]
+    trailers = [d for d in (silence_directive, observation_directive, delivery_directive) if d]
 
     if not skill_names:
         if trailers:
@@ -2353,8 +2384,12 @@ def tick(verbose: bool = True, adapters=None, loop=None) -> int:
                     logger.info("Job '%s': agent returned %s — skipping delivery", job["id"], SILENT_MARKER)
                     should_deliver = False
 
-                # Pre-delivery quality gate — suppress garbled/degenerate output
-                if should_deliver and success:
+                # Pre-delivery quality gate — suppress garbled/degenerate output.
+                # For briefing jobs the raw output is now step-0 JSON (S-0626-02),
+                # so validating it here would check JSON syntax, not delivered
+                # prose — the meaningful check runs on the assembled body after
+                # _run_briefing_render (below). Non-briefing jobs still gate here.
+                if should_deliver and success and not _is_briefing_job(job):
                     valid, reason = _validate_output_quality(deliver_content)
                     if not valid:
                         logger.warning(
@@ -2396,21 +2431,35 @@ def tick(verbose: bool = True, adapters=None, loop=None) -> int:
                     _s_tier, _s_speak = _briefing_silence(job)
                     _silence_tier = _s_tier if (_s_tier not in (None, "engaged") and _s_speak) else None
 
-                # B-0510-01 Phase 6 — two-step briefing (decide + write).
-                # Unconditional for all briefing jobs. On any failure,
-                # _run_two_step_briefing returns None and deliver_content
+                # S-0626-02 Plan B — single-step briefing render: parse step-0
+                # JSON, name-strip-repair the take + opener, assemble the body
+                # (verbatim response-window check-in appended below). On any
+                # failure _run_briefing_render returns None and deliver_content
                 # flows through Phase 5 voice-scan unchanged.
-                _briefing_opener_llm = None  # decide LLM's opener, captured below
+                _briefing_opener_llm = None  # name-stripped opener, captured below
                 if should_deliver and success and _is_briefing_job(job) and not _resume_guard_fired:
                     _two_step_uid = (_resolve_origin(job) or {}).get("user_id")
                     _two_step_capture: dict = {}
-                    two_step_result = _run_two_step_briefing(
+                    two_step_result = _run_briefing_render(
                         deliver_content, job["id"], silence_tier=_silence_tier,
                         capture=_two_step_capture, user_id=_two_step_uid,
                     )
                     if two_step_result is not None:
                         deliver_content = two_step_result
                         _briefing_opener_llm = _two_step_capture.get("opener")
+
+                    # S-0626-02 — quality-gate the ASSEMBLED briefing body (the
+                    # raw-output gate above is skipped for briefing jobs because
+                    # the raw output is step-0 JSON, not delivered prose).
+                    if should_deliver:
+                        valid, reason = _validate_output_quality(deliver_content)
+                        if not valid:
+                            logger.warning(
+                                "Job '%s': assembled briefing failed quality check (%s) — "
+                                "skipping delivery. First 200 chars: %s",
+                                job["id"], reason, deliver_content[:200],
+                            )
+                            should_deliver = False
 
                 # Artemis B-0510-01 Phase 5 — semantic voice-scan.
                 # Last-resort catch for write-call drift or two-step failure.
@@ -2470,6 +2519,25 @@ def tick(verbose: bool = True, adapters=None, loop=None) -> int:
                                 "Job '%s': prepended milestone block for user=%s",
                                 job["id"], user_id_for_attr,
                             )
+
+                # S-0626-02 — onboarding pause-reminder footer, appended
+                # server-side (was a SKILL.md FOOTER_REQUIRED directive, but a
+                # footer line after step-0's JSON object would break json.loads).
+                # First 3 briefings only; skipped on silence check-ins and on the
+                # deterministic quiet-day fallback (which reads complete alone).
+                if (
+                    should_deliver
+                    and success
+                    and _is_briefing_job(job)
+                    and _silence_tier is None
+                    and deliver_content != _quiet_day_fallback()
+                ):
+                    _completed = (job.get("repeat") or {}).get("completed", 0) or 0
+                    if _completed < 3:
+                        deliver_content = (
+                            deliver_content.rstrip()
+                            + '\n\n_(daily briefing — say "pause" anytime to stop)_'
+                        )
 
                 delivery_error = None
                 if should_deliver:

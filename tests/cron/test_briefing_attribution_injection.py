@@ -300,9 +300,24 @@ def test_fresh_reviewable_false_on_empty(tmp_path):
         assert _has_fresh_reviewable_products("U123") is False
 
 
-def test_write_prompt_walkthrough_keyed_on_fresh_materials_flag():
-    """C (corrected): the WRITE prompt offers walkthrough keyed on the server-set
-    fresh_materials flag in the package — not on the decide LLM reading raw text."""
-    from cron.scheduler import _BRIEFING_WRITE_PROMPT
-    assert "fresh_materials" in _BRIEFING_WRITE_PROMPT
-    assert "walk you through" in _BRIEFING_WRITE_PROMPT.lower()
+def test_fresh_materials_flag_injected_server_side(tmp_path):
+    """S-0626-02 Plan B: the walkthrough A/B is keyed on the server-set
+    fresh_materials flag, injected deterministically into the package from the
+    archive (NOT inferred by an LLM from raw text). The flag's CONSUMER moved to
+    step-0's SKILL.md (which authors the walkthrough wording into coaches_take);
+    the fork's job is only to inject the flag. This asserts the injection path:
+    _run_briefing_render sets pkg["fresh_materials"] when the archive qualifies.
+    """
+    import cron.scheduler as sched
+    captured = {}
+
+    def _fake_parse(raw, job_id="?"):
+        return {"coaches_take": "take", "opener": None, "response_window_checkin": None}
+
+    # No write-repair / network: stub the repair call to echo the take back.
+    with patch.object(sched, "_parse_step0_output", _fake_parse), \
+         patch.object(sched, "_briefing_write_call", lambda t, o, j="?": (t, o)), \
+         patch.object(sched, "_has_fresh_reviewable_products", return_value=True) as fresh:
+        body = sched._run_briefing_render("{}", "j1", user_id="U123")
+    assert fresh.called
+    assert body == "take"  # render succeeded with the flag-qualifying user
