@@ -2255,35 +2255,34 @@ def tick(verbose: bool = True, adapters=None, loop=None) -> int:
                             )
                             should_deliver = False
 
-                # Artemis B-0510-01 Phase 5 — semantic voice-scan (Plan C L2).
-                # Last-resort catch for a recipient-in-third-person leak the
-                # identity-anchored step-0 prompt (L1) missed. Briefing-only,
-                # fail-open on any LLM/HTTP/parse error. Scans only the take body
-                # (the verbatim check-in is appended below, after this scan, by
-                # design — see _run_briefing_render docstring).
+                # Artemis B-0510-01 Phase 5 — semantic voice-scan (Plan C L2,
+                # LOG-ONLY). Observes whether a recipient-in-third-person leak
+                # slipped past the identity-anchored step-0 prompt (L1) and
+                # records it to voice_scan.log, but does NOT substitute the
+                # content. Rationale (S-0626-02): a stray recipient name is a
+                # tone blemish, not a blocker or a privacy leak (third-party
+                # names are kept by design), so silently swapping the whole
+                # briefing for a quiet-day note hid real failures and threw away
+                # the day's content. Delivering the L1 take as-is keeps a FAIL
+                # visible (in Slack + the log) so the true FAIL rate can be
+                # measured — the trigger for whether L3 repair is ever worth
+                # building. Briefing-only, fail-open on any LLM/HTTP/parse error.
+                # Scans only the take body (the verbatim check-in is appended
+                # below, after this scan — see _run_briefing_render docstring).
                 if should_deliver and success and _is_briefing_job(job) and not _resume_guard_fired:
                     vs_clean, vs_reason = _voice_scan_check(deliver_content, job["id"])
                     if not vs_clean:
                         logger.warning(
-                            "Job '%s': output tripped voice-scan (%s) — "
-                            "substituting deterministic quiet-day fallback. "
-                            "Original first 200 chars: %s",
+                            "Job '%s': output tripped voice-scan (%s) — delivering "
+                            "as-is (log-only, no substitution). First 200 chars: %s",
                             job["id"], vs_reason, deliver_content[:200],
                         )
-                        deliver_content = _quiet_day_fallback()
 
                 # S-0626-02 Plan C / Finding 4-3 — append the verbatim response-
                 # window check-in AFTER the voice-scan. It is fixed second-person
                 # server copy (structurally voice-clean), so it bypasses the scan
-                # by design and reaches the user byte-exact. Skipped when the
-                # voice-scan substituted the quiet-day fallback (the fallback
-                # reads complete on its own and a check-in would contradict it).
-                if (
-                    should_deliver
-                    and _is_briefing_job(job)
-                    and _briefing_checkin
-                    and deliver_content != _quiet_day_fallback()
-                ):
+                # by design and reaches the user byte-exact.
+                if should_deliver and _is_briefing_job(job) and _briefing_checkin:
                     deliver_content = f"{deliver_content}\n\n{_briefing_checkin}"
 
                 # Artemis briefing — deterministic team attribution paragraph.

@@ -1,14 +1,17 @@
 """Tests for the post-LLM voice-scan layer (Artemis B-0510-01 Phase 5).
 
-Voice-scan is the last-resort semantic enforcement layer: after Phase 6
-two-step call runs (decide + write), voice-scan catches any residual
-voice violations or write-call failures. On a confident FAIL verdict the
-scheduler substitutes the deterministic quiet-day fallback.
+Voice-scan is a semantic observation layer over the step-0 take: it judges
+whether the recipient is addressed in third person (voice) or the deliverable
+is replaced by planning narration (structure). Since S-0626-02 (Plan C) a
+confident FAIL is LOG-ONLY — the scheduler records it to voice_scan.log but
+delivers the take as-is (no quiet-day substitution); see the scheduler call
+site for the rationale. These tests cover the verdict logic itself
+(`_voice_scan_check`), which is unchanged by that policy shift.
 
-Tests monkeypatch the HTTP call — no real network. Two red cases drive the
-fail path (verdict=FAIL → substitution); two green cases drive the pass path
-(verdict=PASS → original text preserved). Fail-open paths (missing API key,
-HTTP error, non-JSON response) round out the suite.
+Tests monkeypatch the HTTP call — no real network. Red cases assert FAIL
+verdicts on third-person/structure violations; green cases assert PASS on
+clean second-person text. Fail-open paths (missing API key, HTTP error,
+non-JSON response) round out the suite.
 """
 import json
 
