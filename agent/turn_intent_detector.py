@@ -278,6 +278,31 @@ work requests, confirmations, capability questions, and anything that
 dispatches. When unsure, set `false` — a missed check-in beat is milder
 than a forced one on a turn that didn't carry feeling.
 
+**ALSO set `affect_gate`** (one of "none" | "empathy_then_gate" |
+"empathy_direct"). This handles MIXED turns — a turn that carries strong
+affect (self-doubt loop, comparison spiral, acute hit) AND an explicit
+progress / assessment / direction ask in the SAME message, so it routes
+to single / multi / surface_existing rather than `none`. On these turns
+Coach must lead with feeling before any synthesis. Setting affect_gate
+does NOT change the dispatch — the team still works; it only tells Coach
+how to open the reply.
+
+Set affect_gate ≠ "none" ONLY when BOTH hold: (a) the turn carries a
+strong affect signal (rejection / "I'm behind, everyone's ahead" /
+"maybe I'm not cut out for this" / "second-guessing everything"), AND
+(b) the same turn carries a progress / assessment / direction ask (it
+dispatches). Then:
+  - "empathy_direct" — when EITHER skip-gate condition holds: the user
+    gave an explicit permission cue ("tell me straight", "just tell me",
+    "help me see this differently", "give it to me straight"), OR the
+    affect is a comparison spiral ("everyone's ahead", "I'm behind",
+    "half my class has offers"). These users want to be grounded now;
+    asking permission stalls.
+  - "empathy_then_gate" — strong affect + ask, but no permission cue and
+    not a spiral (e.g. acute-hit aftermath wrapped around an ask).
+Set "none" for every other turn (including any `none`-dispatch turn —
+those are governed by affect_report). When unsure, set "none".
+
 Return STRICT JSON, no prose, no markdown fence:
 
 {
@@ -299,6 +324,7 @@ Return STRICT JSON, no prose, no markdown fence:
   "user_action_required": true | false,
   "off_domain_no_fallback": true | false,
   "affect_report": true | false,
+  "affect_gate": "none" | "empathy_then_gate" | "empathy_direct",
   "direction_present": true | false,
   "confidence": "high|medium|low",
   "reasoning": "<one short sentence>"
@@ -671,6 +697,15 @@ def detect_turn_intent(
     if dispatch_type != "none":
         affect_report = False
 
+    # affect_gate (S-0626-01) — mixed-turn affect handling, decoupled from
+    # affect_report. Meaningful ONLY on a dispatching turn (none turns are
+    # governed by affect_report). Strict whitelist; anything else -> "none".
+    affect_gate = parsed.get("affect_gate")
+    if affect_gate not in ("empathy_then_gate", "empathy_direct"):
+        affect_gate = "none"
+    if dispatch_type == "none":
+        affect_gate = "none"
+
     out["checked"] = True
     out["dispatch_type"] = dispatch_type
     out["dispatches"] = dispatches
@@ -681,6 +716,7 @@ def detect_turn_intent(
     out["user_action_required"] = user_action_required
     out["off_domain_no_fallback"] = off_domain_no_fallback
     out["affect_report"] = affect_report
+    out["affect_gate"] = affect_gate
     # B-0624-03: did the user express a career goal/direction this turn,
     # independent of whether it's dispatchable? Feeds the cold-start
     # onboarding-block gate so a goal stated as a question isn't mis-read as

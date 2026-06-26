@@ -250,6 +250,74 @@ class TestDetectTurnIntent:
         assert result["dispatch_type"] == "surface_existing"
         assert result["affect_report"] is False
 
+    def test_affect_gate_set_on_mixed_turn(self, monkeypatch):
+        """A turn that dispatches AND carries strong affect keeps affect_gate."""
+        monkeypatch.setattr(
+            "agent.auxiliary_client.call_llm",
+            lambda **kw: _fake_response(
+                '{"dispatch_type": "multi", "dispatches": ['
+                '{"sub_agent": "analyst", "id_slug": "status-read", '
+                '"action": "Assess progress across the board", '
+                '"announcement": "Pulling your numbers together."}, '
+                '{"sub_agent": "scout", "id_slug": "find-alts", '
+                '"action": "Find alternatives", '
+                '"announcement": "Scout is scanning."}], '
+                '"affect_gate": "empathy_direct", '
+                '"confidence": "high", "reasoning": "x"}'
+            ),
+            raising=False,
+        )
+        result = tid.detect_turn_intent("am i actually behind? tell me straight")
+        assert result["dispatch_type"] == "multi"
+        assert result["affect_gate"] == "empathy_direct"
+
+    def test_affect_gate_cleared_on_none_turn(self, monkeypatch):
+        """affect_gate is only meaningful on a dispatching turn. A pure-affect
+        none turn clears it (that path is governed by affect_report instead)."""
+        monkeypatch.setattr(
+            "agent.auxiliary_client.call_llm",
+            lambda **kw: _fake_response(
+                '{"dispatch_type": "none", "dispatches": [], '
+                '"affect_gate": "empathy_then_gate", '
+                '"confidence": "high", "reasoning": "x"}'
+            ),
+            raising=False,
+        )
+        result = tid.detect_turn_intent("glossier said no")
+        assert result["dispatch_type"] == "none"
+        assert result["affect_gate"] == "none"
+
+    def test_affect_gate_defaults_none_when_absent(self, monkeypatch):
+        """An LLM output with no affect_gate key normalizes to 'none'."""
+        monkeypatch.setattr(
+            "agent.auxiliary_client.call_llm",
+            lambda **kw: _fake_response(
+                '{"dispatch_type": "single", "dispatches": ['
+                '{"sub_agent": "scout", "id_slug": "find-x", '
+                '"action": "Find X", "announcement": "On it."}], '
+                '"confidence": "high", "reasoning": "x"}'
+            ),
+            raising=False,
+        )
+        result = tid.detect_turn_intent("find me data roles in boston")
+        assert result["affect_gate"] == "none"
+
+    def test_affect_gate_invalid_value_falls_back_none(self, monkeypatch):
+        """A garbage affect_gate value normalizes to 'none', never crashes."""
+        monkeypatch.setattr(
+            "agent.auxiliary_client.call_llm",
+            lambda **kw: _fake_response(
+                '{"dispatch_type": "multi", "dispatches": ['
+                '{"sub_agent": "analyst", "id_slug": "x", '
+                '"action": "x", "announcement": "x."}], '
+                '"affect_gate": "garbage", '
+                '"confidence": "high", "reasoning": "x"}'
+            ),
+            raising=False,
+        )
+        result = tid.detect_turn_intent("whatever")
+        assert result["affect_gate"] == "none"
+
     # ---------------------------------------------------------------------
     # surface_deliver (B-0623-05) — a surface_existing pull splits two ways:
     #   - replay summary (default): "walk me through the changes" → text only
