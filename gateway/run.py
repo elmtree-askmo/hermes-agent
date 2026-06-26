@@ -2475,6 +2475,7 @@ class GatewayRunner:
                     render_injection_block,
                     render_capability_block,
                     render_affect_report_block,
+                    render_affect_gate_block,
                     render_already_executed_block,
                     render_team_dispatch_executed_block,
                     render_short_circuit_transcript_text,
@@ -2740,6 +2741,18 @@ class GatewayRunner:
                     logger.info(
                         "turn-intent: chat=%s affect_report_block_len=%d",
                         _chat, len(_affect_block),
+                    )
+
+                # Affect-gate injection (S-0626-01) — mixed turns that carry
+                # strong affect AND a work ask. Independent of dispatch; the
+                # team still works, this only shapes the reply's opening.
+                _gate_block = render_affect_gate_block(_detection)
+                if _gate_block:
+                    context_prompt = context_prompt + "\n" + _gate_block
+                    logger.info(
+                        "turn-intent: chat=%s affect_gate=%s block_len=%d",
+                        _chat, _detection.get("affect_gate"),
+                        len(_gate_block),
                     )
         except _ArtemisDisabled:
             pass  # Non-Artemis fork deployment — feature off by design.
