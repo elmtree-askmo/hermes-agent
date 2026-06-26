@@ -852,11 +852,17 @@ def _has_fresh_reviewable_products(user_id: str) -> bool:
     return False
 
 
-def _render_opener(user_id: str, llm_opener: str | None) -> str:
+def _render_opener(user_id: str, llm_opener: str | None, silence_tier: str | None = None) -> str:
     """Render the briefing opener line. B-primary + A-fallback.
 
     Returns "" when no sub-agent has work in the last 24h (nothing to greet
     about — consistent with the attribution block suppressing on empty).
+
+    S-0626-02: on a silence check-in tier (day1/day5/day8) returns "" — a quiet
+    user's re-entry message carries no "Morning, your team ran N things" opener
+    (the team-activity framing contradicts the silence tone). Same silence gate
+    as the attribution + job-card render paths (Finding 6-1); the opener was the
+    one server render path Phase 1 missed.
 
     Otherwise prefers the LLM-written `llm_opener` (variety: it reads the day's
     content and picks an angle). Falls back to a deterministic template keyed on
@@ -865,6 +871,9 @@ def _render_opener(user_id: str, llm_opener: str | None) -> str:
       - N >= 2: "Morning. Your team ran N things overnight."
       - N == 1: "Morning. <Agent> finished something overnight."
     """
+    if silence_tier not in (None, "engaged"):
+        return ""
+
     active = _active_sub_agents_in_window(user_id)
     n = len(active)
     if n == 0:
@@ -2391,7 +2400,7 @@ def tick(verbose: bool = True, adapters=None, loop=None) -> int:
                         # ABOVE the bullets (opener → attribution → body). B-primary
                         # (decide LLM's opener, captured above) + A-fallback (server
                         # count-based template); "" when no team work this cycle.
-                        opener = _render_opener(user_id_for_attr, _briefing_opener_llm)
+                        opener = _render_opener(user_id_for_attr, _briefing_opener_llm, silence_tier=_silence_tier)
                         if opener:
                             deliver_content = _inject_attribution_block(deliver_content, opener)
                             logger.info(

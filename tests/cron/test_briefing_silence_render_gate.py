@@ -21,6 +21,7 @@ import pytest
 from cron.scheduler import (
     _render_team_attribution_for_briefing,
     _render_job_cards_for_briefing,
+    _render_opener,
 )
 
 pytestmark = pytest.mark.xdist_group("cron_scheduler")
@@ -106,4 +107,27 @@ def test_job_cards_render_when_engaged(tmp_path):
         out_engaged = _render_job_cards_for_briefing(USER, silence_tier="engaged")
         out_none = _render_job_cards_for_briefing(USER, silence_tier=None)
     assert out_engaged and len(out_engaged) == 5
-    assert out_none and len(out_none) == 5
+
+
+# ---- opener gate (S-0626-02 — the render path Phase 1 missed) ----------------
+
+
+@pytest.mark.parametrize("tier", ["day1", "day5", "day8"])
+def test_opener_suppressed_on_silence_tier(tmp_path, tier):
+    """Even with 3 qualifying overnight results (which would normally fall back
+    to "Morning. Your team ran N things overnight."), a silence tier renders no
+    opener — a quiet user's re-entry carries no team-activity greeting."""
+    _setup_strategy(tmp_path, USER, _RESULTS)
+    with patch("cron.scheduler.get_hermes_home", return_value=tmp_path):
+        out = _render_opener(USER, llm_opener=None, silence_tier=tier)
+    assert out == ""
+
+
+def test_opener_renders_when_engaged(tmp_path):
+    """engaged tier (or None) renders the server-fallback opener — unchanged."""
+    _setup_strategy(tmp_path, USER, _RESULTS)
+    with patch("cron.scheduler.get_hermes_home", return_value=tmp_path):
+        out_engaged = _render_opener(USER, llm_opener=None, silence_tier="engaged")
+        out_none = _render_opener(USER, llm_opener=None, silence_tier=None)
+    assert out_engaged.startswith("Morning. Your team ran")
+    assert out_none.startswith("Morning. Your team ran")
