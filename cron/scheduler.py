@@ -1706,10 +1706,6 @@ def _build_job_prompt(job: dict) -> str:
 
     skill_names = [str(name).strip() for name in skills if str(name).strip()]
 
-    # S-0626-02: the onboarding pause-reminder footer is appended SERVER-SIDE in
-    # the delivery section now, NOT via a prompt directive — step-0 emits JSON,
-    # and a footer line after the JSON object would break json.loads. See the
-    # delivery section's `_completed < 3` footer block.
     silence_directive = ""
     observation_directive = ""
     if "artemis-briefing" in skill_names:
@@ -2344,25 +2340,6 @@ def tick(verbose: bool = True, adapters=None, loop=None) -> int:
                                 "Job '%s': prepended milestone block for user=%s",
                                 job["id"], user_id_for_attr,
                             )
-
-                # S-0626-02 — onboarding pause-reminder footer, appended
-                # server-side (was a SKILL.md FOOTER_REQUIRED directive, but a
-                # footer line after step-0's JSON object would break json.loads).
-                # First 3 briefings only; skipped on silence check-ins and on the
-                # deterministic quiet-day fallback (which reads complete alone).
-                if (
-                    should_deliver
-                    and success
-                    and _is_briefing_job(job)
-                    and _silence_tier is None
-                    and deliver_content != _quiet_day_fallback()
-                ):
-                    _completed = (job.get("repeat") or {}).get("completed", 0) or 0
-                    if _completed < 3:
-                        deliver_content = (
-                            deliver_content.rstrip()
-                            + '\n\n_(daily briefing — say "pause" anytime to stop)_'
-                        )
 
                 delivery_error = None
                 if should_deliver:

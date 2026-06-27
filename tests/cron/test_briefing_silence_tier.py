@@ -128,10 +128,9 @@ class TestBuildJobPromptInjection:
         assert "SILENCE_AWARENESS" not in out
 
     def test_silent_directive_present_for_new_user(self, tmp_path):
-        """S-0626-02: the onboarding pause-reminder footer moved server-side
-        (step-0 emits JSON, so a footer line in the prompt would break
-        json.loads) — it's no longer a prompt directive. The silence-tier
-        [SILENT] directive is still appended to the built prompt."""
+        """The onboarding pause-reminder footer is gone entirely (never a prompt
+        directive — it was server-side under S-0626-02, then removed 2026-06-27).
+        The silence-tier [SILENT] directive is still appended to the built prompt."""
         gh, sr = _patch_script(tmp_path, {"tier": "day8", "speak": False, "reason": "x"})
         job = _briefing_job()
         job["repeat"] = {"completed": 0}  # would have been inside the old footer window

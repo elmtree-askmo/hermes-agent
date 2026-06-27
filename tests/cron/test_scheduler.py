@@ -1181,13 +1181,15 @@ class TestBuildJobPromptPerUserSkillFallback:
         assert "USER OVERRIDE BODY" not in result
 
 
-class TestBuildJobPromptArtemisFooter:
-    """S-0626-02 Plan B: the onboarding pause-reminder footer moved out of the
-    prompt (a FOOTER_REQUIRED directive in _build_job_prompt) and into the
-    server-side delivery path — step-0 now emits JSON, so a footer line after
-    the JSON object would break json.loads. These tests drive tick() and assert
-    the footer is appended to the DELIVERED content for the first 3 briefing
-    runs only, and never for non-briefing jobs."""
+class TestBriefingNoPauseFooter:
+    """The onboarding pause-reminder footer was removed entirely (2026-06-27):
+    the simulation design has no such reminder, so no briefing — first run or
+    otherwise — appends it. These tests drive tick() and assert the footer
+    NEVER appears in the delivered content, regardless of run count.
+
+    History: the footer originated as a SKILL.md FOOTER_REQUIRED directive,
+    moved server-side under S-0626-02 Plan B (step-0 emits JSON, a footer line
+    after the JSON object would break json.loads), then was dropped wholesale."""
 
     _FOOTER_LINE = '_(daily briefing — say "pause" anytime to stop)_'
 
@@ -1201,7 +1203,7 @@ class TestBuildJobPromptArtemisFooter:
 
         _run_briefing_render is stubbed to pass the body through unchanged, the
         voice-scan + quality gate pass, and silence stays engaged (no tier) so
-        the server-side footer block is the only thing that can alter the body.
+        nothing in the delivery path should alter the body.
         """
         captured = {}
 
@@ -1238,19 +1240,19 @@ class TestBuildJobPromptArtemisFooter:
             job["repeat"] = {"times": None, "completed": completed}
         return job
 
-    def test_footer_injected_for_first_briefing_run(self):
+    def test_footer_absent_on_first_briefing_run(self):
         result = self._drive_delivery(self._briefing_job(completed=0))
-        assert self._FOOTER_LINE in result
+        assert self._FOOTER_LINE not in result
 
-    def test_footer_injected_at_third_run(self):
+    def test_footer_absent_at_third_run(self):
         result = self._drive_delivery(self._briefing_job(completed=2))
-        assert self._FOOTER_LINE in result
+        assert self._FOOTER_LINE not in result
 
-    def test_footer_dropped_from_fourth_run_onward(self):
+    def test_footer_absent_from_fourth_run_onward(self):
         result = self._drive_delivery(self._briefing_job(completed=3))
         assert self._FOOTER_LINE not in result
 
-    def test_footer_skipped_for_non_briefing_skill(self):
+    def test_footer_absent_for_non_briefing_skill(self):
         job = {
             "id": "JOTHER",
             "name": "monitor",
@@ -1262,10 +1264,10 @@ class TestBuildJobPromptArtemisFooter:
         result = self._drive_delivery(job)
         assert self._FOOTER_LINE not in result
 
-    def test_footer_injected_when_repeat_missing(self):
-        """Jobs without a repeat block default to completed=0 and still get the footer if briefing."""
+    def test_footer_absent_when_repeat_missing(self):
+        """Jobs without a repeat block default to completed=0 — still no footer."""
         result = self._drive_delivery(self._briefing_job(completed=None))
-        assert self._FOOTER_LINE in result
+        assert self._FOOTER_LINE not in result
 
 
 class TestTickAdvanceBeforeRun:
