@@ -154,6 +154,21 @@ def _quiet_day_resume_short_circuit(user_id: str) -> bool:
         if not (resumes_dir.is_dir() and any(resumes_dir.glob("*.json"))):
             return False
 
+        # P-0627-01: the FIRST briefing after onboarding must not be suppressed.
+        # On day-1-post-onboarding the day looks "empty" (the lone baseline-resume
+        # action just completed, the ranked scan is mid-flight, no follow-ups yet),
+        # so the plain emptiness predicate would emit the generic quiet-day note and
+        # discard the decide-step's real first-briefing framing — a poor first
+        # impression on an active market. Exempt exactly that one window: onboarding
+        # flag present AND no briefing delivered yet. It is one-shot — once any
+        # briefing has been written, an empty day reverts to the normal short-circuit
+        # so this never becomes a standing resume-solicitation loophole.
+        onboarded = (base / "onboarding_pushed.flag").exists()
+        briefings_dir = base / "briefings"
+        briefing_delivered = briefings_dir.is_dir() and any(briefings_dir.glob("*.json"))
+        if onboarded and not briefing_delivered:
+            return False  # first post-onboarding briefing — keep the LLM render
+
         strategy_path = base / "strategy.json"
         if not strategy_path.exists():
             return False

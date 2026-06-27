@@ -27,8 +27,15 @@ pytestmark = pytest.mark.xdist_group("cron_scheduler")
 _USER = "U0616TEST"
 
 
-def _write_state(tmp_path, *, resume: bool, follow_ups=None, action_queue=None, applications=None):
-    """Build ~/.hermes/artemis/<user>/{strategy.json, resumes/, applications.json} under tmp_path."""
+def _write_state(tmp_path, *, resume: bool, follow_ups=None, action_queue=None, applications=None,
+                 onboarded=False, briefing_delivered=True):
+    """Build ~/.hermes/artemis/<user>/{strategy.json, resumes/, applications.json} under tmp_path.
+
+    onboarded — write onboarding_pushed.flag (user finished onboarding).
+    briefing_delivered — write a prior briefings/*.json (a briefing has already been delivered).
+        Default True so existing tests keep their "steady-state" semantics; the
+        first-briefing exemption only fires when onboarded AND NOT briefing_delivered.
+    """
     base = tmp_path / "artemis" / _USER
     base.mkdir(parents=True, exist_ok=True)
     strategy = {
@@ -43,6 +50,15 @@ def _write_state(tmp_path, *, resume: bool, follow_ups=None, action_queue=None, 
     if applications is not None:
         (base / "applications.json").write_text(
             json.dumps({"applications": applications}), encoding="utf-8"
+        )
+    if onboarded:
+        (base / "onboarding_pushed.flag").write_text("", encoding="utf-8")
+    if briefing_delivered:
+        bdir = base / "briefings"
+        bdir.mkdir(exist_ok=True)
+        (bdir / "2026-01-01T00-00-00Z.json").write_text(
+            json.dumps({"user_id": _USER, "briefing_timestamp": "2026-01-01T00:00:00Z",
+                        "formatted_output": "prior briefing"}), encoding="utf-8"
         )
 
 
@@ -82,6 +98,36 @@ def test_resume_on_file_and_empty_day_short_circuits(patch_home):
 def test_no_resume_does_not_short_circuit(patch_home):
     _write_state(patch_home, resume=False, follow_ups=[], action_queue=[])
     assert _quiet_day_resume_short_circuit(_USER) is False
+
+
+# --- P-0627-01: the FIRST briefing after onboarding must NOT be suppressed ---
+# Even on an otherwise-empty day, the first post-onboarding briefing should let the
+# decide-step's real first-briefing framing through (the ranked scan is mid-flight,
+# the market is active) — not the generic quiet-day note. Exemption = onboarded AND
+# no briefing delivered yet.
+
+def test_first_briefing_after_onboarding_does_not_short_circuit(patch_home):
+    _write_state(patch_home, resume=True, follow_ups=[], action_queue=[],
+                 onboarded=True, briefing_delivered=False)
+    assert _quiet_day_resume_short_circuit(_USER) is False
+
+
+# --- but once a briefing HAS been delivered, an empty day reverts to short-circuit
+# (the exemption is one-shot; it must not become a permanent resume-solicit loophole) ---
+
+def test_empty_day_after_first_briefing_short_circuits(patch_home):
+    _write_state(patch_home, resume=True, follow_ups=[], action_queue=[],
+                 onboarded=True, briefing_delivered=True)
+    assert _quiet_day_resume_short_circuit(_USER) is True
+
+
+# --- exemption requires the onboarding flag; a pre-onboarding-flag user with no
+# briefings yet (legacy/edge) still short-circuits on an empty day ---
+
+def test_no_onboarding_flag_no_briefing_still_short_circuits(patch_home):
+    _write_state(patch_home, resume=True, follow_ups=[], action_queue=[],
+                 onboarded=False, briefing_delivered=False)
+    assert _quiet_day_resume_short_circuit(_USER) is True
 
 
 # --- resume on file but a follow-up is due today → real content, keep LLM render ---
