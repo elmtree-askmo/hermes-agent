@@ -156,17 +156,29 @@ exchanges, decide the **dispatch shape** this turn needs.
     empty) for every other dispatch type.
 
   **DELIVER vs REPLAY — set `surface_deliver`.** A surface_existing pull
-  is one of two intents:
-  - **Replay** (default) → the user wants to UNDERSTAND the work: "walk me
-    through the changes", "what did the team do", "show me what you found".
-    The summary text IS the answer. Set `surface_deliver: false`.
-  - **Deliver** → the user wants to RECEIVE the file itself: "send me the
-    PDF", "can you send the resume so I can upload it", "send me the file".
-    They need the artifact attached, not described. Set
-    `surface_deliver: true`.
-  Judge by whether the user wants the work explained (replay) or the file
-  in hand (deliver). When unsure, default to `false` (replay). Meaningful
-  ONLY for surface_existing.
+  is one of two intents. Judge by what the user actually needs in hand —
+  which turns on the KIND of work they're pulling:
+  - **Deliver** → the user wants the work product ITSELF, and that product
+    is a file (a tailored résumé or a cover letter — the Publicist's
+    materials). For these the document IS the deliverable: its content
+    can't be replayed as a chat summary, so wanting to *see / read / check
+    / look at / get / send* it — or moving to *apply / submit* with it —
+    all mean "put the file in my hands." Examples: "let me see the Northwind
+    résumé", "can I look at the Acme cover letter before I apply", "I'm
+    submitting the Northwind one now", "send me the résumé so I can upload
+    it". Set `surface_deliver: true`.
+  - **Replay** (default) → the user wants to UNDERSTAND work that lives as a
+    summary: a Scout scan, an Analyst read, a multi-front status. The
+    summary text IS the answer — there's no file to hand over, or the user
+    only wants the gist. Examples: "walk me through what the team did",
+    "what did Scout turn up", "give me the headline on where I'm at". Set
+    `surface_deliver: false`.
+  Rule of thumb: pulling a Publicist file artifact (résumé / cover letter)
+  → deliver; pulling a Scout/Analyst finding, or any "explain it to me"
+  → replay. When the pull is a file artifact and you're unsure whether they
+  want to read it or receive it, prefer deliver (handing over the file also
+  lets them read it; a summary alone can't). Meaningful ONLY for
+  surface_existing.
 
 **How to judge multi vs single:**
 
