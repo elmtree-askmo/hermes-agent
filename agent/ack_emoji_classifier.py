@@ -68,23 +68,29 @@ everything.
 
 Choose exactly one, by the TONE of the user's message:
 
-- **fire** — a sharp, vivid take: a strong like/dislike, a decisive
-  exclusion ("scheduling posts someone else wrote all day", "definitely
-  not big corporate", "i'd hate being a tiny cog just for the name"),
-  an emphatic agreement ("I love it"), or a "doing it right now"
-  follow-through ("doing that right now"). **When a reply carries a
-  strong dislike, rejection, or "I'd hate X" framing — even if it also
-  states a preference with reasoning — choose fire, not raised_hands.**
-  Heat (a strong opinion, for or against) is fire; warmth is raised_hands.
+- **fire** — reserve for the HOTTEST turns only: a blunt, decisive
+  exclusion or rejection ("scheduling posts someone else wrote all day",
+  "definitely not big corporate", "i'd hate being a tiny cog just for the
+  name"), a vivid strong like/dislike, or a "doing it right now"
+  follow-through ("doing that right now"). fire is the rare peak — at most
+  one turn in several. A plain positive answer, a calm agreement, or a
+  decision that merely *also* mentions a dislike in passing is NOT fire;
+  only an emphatic rejection or a vivid, heated reaction is.
 - **muscle** — a let's-go, I'm-in burst of forward energy and commitment
   ("ok let's go", "I'm in", "ready").
 - **raised_hands** — genuine warmth or a calm/neutral preference shared
   WITH some texture ("honestly really good", "amazing, thanks",
-  "chicago but open to nyc or la"). NOT for replies whose energy is a
-  strong dislike or rejection — those are fire.
-- **thumbsup** — use SPARINGLY, only for a deliberate decision/pick that
-  resolves a choice ("tomorrow" when picking when to act). A bare option
-  word echoed back is NOT this — see null.
+  "chicago but open to nyc or la").
+- **thumbsup** — the WORKHORSE: a deliberate answer that resolves Coach's
+  question — a clear pick, a decision, or a definite stated preference
+  ("role fit. I want to actually do things not just have a name",
+  "tomorrow", "marketing strategy was good but I'm not a data person").
+  When the user has clearly decided or stated what they want, choose
+  thumbsup unless it is an emphatic rejection (fire), a burst of forward
+  energy (muscle), or warm affect (raised_hands). A reply that pairs a
+  clear preference with a mild self-qualifier ("…but I'm not a data
+  person") is still thumbsup — the decision is the signal. A bare option
+  word echoed back with no opinion is NOT this — see null.
 - **null** — the default. Choose null whenever the message lacks standout
   energy, including:
   • a bare option-word picked from a menu Coach offered ("direct",

@@ -75,6 +75,25 @@ class TestDetectAckEmoji:
         result = aec.detect_ack_emoji("tomorrow")
         assert result["ack_emoji"] == "thumbsup"
 
+    def test_thumbsup_for_decided_preference_with_mild_qualifier(
+        self, monkeypatch
+    ):
+        """thumbsup is the workhorse for a deliberate answer that resolves
+        Coach's question — a clear pick / stated preference — even when it
+        carries a mild self-qualifier. Such turns must NOT be pulled into
+        fire just because they mention a dislike in passing. (Closed-set
+        parse only; the tone judgment itself lives in the LLM prompt and is
+        validated live, not unit-tested.)"""
+        monkeypatch.setattr(
+            "agent.auxiliary_client.call_llm",
+            lambda **kw: _fake_response('{"ack_emoji": "thumbsup"}'),
+            raising=False,
+        )
+        result = aec.detect_ack_emoji(
+            "marketing strategy was good but I'm not a data person"
+        )
+        assert result["ack_emoji"] == "thumbsup"
+
     def test_null_when_no_signal(self, monkeypatch):
         monkeypatch.setattr(
             "agent.auxiliary_client.call_llm",
