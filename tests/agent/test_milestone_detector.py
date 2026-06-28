@@ -457,6 +457,38 @@ class TestDetectSubmit:
         ud = _seed(tmp_path, [rec])
         assert detect_submit("ok submitted it", ud) is None
 
+    def test_partial_name_drops_weak_segment_matches_record(self, tmp_path):
+        """B-0628-02: a user names a multi-segment company by its DISTINCTIVE word
+        only ("ikigai" for ikigai-labs) — the weak company-noun ("labs") is one most
+        users drop. The named match must still resolve to ikigai-labs, NOT fall
+        through to the most-recent-record fallback (which here would wrongly pick aeg)."""
+        ikigai = _apprec("ikigai-labs", "materials_ready")
+        ikigai["display_name"] = "Ikigai Labs"
+        ikigai["updated_at"] = "2026-06-28T12:34:39+00:00"
+        aeg = _apprec("aeg", "materials_ready")
+        aeg["display_name"] = "AEG"
+        aeg["updated_at"] = "2026-06-28T13:19:10+00:00"  # drafted later → fallback target
+        # The bug: "ikigai" alone fails the all-segments check (labs absent) → no named
+        # match → fallback picks the most-recent record by updated_at = aeg. updated_at
+        # is REQUIRED to reproduce: without it both records tie on "" and max() returns
+        # the first (ikigai), masking the fallback misselection.
+        ud = _seed(tmp_path, [ikigai, aeg])
+        res = detect_submit("ok i just submitted the ikigai one", ud)
+        assert res is not None and res["company"] == "ikigai-labs"
+
+    def test_full_multiword_name_still_matches(self, tmp_path):
+        """Regression: naming the full multi-word company ("ikigai labs") must keep
+        matching after the distinctive-segment relaxation."""
+        ikigai = _apprec("ikigai-labs", "materials_ready")
+        ikigai["display_name"] = "Ikigai Labs"
+        ikigai["updated_at"] = "2026-06-28T12:34:39+00:00"
+        aeg = _apprec("aeg", "materials_ready")
+        aeg["display_name"] = "AEG"
+        aeg["updated_at"] = "2026-06-28T13:19:10+00:00"
+        ud = _seed(tmp_path, [ikigai, aeg])
+        res = detect_submit("just submitted ikigai labs", ud)
+        assert res is not None and res["company"] == "ikigai-labs"
+
 
 class TestAdvanceSubmitted:
     def test_advances_materials_ready_to_submitted(self, tmp_path):

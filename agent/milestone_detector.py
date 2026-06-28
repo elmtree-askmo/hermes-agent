@@ -208,6 +208,17 @@ _OUTCOME_SIGNALS = {
 }
 _ACTIVE_STATUSES = frozenset({"submitted", "interviewed"})
 
+# B-0628-02: weak company-noun segments a user routinely drops when naming a
+# company ("ikigai" for Ikigai Labs, "stripe" for Stripe Inc). When matching a
+# user's free text to a record, these segments are optional — the DISTINCTIVE
+# (non-weak) segments must all appear, but a weak tail need not. Keeps a strict
+# match for the distinctive part while tolerating the dropped legal/category noun.
+_WEAK_COMPANY_SEGS = frozenset({
+    "labs", "lab", "inc", "incorporated", "llc", "co", "corp", "corporation",
+    "company", "group", "holdings", "technologies", "technology", "tech",
+    "ai", "io", "the", "ltd", "limited", "plc", "gmbh", "partners", "solutions",
+})
+
 
 def _canonical_company(name) -> str:
     """The application record key: lowercase, ascii-folded, hyphenated.
@@ -295,8 +306,12 @@ def _match_company(
             if not cand:
                 continue
             cand_segs = cand.split("-")
-            # all segments of the company name present as whole segments in the text
-            if cand_segs and all(seg in text_segs for seg in cand_segs):
+            # B-0628-02: match on the DISTINCTIVE segments — drop weak company nouns
+            # (labs/inc/co/ai…) a user routinely omits ("ikigai" for "ikigai-labs").
+            # Keep at least one segment so an all-weak name doesn't match everything.
+            core_segs = [s for s in cand_segs if s not in _WEAK_COMPANY_SEGS] or cand_segs
+            # all distinctive segments present as whole segments in the text
+            if core_segs and all(seg in text_segs for seg in core_segs):
                 return key
     # No named company — fall back to most-recent record in the narrow fallback set
     # (never an identified record, even a resume-ready one).
