@@ -489,6 +489,32 @@ class TestDetectSubmit:
         res = detect_submit("just submitted ikigai labs", ud)
         assert res is not None and res["company"] == "ikigai-labs"
 
+    def test_unnamed_submit_with_multiple_records_does_not_guess(self, tmp_path):
+        """B-0628-02 (fix 2): the most-recent-record fallback is a probabilistic edge
+        that is only safe when there is ONE candidate (the user obviously means it).
+        With ≥2 materials_ready records and no named company, the fallback must NOT
+        silently pick the most-recent one — guessing wrong is exactly the misattribution
+        bug. Return None so the turn is treated as no-confident-submit."""
+        ikigai = _apprec("ikigai-labs", "materials_ready")
+        ikigai["display_name"] = "Ikigai Labs"
+        ikigai["updated_at"] = "2026-06-28T12:34:39+00:00"
+        aeg = _apprec("aeg", "materials_ready")
+        aeg["display_name"] = "AEG"
+        aeg["updated_at"] = "2026-06-28T13:19:10+00:00"
+        ud = _seed(tmp_path, [ikigai, aeg])
+        assert detect_submit("ok i just submitted it", ud) is None
+
+    def test_unnamed_submit_with_single_record_still_falls_back(self, tmp_path):
+        """Regression: the single-candidate fallback is the documented, intended edge
+        — an unnamed 'submitted it' with exactly one materials_ready record still maps
+        to that record. Fix 2 only suppresses the fallback when it would have to guess
+        among multiple."""
+        rec = _apprec("glossier", "materials_ready")
+        rec["display_name"] = "Glossier"
+        ud = _seed(tmp_path, [rec])
+        res = detect_submit("ok i just submitted it", ud)
+        assert res is not None and res["company"] == "glossier"
+
 
 class TestAdvanceSubmitted:
     def test_advances_materials_ready_to_submitted(self, tmp_path):

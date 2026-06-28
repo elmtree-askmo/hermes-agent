@@ -270,6 +270,7 @@ def _match_company(
     user_dir: Path,
     statuses=_ACTIVE_STATUSES,
     fallback_statuses=None,
+    single_candidate_fallback_only: bool = False,
 ) -> str | None:
     """Map the user's free text to a known application's canonical key.
 
@@ -317,6 +318,13 @@ def _match_company(
     # (never an identified record, even a resume-ready one).
     fallback = [r for r in candidates if r.get("status") in fallback_statuses]
     if not fallback:
+        return None
+    # B-0628-02 (fix 2): the submit class restricts the fallback to a SINGLE candidate.
+    # The most-recent-record guess is only safe when there is exactly one record (the
+    # user obviously means it); for submit, guessing among ≥2 is the misattribution bug.
+    # Interview/outcome keep the most-recent fallback by design (a user who "just got out
+    # of the screen" with no name almost always means their most recent application).
+    if single_candidate_fallback_only and len(fallback) != 1:
         return None
     return max(
         fallback, key=lambda r: r.get("submitted_at") or r.get("updated_at") or ""
@@ -423,6 +431,7 @@ def detect_submit(text, user_dir: Path) -> dict | None:
         user_dir,
         statuses=frozenset({"materials_ready", "identified"}) | _ACTIVE_STATUSES,
         fallback_statuses=frozenset({"materials_ready"}) | _ACTIVE_STATUSES,
+        single_candidate_fallback_only=True,  # B-0628-02: don't guess among ≥2 on unnamed submit
     )
     return {"company": company} if company else None
 
