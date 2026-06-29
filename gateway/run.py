@@ -2351,6 +2351,15 @@ class GatewayRunner:
     async def _handle_message_with_agent(self, event, source, _quick_key: str):
         """Inner handler that runs under the _running_agents sentinel guard."""
         _msg_start_time = time.time()
+        # Mint the run-scoped trace_id at the very start of the turn — before the
+        # inbound-message log below — so the user's own message line carries it
+        # too (not just the post-_set_session_env lines). _set_session_env reuses
+        # this id; spawned Strategist/Executor inherit it via HERMES_TRACE_ID.
+        from tools.session_context import (
+            new_trace_id as _ctx_new_trace_id,
+            set_trace_id as _ctx_set_trace_id,
+        )
+        _ctx_set_trace_id(_ctx_new_trace_id())
         _platform_name = source.platform.value if hasattr(source.platform, "value") else str(source.platform)
         _msg_preview = (event.text or "")[:80].replace("\n", " ")
         logger.info(
@@ -6950,6 +6959,7 @@ class GatewayRunner:
         from tools.session_context import (
             set_session as _ctx_set_session,
             new_trace_id as _ctx_new_trace_id,
+            get_trace_id as _ctx_get_trace_id,
         )
 
         platform_value = context.source.platform.value
@@ -6961,9 +6971,11 @@ class GatewayRunner:
             chat_name=chat_name,
             thread_id=thread_id,
             user_id=context.source.user_id,
-            # Fresh run id per inbound turn; spawned Strategist/Executor inherit
-            # it via HERMES_TRACE_ID env so the whole run greps by one key.
-            trace_id=_ctx_new_trace_id(),
+            # Reuse the run id minted at the very start of the inbound handler
+            # (so the inbound-message log carries it too); mint here only as a
+            # fallback for any caller that didn't pre-mint. set_session resets
+            # all session ContextVars, so we must pass it through, not drop it.
+            trace_id=_ctx_get_trace_id() or _ctx_new_trace_id(),
         )
 
     def _clear_session_env(self) -> None:
