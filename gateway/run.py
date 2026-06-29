@@ -6947,7 +6947,10 @@ class GatewayRunner:
         when two users messaged within the same async window. Subprocess
         callers (cron scheduler) inject env explicitly at spawn time.
         """
-        from tools.session_context import set_session as _ctx_set_session
+        from tools.session_context import (
+            set_session as _ctx_set_session,
+            new_trace_id as _ctx_new_trace_id,
+        )
 
         platform_value = context.source.platform.value
         chat_name = context.source.chat_name
@@ -6958,6 +6961,9 @@ class GatewayRunner:
             chat_name=chat_name,
             thread_id=thread_id,
             user_id=context.source.user_id,
+            # Fresh run id per inbound turn; spawned Strategist/Executor inherit
+            # it via HERMES_TRACE_ID env so the whole run greps by one key.
+            trace_id=_ctx_new_trace_id(),
         )
 
     def _clear_session_env(self) -> None:

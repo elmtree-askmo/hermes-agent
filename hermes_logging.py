@@ -13,6 +13,7 @@ secrets are never written to disk.
 """
 
 import logging
+import os
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Optional
@@ -24,9 +25,49 @@ from hermes_constants import get_hermes_home
 # unless ``force=True``.
 _logging_initialized = False
 
-# Default log format — includes timestamp, level, logger name, and message.
-_LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
-_LOG_FORMAT_VERBOSE = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+# Default log format — includes timestamp, level, run-scoped trace id, logger
+# name, and message. ``trace=<id>`` joins every line of one Coach run (and the
+# Strategist / Executor it spawns); ``trace=-`` means no active run (startup).
+_LOG_FORMAT = "%(asctime)s %(levelname)s trace=%(trace_id)s %(name)s: %(message)s"
+_LOG_FORMAT_VERBOSE = "%(asctime)s - %(name)s - %(levelname)s - trace=%(trace_id)s - %(message)s"
+
+# Guard so the LogRecord factory is wrapped at most once (setup_logging is
+# idempotent but may be re-invoked with force=True).
+_trace_factory_installed = False
+
+
+def _install_trace_record_factory() -> None:
+    """Wrap the LogRecord factory so every record carries ``trace_id`` from the
+    session ContextVar (``"-"`` when no run is active).
+
+    Done via the record factory rather than a per-handler ``Filter`` so the
+    attribute is present on *every* record — including third-party and
+    propagated ones — and ``%(trace_id)s`` in the format can never KeyError.
+    Idempotent.
+    """
+    global _trace_factory_installed
+    if _trace_factory_installed:
+        return
+
+    old_factory = logging.getLogRecordFactory()
+
+    def _factory(*args, **kwargs):
+        record = old_factory(*args, **kwargs)
+        try:
+            from tools.session_context import get_trace_id
+            tid = get_trace_id()
+        except Exception:
+            tid = None
+        # Subprocess fallback: spawned Strategist/Executor have no inbound
+        # session so the ContextVar is unset, but the spawn path injects
+        # HERMES_TRACE_ID into their env — read it so their logs join the run.
+        if not tid:
+            tid = os.environ.get("HERMES_TRACE_ID") or None
+        record.trace_id = tid or "-"
+        return record
+
+    logging.setLogRecordFactory(_factory)
+    _trace_factory_installed = True
 
 # Third-party loggers that are noisy at DEBUG/INFO level.
 _NOISY_LOGGERS = (
@@ -106,6 +147,10 @@ def setup_logging(
 
     # Lazy import to avoid circular dependency at module load time.
     from agent.redact import RedactingFormatter
+
+    # Stamp every record with trace_id before any handler uses the format that
+    # references it (otherwise %(trace_id)s would KeyError).
+    _install_trace_record_factory()
 
     root = logging.getLogger()
 

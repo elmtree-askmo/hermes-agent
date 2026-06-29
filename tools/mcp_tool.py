@@ -847,11 +847,13 @@ class MCPServerTask:
             get_chat_id as _ctx_chat,
             get_platform as _ctx_platform,
             get_user_id as _ctx_user,
+            get_trace_id as _ctx_trace,
         )
         for env_key, ctx_value in (
             ("HERMES_SESSION_USER_ID", _ctx_user()),
             ("HERMES_SESSION_CHAT_ID", _ctx_chat()),
             ("HERMES_SESSION_PLATFORM", _ctx_platform()),
+            ("HERMES_TRACE_ID", _ctx_trace()),
         ):
             if ctx_value:
                 safe_env[env_key] = ctx_value
@@ -1285,13 +1287,25 @@ def _make_tool_handler(server_name: str, tool_name: str, tool_timeout: float):
                 _tts = None
             if not _tts:
                 _tts = os.environ.get("HERMES_SESSION_THREAD_TS", "").strip() or None
+            # Run-scoped trace id: per-call so it tracks the current turn (the
+            # spawn-time env above is frozen at first spawn). The Artemis MCP
+            # server re-injects it into the Strategist/Executor subprocess env.
+            try:
+                from tools.session_context import get_trace_id as _ctx_trace
+                _trace = _ctx_trace()
+            except Exception:
+                _trace = None
+            if not _trace:
+                _trace = os.environ.get("HERMES_TRACE_ID", "").strip() or None
             _call_meta: dict[str, str] | None = None
-            if _uid or _tts:
+            if _uid or _tts or _trace:
                 _call_meta = {}
                 if _uid:
                     _call_meta["hermes_session_user_id"] = _uid
                 if _tts:
                     _call_meta["hermes_session_thread_ts"] = _tts
+                if _trace:
+                    _call_meta["hermes_trace_id"] = _trace
             if _call_meta:
                 result = await server.session.call_tool(
                     tool_name, arguments=args, meta=_call_meta

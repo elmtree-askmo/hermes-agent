@@ -12,6 +12,7 @@ ContextVars here first.
 
 from __future__ import annotations
 
+import uuid
 from contextvars import ContextVar
 from typing import Optional
 
@@ -36,6 +37,19 @@ session_user_id: ContextVar[Optional[str]] = ContextVar("hermes_session_user_id"
 # user sees one cohesive turn instead of split across main + thread.
 session_thread_ts: ContextVar[Optional[str]] = ContextVar("hermes_session_thread_ts", default=None)
 
+# Run-scoped trace id. The gateway generates a fresh id per inbound turn (and
+# the cron scheduler per job); it follows the asyncio task so every log line
+# in the run carries it. The MCP subprocess spawn path materializes it into
+# ``HERMES_TRACE_ID`` env so spawned subagents (Strategist / Executor) inherit
+# the same id and the whole Coach→Strategist→Executor run joins on one key.
+session_trace_id: ContextVar[Optional[str]] = ContextVar("hermes_session_trace_id", default=None)
+
+
+def new_trace_id() -> str:
+    """Generate a short run-scoped trace id (12 hex chars — enough for grep
+    uniqueness while keeping log lines readable)."""
+    return uuid.uuid4().hex[:12]
+
 
 def set_session(
     *,
@@ -44,12 +58,14 @@ def set_session(
     chat_name: Optional[str] = None,
     thread_id: Optional[str] = None,
     user_id: Optional[str] = None,
+    trace_id: Optional[str] = None,
 ) -> None:
     session_platform.set(platform)
     session_chat_id.set(chat_id)
     session_chat_name.set(chat_name)
     session_thread_id.set(thread_id)
     session_user_id.set(user_id)
+    session_trace_id.set(trace_id)
 
 
 def clear_session() -> None:
@@ -59,6 +75,7 @@ def clear_session() -> None:
     session_thread_id.set(None)
     session_user_id.set(None)
     session_thread_ts.set(None)
+    session_trace_id.set(None)
 
 
 def get_chat_id() -> Optional[str]:
@@ -87,3 +104,14 @@ def get_thread_ts() -> Optional[str]:
 
 def set_thread_ts(ts: Optional[str]) -> None:
     session_thread_ts.set(ts)
+
+
+def get_trace_id() -> Optional[str]:
+    return session_trace_id.get()
+
+
+def set_trace_id(trace_id: Optional[str]) -> None:
+    """Set the trace id directly — used by subprocess startup, which reads
+    ``HERMES_TRACE_ID`` env then seeds the ContextVar without a full
+    ``set_session`` (no inbound Slack context in that path)."""
+    session_trace_id.set(trace_id)

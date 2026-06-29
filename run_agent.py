@@ -5937,6 +5937,10 @@ class AIAgent:
                 old_title = self._session_db.get_session_title(self.session_id)
                 self._session_db.end_session(self.session_id, "compression")
                 old_session_id = self.session_id
+                # Remember the pre-compression session so the next turn-start
+                # anchor records it as parent_session_id — nests this run's
+                # compression slices under their root instead of orphaning them.
+                self._compressed_from = old_session_id
                 self.session_id = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
                 # Update session_log_file to point to the new session's JSON file
                 self.session_log_file = self.logs_dir / f"session_{self.session_id}.json"
@@ -7149,6 +7153,19 @@ class AIAgent:
         #
         # All injected context is ephemeral (not persisted to session DB).
         _plugin_user_context = ""
+        # Observability (Tier 0 + Tier 1): bind this turn's trace_id <->
+        # session_id <-> user_id via an anchor log line + the shared
+        # trace_index.jsonl. Fires once per user turn for every agent (Coach,
+        # Strategist, Executor, cron) since they all reach this point.
+        try:
+            from agent.trace_index import record_turn as _record_turn
+            _record_turn(
+                self.session_id,
+                platform=getattr(self, "platform", None),
+                parent_session_id=getattr(self, "_compressed_from", None),
+            )
+        except Exception:
+            pass
         try:
             from hermes_cli.plugins import invoke_hook as _invoke_hook
             _pre_results = _invoke_hook(

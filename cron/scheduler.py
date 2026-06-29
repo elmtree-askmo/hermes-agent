@@ -1836,6 +1836,12 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
     logger.info("Prompt: %s", prompt[:100])
 
     try:
+        # Run-scoped trace id for this cron job — written to env so any
+        # subprocess this job spawns (MCP server, Strategist/Executor) inherits
+        # it and this process's own logs join the run. Cleaned in finally.
+        from tools.session_context import new_trace_id as _ctx_new_trace_id
+        _cron_trace = _ctx_new_trace_id()
+        os.environ["HERMES_TRACE_ID"] = _cron_trace
         # Inject origin context so the agent's send_message tool knows the chat.
         # Must be INSIDE the try block so the finally cleanup always runs.
         if origin:
@@ -1856,6 +1862,7 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
                 chat_id=str(origin["chat_id"]),
                 chat_name=origin.get("chat_name"),
                 user_id=origin.get("user_id"),
+                trace_id=_cron_trace,
             )
         # Re-read .env and config.yaml fresh every run so provider/key
         # changes take effect without a gateway restart.
@@ -2099,6 +2106,7 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
             "HERMES_SESSION_CHAT_ID",
             "HERMES_SESSION_CHAT_NAME",
             "HERMES_SESSION_USER_ID",
+            "HERMES_TRACE_ID",
             "HERMES_CRON_AUTO_DELIVER_PLATFORM",
             "HERMES_CRON_AUTO_DELIVER_CHAT_ID",
             "HERMES_CRON_AUTO_DELIVER_THREAD_ID",
