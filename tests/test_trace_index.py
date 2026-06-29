@@ -26,7 +26,7 @@ def test_profile_name(monkeypatch, tmp_path):
     monkeypatch.setattr(ti, "get_hermes_home", lambda: tmp_path / "profiles" / "strategist")
     assert ti._profile_name() == "strategist"
     monkeypatch.setattr(ti, "get_hermes_home", lambda: tmp_path)
-    assert ti._profile_name() == "main"
+    assert ti._profile_name() == "coach"  # root home → Artemis role, not Hermes "default"
 
 
 def test_record_turn_appends_binding(monkeypatch, tmp_path):
@@ -44,7 +44,7 @@ def test_record_turn_appends_binding(monkeypatch, tmp_path):
     assert rec["session_id"] == "20260629_120421_5e115692"
     assert rec["user_id"] == "U0AR7E823MG"
     assert rec["platform"] == "slack"
-    assert rec["profile"] == "main"
+    assert rec["profile"] == "coach"
     assert "parent_session_id" not in rec  # fresh session, no compression parent
     assert "started_at" in rec
 

@@ -40,16 +40,18 @@ logger = logging.getLogger("trace")
 
 
 def _profile_name() -> str:
-    """Which profile this run is under — the role indicator and the locator for
-    the session file. ``~/.hermes/profiles/<name>`` -> ``<name>``
-    (e.g. ``strategist``/``executor``); the gateway/Coach root home -> ``main``.
+    """The run's role — also the session-file locator. ``~/.hermes/profiles/<name>``
+    -> ``<name>`` (``strategist``/``executor``, which double as their role); the
+    gateway root home -> ``coach`` (Hermes calls the root profile ``default``; we
+    label it by its Artemis role since the Coach — and the cron/briefing that run
+    in the same gateway process — are all coach-side).
 
     With this + ``session_id`` the session file is at
-    ``<root>/profiles/<profile>/sessions/<session_id>.jsonl`` (or, for
-    ``main``, ``<root>/sessions/<session_id>.jsonl``).
+    ``<root>/profiles/<role>/sessions/<session_id>.jsonl`` (or, for ``coach``,
+    ``<root>/sessions/<session_id>.jsonl`` — the root home, no profile subdir).
     """
     home = get_hermes_home()
-    return home.name if home.parent.name == "profiles" else "main"
+    return home.name if home.parent.name == "profiles" else "coach"
 
 
 def _trace_index_path() -> Path:
