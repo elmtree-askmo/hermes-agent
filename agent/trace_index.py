@@ -93,6 +93,13 @@ def record_turn(
     try:
         from tools.session_context import get_trace_id, get_user_id
         trace_id = get_trace_id() or os.environ.get("HERMES_TRACE_ID") or "-"
+        if trace_id == "-":
+            # No trace context → this isn't a traced entry-point run. Every real
+            # entry (gateway turn / cron job / batch) mints a trace, so a missing
+            # one means a background/maintenance invocation that still passes
+            # through pre_llm_call (e.g. the session-expiry memory flush). Don't
+            # pollute the correlation index with an uncorrelatable all-"-" row.
+            return
         user_id = get_user_id() or os.environ.get("HERMES_SESSION_USER_ID") or "-"
         plat = platform or "-"
 

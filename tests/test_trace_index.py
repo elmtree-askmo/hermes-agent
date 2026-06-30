@@ -52,11 +52,24 @@ def test_record_turn_appends_binding(monkeypatch, tmp_path):
 def test_record_turn_appends_not_truncates(monkeypatch, tmp_path):
     """Concurrent agents append; the index must accumulate, never overwrite."""
     monkeypatch.setattr(ti, "get_hermes_home", lambda: tmp_path)
-    sc.clear_session()
-    ti.record_turn("sessA")
-    ti.record_turn("sessB")
+    sc.set_session(platform="cli", chat_id="-", trace_id="runX")
+    try:
+        ti.record_turn("sessA")
+        ti.record_turn("sessB")
+    finally:
+        sc.clear_session()
     lines = (tmp_path / "logs" / "trace_index.jsonl").read_text().strip().splitlines()
     assert [json.loads(l)["session_id"] for l in lines] == ["sessA", "sessB"]
+
+
+def test_skips_when_no_trace_context(monkeypatch, tmp_path):
+    """A contextless run (no ContextVar, no env) — e.g. the session-expiry
+    memory flush passing through pre_llm_call — must NOT write an all-"-" row."""
+    monkeypatch.setattr(ti, "get_hermes_home", lambda: tmp_path)
+    monkeypatch.delenv("HERMES_TRACE_ID", raising=False)
+    sc.clear_session()
+    ti.record_turn("flush_sess")
+    assert not (tmp_path / "logs" / "trace_index.jsonl").exists()
 
 
 def test_subprocess_env_fallback(monkeypatch, tmp_path):
@@ -86,8 +99,11 @@ def test_anchor_log_line_emitted(monkeypatch, tmp_path, caplog):
 def test_fail_open_on_bad_home(monkeypatch):
     """A broken index path must not raise into the turn."""
     monkeypatch.setattr(ti, "get_hermes_home", lambda: (_ for _ in ()).throw(RuntimeError("boom")))
-    sc.clear_session()
-    ti.record_turn("sessErr")  # must not raise
+    sc.set_session(platform="cli", chat_id="-", trace_id="runErr")  # real trace → reaches the bad home
+    try:
+        ti.record_turn("sessErr")  # must not raise despite the broken path
+    finally:
+        sc.clear_session()
 
 
 def test_parent_session_id_nests_compression_slice(monkeypatch, tmp_path):
