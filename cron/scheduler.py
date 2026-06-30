@@ -1832,16 +1832,21 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
     origin = _resolve_origin(job)
     _cron_session_id = f"cron_{job_id}_{_hermes_now().strftime('%Y%m%d_%H%M%S')}"
 
-    logger.info("Running job '%s' (ID: %s)", job_name, job_id)
-    logger.info("Prompt: %s", prompt[:100])
-
     try:
-        # Run-scoped trace id for this cron job — written to env so any
-        # subprocess this job spawns (MCP server, Strategist/Executor) inherits
-        # it and this process's own logs join the run. Cleaned in finally.
-        from tools.session_context import new_trace_id as _ctx_new_trace_id
+        # Run-scoped trace id for this cron job, minted FIRST — so even the
+        # "Running job" / "Prompt" logs below carry it. Written to env (so any
+        # subprocess this job spawns inherits it) + the ContextVar; cleaned in
+        # finally.
+        from tools.session_context import (
+            new_trace_id as _ctx_new_trace_id,
+            set_trace_id as _ctx_set_trace_id,
+        )
         _cron_trace = _ctx_new_trace_id()
         os.environ["HERMES_TRACE_ID"] = _cron_trace
+        _ctx_set_trace_id(_cron_trace)
+
+        logger.info("Running job '%s' (ID: %s)", job_name, job_id)
+        logger.info("Prompt: %s", prompt[:100])
         # Inject origin context so the agent's send_message tool knows the chat.
         # Must be INSIDE the try block so the finally cleanup always runs.
         if origin:
