@@ -399,7 +399,7 @@ class PluginManager:
         loaded = LoadedPlugin(manifest=manifest)
 
         try:
-            if manifest.source in ("user", "project"):
+            if manifest.source in ("user", "project", "bundled"):
                 module = self._load_directory_module(manifest)
             else:
                 module = self._load_entrypoint_module(manifest)
