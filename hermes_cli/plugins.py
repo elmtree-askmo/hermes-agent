@@ -57,6 +57,7 @@ VALID_HOOKS: Set[str] = {
     "post_tool_call",
     "pre_llm_call",
     "post_llm_call",
+    "transform_llm_output",
     "pre_api_request",
     "post_api_request",
     "on_session_start",
@@ -550,6 +551,25 @@ def invoke_hook(hook_name: str, **kwargs: Any) -> List[Any]:
     Returns a list of non-``None`` return values from plugin callbacks.
     """
     return get_plugin_manager().invoke_hook(hook_name, **kwargs)
+
+
+def apply_transform_llm_output(response_text: str, **kwargs: Any) -> str:
+    """Fire the ``transform_llm_output`` hook and honour a rewrite.
+
+    Fired once per turn after the tool loop, before the final reply is
+    returned. The first non-empty *string* a plugin returns REPLACES the reply
+    (the modifier use — output redaction / guardrails); ``None`` / non-string
+    returns leave it unchanged (the observer use — e.g. an OTLP plugin closing
+    its per-turn span). Fail-safe: a raising hook never loses the original
+    reply.
+    """
+    try:
+        for result in invoke_hook("transform_llm_output", response_text=response_text, **kwargs):
+            if isinstance(result, str) and result:
+                return result
+    except Exception as exc:
+        logger.warning("transform_llm_output hook failed; keeping original reply: %s", exc)
+    return response_text
 
 
 def get_plugin_tool_names() -> Set[str]:

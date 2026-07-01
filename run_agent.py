@@ -9253,6 +9253,21 @@ class AIAgent:
         self._persist_session(messages, conversation_history)
 
 
+        # Plugin hook: transform_llm_output
+        # Fired once per turn before the reply is returned/sent. A plugin may
+        # return a non-empty string to REPLACE the reply (output redaction /
+        # guardrails); observers (e.g. an OTLP plugin closing its per-turn span)
+        # return None and leave it unchanged. Runs before post_llm_call so the
+        # observer hook sees the final (possibly rewritten) text.
+        if final_response and not interrupted:
+            from hermes_cli.plugins import apply_transform_llm_output as _apply_tlo
+            final_response = _apply_tlo(
+                final_response,
+                session_id=self.session_id,
+                model=self.model,
+                platform=getattr(self, "platform", None) or "",
+            )
+
         # Plugin hook: post_llm_call
         # Fired once per turn after the tool-calling loop completes.
         # Plugins can use this to persist conversation data (e.g. sync
