@@ -273,6 +273,9 @@ class PluginManager:
         # 3. Pip / entry-point plugins
         manifests.extend(self._scan_entry_points())
 
+        # 4. Bundled fork plugins (opt-in via HERMES_BUNDLED_PLUGINS)
+        manifests.extend(self._scan_bundled())
+
         # Load each manifest (skip user-disabled plugins)
         disabled = _get_disabled_plugins()
         for manifest in manifests:
@@ -331,6 +334,31 @@ class PluginManager:
             except Exception as exc:
                 logger.warning("Failed to parse %s: %s", manifest_file, exc)
 
+        return manifests
+
+    def _scan_bundled(self) -> List[PluginManifest]:
+        """Opt-in discovery of plugins bundled in the fork's own ``plugins/`` tree.
+
+        The base scanner reaches ``$HERMES_HOME/plugins``, project dirs, and
+        entry points — but NOT the fork's own ``plugins/`` (where upstream ships
+        ``observability/otel``, ``observability/langfuse``, etc.). This lets a
+        fork-bundled plugin load for every profile without copying it into each
+        profile's runtime ``plugins/`` dir. ``HERMES_BUNDLED_PLUGINS`` is a
+        comma-list of paths relative to that tree (e.g. ``observability/otel``);
+        only those load. Narrow port of upstream's bundled-plugin enable.
+        """
+        enabled = os.environ.get("HERMES_BUNDLED_PLUGINS", "").strip()
+        if not enabled:
+            return []
+        fork_plugins = Path(__file__).resolve().parent.parent / "plugins"
+        manifests: List[PluginManifest] = []
+        for rel in (p.strip() for p in enabled.split(",")):
+            if not rel:
+                continue
+            plugin_dir = (fork_plugins / rel).resolve()
+            for m in self._scan_directory(plugin_dir.parent, source="bundled"):
+                if m.path and Path(m.path).resolve() == plugin_dir:
+                    manifests.append(m)
         return manifests
 
     # -----------------------------------------------------------------------
