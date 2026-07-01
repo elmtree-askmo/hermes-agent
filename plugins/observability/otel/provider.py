@@ -128,6 +128,53 @@ def _try_genai_otel(
         return None
 
 
+def _derive_run_trace_id() -> Any:
+    """Artemis cross-process patch: the run's shared trace id as a 128-bit int,
+    or None for a random one.
+
+    ``HERMES_TRACE_ID`` is propagated across the separate Coach / Strategist /
+    Executor processes; deriving each process's root-span trace id from it puts
+    the three in ONE trace. ContextVar first (Coach in-process), env fallback
+    (a spawned subagent has no ContextVar). The short 12-hex id is padded to a
+    valid 32-hex W3C trace id.
+    """
+    import os
+
+    tid = ""
+    try:
+        from tools.session_context import get_trace_id
+
+        tid = get_trace_id() or ""
+    except Exception:
+        tid = ""
+    if not tid:
+        tid = os.environ.get("HERMES_TRACE_ID") or ""
+    hexid = "".join(ch for ch in tid.lower() if ch in "0123456789abcdef")
+    if not hexid:
+        return None
+    return int((hexid + "0" * 32)[:32], 16) or None
+
+
+class _ArtemisRunIdGenerator:
+    """OTel ``IdGenerator`` that seeds ROOT-span trace ids from the run's shared
+    ``HERMES_TRACE_ID`` (see :func:`_derive_run_trace_id`) so the three Hermes
+    processes stitch into one trace — with ``invoke_agent`` a real root (no
+    synthetic parent). Span ids stay random; falls back to fully random when
+    there's no run id.
+    """
+
+    def __init__(self) -> None:
+        from opentelemetry.sdk.trace.id_generator import RandomIdGenerator
+
+        self._rand = RandomIdGenerator()
+
+    def generate_span_id(self) -> int:
+        return self._rand.generate_span_id()
+
+    def generate_trace_id(self) -> int:
+        return _derive_run_trace_id() or self._rand.generate_trace_id()
+
+
 def _build_plain_otel(*, service_name: str, otlp_endpoint: str) -> Any:
     """Fallback path: vanilla OTel SDK + OTLP HTTP exporter."""
     try:
@@ -145,7 +192,9 @@ def _build_plain_otel(*, service_name: str, otlp_endpoint: str) -> Any:
                 "gen_ai.system": "hermes",
             }
         )
-        provider = TracerProvider(resource=resource)
+        provider = TracerProvider(
+            resource=resource, id_generator=_ArtemisRunIdGenerator()
+        )
         # OTLP HTTP traces endpoint convention is <endpoint>/v1/traces.
         exporter = OTLPSpanExporter(
             endpoint=otlp_endpoint.rstrip("/") + "/v1/traces"

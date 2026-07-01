@@ -71,52 +71,6 @@ def _set_if(span: Any, key: str, value: Any) -> None:
     span.set_attribute(key, value)
 
 
-def _artemis_run_context() -> Any:
-    """Artemis cross-process patch (not in upstream PR #48184).
-
-    Root each turn under the run's shared trace id. ``HERMES_TRACE_ID`` is
-    propagated across the separate Coach / Strategist / Executor processes
-    (env + MCP ``_meta``), so seeding the OTel trace from it stitches all three
-    processes into ONE trace instead of three disconnected ones. Returns
-    ``None`` when there's no run id — stock single-process behaviour (OTel
-    auto-generates a fresh trace).
-
-    The short 12-hex ``HERMES_TRACE_ID`` is padded to a valid 32-hex W3C
-    ``trace_id``; a deterministic synthetic parent ``span_id`` is derived from
-    it so every process resolves to the same trace via ``traceparent`` extract.
-    """
-    try:
-        import os
-
-        # ContextVar first (the in-process Coach turn's own id), env fallback
-        # (a spawned Strategist/Executor has no ContextVar but inherits
-        # HERMES_TRACE_ID). Same resolution order as hermes_logging's factory;
-        # env-first would let a stale cron value shadow the live turn.
-        tid = ""
-        try:
-            from tools.session_context import get_trace_id
-
-            tid = get_trace_id() or ""
-        except Exception:
-            tid = ""
-        if not tid:
-            tid = os.environ.get("HERMES_TRACE_ID") or ""
-        hexid = "".join(ch for ch in tid.lower() if ch in "0123456789abcdef")
-        if not hexid:
-            return None
-        trace_hex = (hexid + "0" * 32)[:32]
-        span_hex = (hexid + "1" * 16)[:16]
-        from opentelemetry.trace.propagation.tracecontext import (
-            TraceContextTextMapPropagator,
-        )
-
-        return TraceContextTextMapPropagator().extract(
-            {"traceparent": f"00-{trace_hex}-{span_hex}-01"}
-        )
-    except Exception:
-        return None
-
-
 class OtelGenAIEmitter:
     """Translate Hermes observability events into OTel GenAI spans.
 
@@ -159,9 +113,7 @@ class OtelGenAIEmitter:
         This is the session-boundary span. ``gen_ai.conversation.id`` carries
         the Hermes session id so any backend can group spans by session.
         """
-        with self._tracer.start_as_current_span(
-            OP_INVOKE_AGENT, context=_artemis_run_context()
-        ) as span:
+        with self._tracer.start_as_current_span(OP_INVOKE_AGENT) as span:
             span.set_attribute("gen_ai.operation.name", OP_INVOKE_AGENT)
             span.set_attribute("gen_ai.system", GEN_AI_SYSTEM)
             span.set_attribute("gen_ai.agent.name", self._agent_name)

@@ -1,10 +1,11 @@
 """Artemis cross-process patch for the OTLP plugin (not in upstream PR #48184).
 
 Coach / Strategist / Executor are separate processes; the stock plugin auto-
-generates a fresh OTel trace per process. `_artemis_run_context()` seeds each
-turn's root span from the shared `HERMES_TRACE_ID` so the three processes
-stitch into ONE trace. Uses three separate TracerProviders to simulate three
-processes.
+generates a fresh OTel trace per process. `_ArtemisRunIdGenerator` seeds each
+process's ROOT-span trace id from the shared `HERMES_TRACE_ID` so the three
+stitch into ONE trace — with `invoke_agent` a real root (parent=None), which is
+what lets a backend anchor a viewable trace. Uses three separate
+TracerProviders to simulate three processes.
 """
 
 from __future__ import annotations
@@ -16,11 +17,12 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
 )
 
 from plugins.observability.otel.emitter import OtelGenAIEmitter
+from plugins.observability.otel.provider import _ArtemisRunIdGenerator
 
 
 def _emitter():
     exporter = InMemorySpanExporter()
-    provider = TracerProvider()
+    provider = TracerProvider(id_generator=_ArtemisRunIdGenerator())
     provider.add_span_processor(SimpleSpanProcessor(exporter))
     return OtelGenAIEmitter(provider.get_tracer("test")), exporter
 
@@ -49,6 +51,19 @@ def test_three_processes_share_one_trace(monkeypatch):
         assert len(spans) == 1
         trace_ids.append(spans[0].context.trace_id)
     assert len(set(trace_ids)) == 1  # all three under ONE trace
+
+
+def test_invoke_agent_is_a_real_root(monkeypatch):
+    """The stitched root must be a real root (parent=None) so the backend can
+    anchor a trace. The earlier synthetic-parent approach produced 0-root
+    traces that never materialised in the UI."""
+    _clear_contextvar()
+    monkeypatch.setenv("HERMES_TRACE_ID", "abc123def456")
+    em, exp = _emitter()
+    _run_turn(em, "s")
+    span = exp.get_finished_spans()[0]
+    assert span.name == "invoke_agent"
+    assert span.parent is None
 
 
 def test_derived_trace_id_embeds_the_hermes_id(monkeypatch):
