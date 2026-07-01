@@ -88,14 +88,19 @@ def _artemis_run_context() -> Any:
     try:
         import os
 
-        tid = os.environ.get("HERMES_TRACE_ID") or ""
-        if not tid:
-            try:
-                from tools.session_context import get_trace_id
+        # ContextVar first (the in-process Coach turn's own id), env fallback
+        # (a spawned Strategist/Executor has no ContextVar but inherits
+        # HERMES_TRACE_ID). Same resolution order as hermes_logging's factory;
+        # env-first would let a stale cron value shadow the live turn.
+        tid = ""
+        try:
+            from tools.session_context import get_trace_id
 
-                tid = get_trace_id() or ""
-            except Exception:
-                tid = ""
+            tid = get_trace_id() or ""
+        except Exception:
+            tid = ""
+        if not tid:
+            tid = os.environ.get("HERMES_TRACE_ID") or ""
         hexid = "".join(ch for ch in tid.lower() if ch in "0123456789abcdef")
         if not hexid:
             return None

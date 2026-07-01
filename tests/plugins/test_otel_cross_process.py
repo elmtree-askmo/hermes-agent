@@ -60,6 +60,22 @@ def test_derived_trace_id_embeds_the_hermes_id(monkeypatch):
     assert format(span.context.trace_id, "032x") == "abc123def456" + "0" * 20
 
 
+def test_contextvar_takes_precedence_over_env(monkeypatch):
+    """The in-process Coach turn's ContextVar id wins over a (possibly stale)
+    HERMES_TRACE_ID env — matching hermes_logging's resolution order."""
+    from tools.session_context import set_trace_id, clear_session
+
+    monkeypatch.setenv("HERMES_TRACE_ID", "eeeeeeeeeeee")  # stale env
+    set_trace_id("abc123def456")  # live turn
+    try:
+        em, exp = _emitter()
+        _run_turn(em, "s")
+        span = exp.get_finished_spans()[0]
+        assert format(span.context.trace_id, "032x") == "abc123def456" + "0" * 20
+    finally:
+        clear_session()
+
+
 def test_no_run_id_falls_back_to_auto_trace(monkeypatch):
     monkeypatch.delenv("HERMES_TRACE_ID", raising=False)
     _clear_contextvar()
