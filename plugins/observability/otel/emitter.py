@@ -117,6 +117,10 @@ class OtelGenAIEmitter:
             span.set_attribute("gen_ai.operation.name", OP_INVOKE_AGENT)
             span.set_attribute("gen_ai.system", GEN_AI_SYSTEM)
             span.set_attribute("gen_ai.agent.name", self._agent_name)
+            # Langfuse-specific: name the trace after the agent role so its list
+            # entry isn't blank and the trace header isn't a duplicate of the
+            # invoke_agent span. Other OTLP backends ignore this attribute.
+            _set_if(span, "langfuse.trace.name", self._agent_name)
             _set_if(span, "gen_ai.conversation.id", session_id)
             # Belt-and-suspenders: also stamp the bare session.id attribute
             # some backends group on directly.
