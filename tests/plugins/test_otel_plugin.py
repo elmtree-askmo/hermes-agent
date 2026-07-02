@@ -718,6 +718,27 @@ class TestPluginAdapter:
         assert span.name == "invoke_agent executor"          # local role on the span
         assert span.attributes["langfuse.trace.name"] == "strategy-refresh"  # origin label
 
+    def test_log_pipeline_off_by_default(self, exporter_and_tracer, monkeypatch):
+        """The dashboard log-record pipeline is opt-in: trace-only backends
+        (Langfuse) 404 on /v1/logs, so by default only spans are exported and
+        build_logger is never called. Spans must be unaffected."""
+        monkeypatch.delenv("HERMES_OTEL_LOGS_ENABLED", raising=False)
+        exporter, tracer = exporter_and_tracer
+        plugin, provider = _fresh_plugin()
+        monkeypatch.setattr(provider, "build_tracer", lambda **_: tracer)
+        calls = []
+        monkeypatch.setattr(provider, "build_logger", lambda **kw: calls.append(kw))
+
+        ctx = _FakeCtx()
+        plugin.register(ctx)
+        ctx.hooks["on_session_start"](session_id="sess-l", model="m")
+        ctx.hooks["pre_llm_call"](session_id="sess-l", user_message="hi")
+        ctx.hooks["on_session_end"](session_id="sess-l")
+
+        assert calls == []  # log pipeline never built
+        # spans still flow
+        assert OP_INVOKE_AGENT in _by_name(exporter.get_finished_spans())
+
     def test_session_end_sweeps_orphaned_precall_spans(
         self, exporter_and_tracer, monkeypatch
     ):
@@ -865,6 +886,7 @@ class TestPluginAdapter:
         but no prompts in /agent-coding": the prompt only ever rode on the span
         as ``gen_ai.prompt``, which the log-record-based dashboard never sees.
         """
+        monkeypatch.setenv("HERMES_OTEL_LOGS_ENABLED", "true")  # these tests assert the (opt-in) log pipeline
         monkeypatch.setenv("HERMES_OTEL_CAPTURE_CONTENT", "true")
         exporter, tracer = exporter_and_tracer
         plugin, provider = _fresh_plugin()
@@ -912,6 +934,7 @@ class TestPluginAdapter:
         assert "gen_ai.completion" not in attrs
 
     def test_hooks_map_hermes_events_end_to_end(self, exporter_and_tracer, monkeypatch):
+        monkeypatch.setenv("HERMES_OTEL_LOGS_ENABLED", "true")  # these tests assert the (opt-in) log pipeline
         exporter, tracer = exporter_and_tracer
         plugin, provider = _fresh_plugin()
         # Inject our in-memory tracer + logger instead of the network-bound ones.
@@ -972,6 +995,7 @@ class TestPluginAdapter:
         self, exporter_and_tracer, monkeypatch
     ):
         """When the agent reports no price, cost is estimated from model size."""
+        monkeypatch.setenv("HERMES_OTEL_LOGS_ENABLED", "true")  # these tests assert the (opt-in) log pipeline
         exporter, tracer = exporter_and_tracer
         plugin, provider = _fresh_plugin()
         monkeypatch.setattr(provider, "build_tracer", lambda **_: tracer)

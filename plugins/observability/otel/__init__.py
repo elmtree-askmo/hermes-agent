@@ -23,6 +23,8 @@ Optional env vars (set via ``hermes tools`` or ``~/.hermes/.env``):
   HERMES_OTEL_TRACE_NAME      - langfuse.trace.name value; run-origin role
                                 propagated across processes (default: agent name)
   HERMES_OTEL_CAPTURE_CONTENT - "true" to attach prompt/response text (default: off, privacy-gated)
+  HERMES_OTEL_LOGS_ENABLED    - "true" to also export dashboard OTLP log records
+                                (default: off — trace-only backends 404 on /v1/logs)
   HERMES_OTEL_USER_ID         - stamp user.id on the resource
 
 Standard OTel env vars are honoured as fallbacks: OTEL_SERVICE_NAME,
@@ -145,28 +147,37 @@ def _get_emitter() -> Optional[Any]:
                 trace_name=trace_name,
                 capture_content=capture,
             )
-            # Build the parallel dashboard log emitter. Failure here must NOT
-            # disable spans — log emission is best-effort; build_logger() returns
-            # None on any problem and OtelLogEmitter then no-ops.
+            # Build the parallel dashboard log emitter. OFF by default: it
+            # serves agent-coding activity dashboards that aggregate OTLP *log
+            # records* — trace-only backends (e.g. Langfuse) don't implement
+            # /v1/logs, so an enabled pipeline just 404s on every batch export
+            # and floods errors.log with retry noise. Opt in with
+            # HERMES_OTEL_LOGS_ENABLED=true when the backend ingests logs.
+            # Failure here must NOT disable spans — log emission is
+            # best-effort; build_logger() returns None on any problem and
+            # OtelLogEmitter then no-ops.
             global _LOG_EMITTER
-            try:
-                otel_logger = build_logger(
-                    service_name=service_name,
-                    otlp_endpoint=otlp_endpoint,
-                    user_id=user_id,
-                )
-                _LOG_EMITTER = OtelLogEmitter(
-                    otel_logger,
-                    agent_name=agent_name,
-                    capture_content=capture,
-                )
-            except Exception:  # pragma: no cover - fail-open
-                logger.warning(
-                    "observability/otel: dashboard log emitter init failed; "
-                    "spans still emit",
-                    exc_info=True,
-                )
-                _LOG_EMITTER = OtelLogEmitter(None)
+            if not _env_bool("HERMES_OTEL_LOGS_ENABLED"):
+                _LOG_EMITTER = OtelLogEmitter(None)  # no-op pipeline
+            else:
+                try:
+                    otel_logger = build_logger(
+                        service_name=service_name,
+                        otlp_endpoint=otlp_endpoint,
+                        user_id=user_id,
+                    )
+                    _LOG_EMITTER = OtelLogEmitter(
+                        otel_logger,
+                        agent_name=agent_name,
+                        capture_content=capture,
+                    )
+                except Exception:  # pragma: no cover - fail-open
+                    logger.warning(
+                        "observability/otel: dashboard log emitter init failed; "
+                        "spans still emit",
+                        exc_info=True,
+                    )
+                    _LOG_EMITTER = OtelLogEmitter(None)
         except Exception as exc:  # pragma: no cover - fail-open
             # Init failure is unexpected (bad endpoint, missing SDK piece): warn
             # so a misconfiguration is visible, but stay fail-open per the
