@@ -83,6 +83,22 @@ exchanges, decide the **dispatch shape** this turn needs.
   must take the turn itself (lead with a one-beat affect check) before
   any team work. The dispatch comes LATER — only if the user's NEXT turn
   explicitly asks to dig in / review / fix something.
+  **Also use `none` whenever the user wants to EMAIL / SEND a message to
+  a SPECIFIC PERSON they identify** — a recruiter, a contact, a named
+  person, "their email", "the company" (recipient is someone OTHER than
+  the user). This holds whether the message ALREADY EXISTS (send the
+  drafted follow-up) OR Coach must COMPOSE it now (a fresh thank-you /
+  intro / reply, or an apply-by-email posting the user pasted). Coach has
+  an outbound-email path: it drafts the note itself (or stages an existing
+  team draft) and sends it after the user confirms — so this is **Coach's
+  own turn**, NOT a Publicist "draft it for the user" dispatch (vs
+  `single`), and NOT an artifact pull (vs surface_existing *deliver*,
+  which sends a file TO THE USER). Examples: "send the follow-up to the
+  recruiter", "ok email it to Dana", "email Sarah at sarah@… to thank
+  her", "reply to the recruiter who reached out", "send Maya a quick
+  intro", "apply by emailing my resume to jobs@…". (Contrast: "draft a
+  cover letter for the Stripe role" — a formal artifact with NO specific
+  person to email → single/publicist.)
 
 - **single** — exactly ONE sub-agent owns the work. User asked for a
   specific deliverable artifact, OR for a single focused piece of work
@@ -179,6 +195,12 @@ exchanges, decide the **dispatch shape** this turn needs.
   want to read it or receive it, prefer deliver (handing over the file also
   lets them read it; a summary alone can't). Meaningful ONLY for
   surface_existing.
+  **Recipient guard:** deliver means the recipient is the **USER** ("send
+  ME", "so I can upload it"). If the user is asking to send the draft TO A
+  THIRD PARTY (a recruiter, a contact, a named person, "their email"),
+  that is NOT surface_existing at all — it is an outbound send → return
+  `none` (see the `none` dispatch type above). Do not set
+  `surface_deliver` for a third-party send.
 
 **How to judge multi vs single:**
 
