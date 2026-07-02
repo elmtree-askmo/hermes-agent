@@ -718,6 +718,36 @@ class TestPluginAdapter:
         assert span.name == "invoke_agent executor"          # local role on the span
         assert span.attributes["langfuse.trace.name"] == "strategy-refresh"  # origin label
 
+    def test_session_end_sweeps_orphaned_precall_spans(
+        self, exporter_and_tracer, monkeypatch
+    ):
+        """A pre_* hook opens a span; if the API call raises, the matching
+        post_* never fires. Session end must close (export) the orphans and
+        clear the dicts — otherwise a long-running gateway leaks open spans."""
+        exporter, tracer = exporter_and_tracer
+        plugin, provider = _fresh_plugin()
+        monkeypatch.setattr(provider, "build_tracer", lambda **_: tracer)
+        _le, ol = _in_memory_logger()
+        monkeypatch.setattr(provider, "build_logger", lambda **_: ol)
+
+        ctx = _FakeCtx()
+        plugin.register(ctx)
+        ctx.hooks["on_session_start"](session_id="sess-o", model="m")
+        ctx.hooks["pre_llm_call"](session_id="sess-o", user_message="hi")
+        # pre fires, post never does (simulated API error / interruption)
+        ctx.hooks["pre_api_request"](session_id="sess-o", api_call_count=1, model="m")
+        ctx.hooks["pre_tool_call"](session_id="sess-o", tool_name="t", tool_call_id="tc9")
+        ctx.hooks["on_session_end"](session_id="sess-o")
+
+        finished = exporter.get_finished_spans()
+        orphans = [
+            s for s in finished
+            if s.attributes.get("error.type") == "orphaned_no_post_hook"
+        ]
+        assert len(orphans) == 2  # both the chat and the tool span exported
+        # dicts swept — no leak
+        assert not plugin._OPEN_LLM_SPANS and not plugin._OPEN_TOOL_SPANS
+
     def test_cron_session_labels_trace_scheduled_with_job_id(
         self, exporter_and_tracer, monkeypatch
     ):

@@ -364,13 +364,33 @@ def on_session_start(**kwargs: Any) -> None:
 
 
 def _end_turn(**kwargs: Any) -> None:
-    """Close the ``invoke_agent`` span for a Hermes session, if open."""
+    """Close the ``invoke_agent`` span for a Hermes session, if open.
+
+    Also sweeps any orphaned per-call chat/tool spans for the session — a
+    pre_* hook opens the span, but the matching post_* never fires when the
+    API call raises or the turn is interrupted. Without the sweep those spans
+    never end and the dicts grow for the life of the (long-running) gateway.
+    Mirrors the bundled langfuse plugin's leftover-generation close at session
+    end. Keys are session-prefixed ("<session>:...") so the sweep is scoped.
+    """
     if _get_emitter() is None:
         return
     session_id = _session_id(kwargs)
     with _OPEN_TURNS_LOCK:
         cm = _OPEN_TURNS.pop(session_id, None)
         _OPEN_TURN_SPANS.pop(session_id, None)
+    prefix = f"{session_id}:"
+    orphans: list[Any] = []
+    with _OPEN_CALLS_LOCK:
+        for d in (_OPEN_LLM_SPANS, _OPEN_TOOL_SPANS):
+            for key in [k for k in d if k.startswith(prefix)]:
+                orphans.append(d.pop(key))
+    for span in orphans:
+        try:
+            span.set_attribute("error.type", "orphaned_no_post_hook")
+            span.end()
+        except Exception:
+            logger.debug("failed to close orphaned per-call span", exc_info=True)
     _close_cm(cm)
 
 
