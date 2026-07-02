@@ -109,7 +109,13 @@ def log_exporter_and_logger():
 
 
 def _by_name(spans):
-    return {s.name: s for s in spans}
+    # Key by gen_ai.operation.name (stable) rather than span name — the
+    # invoke_agent span name now carries the agent role ("invoke_agent <role>").
+    out = {}
+    for s in spans:
+        op = (s.attributes or {}).get("gen_ai.operation.name") or s.name
+        out[op] = s
+    return out
 
 
 def _log_attrs(records):
@@ -140,6 +146,54 @@ class TestEmitter:
         assert attrs["gen_ai.conversation.id"] == "sess-123"
         assert attrs["session.id"] == "sess-123"
         assert attrs["gen_ai.request.model"] == "hermes-llama-70b"
+
+    def test_turn_span_stamps_user_id_and_run_trace_id(self, exporter_and_tracer):
+        # user.id -> Langfuse trace userId (filter by user); the short
+        # HERMES_TRACE_ID -> trace metadata so a trace cross-refs with the logs.
+        exporter, tracer = exporter_and_tracer
+        emitter = OtelGenAIEmitter(tracer)
+
+        with emitter.turn_span(session_id="s", user_id="U123", run_trace_id="9cfc9294d631"):
+            pass
+
+        attrs = _by_name(exporter.get_finished_spans())[OP_INVOKE_AGENT].attributes
+        assert attrs["user.id"] == "U123"
+        assert attrs["langfuse.user.id"] == "U123"
+        assert attrs["hermes.trace_id"] == "9cfc9294d631"
+        assert attrs["langfuse.trace.metadata.hermes_trace_id"] == "9cfc9294d631"
+
+    def test_invoke_agent_span_name_carries_role(self, exporter_and_tracer):
+        # OTel GenAI convention: span name = "invoke_agent <agent_name>" so the
+        # three cross-process roots read as coach / strategist / executor in the
+        # tree. operation.name stays the bare "invoke_agent".
+        exporter, tracer = exporter_and_tracer
+        emitter = OtelGenAIEmitter(tracer, agent_name="coach")
+
+        with emitter.turn_span(session_id="s"):
+            pass
+
+        span = exporter.get_finished_spans()[0]
+        assert span.name == "invoke_agent coach"
+        assert span.attributes["gen_ai.operation.name"] == OP_INVOKE_AGENT
+        assert span.attributes["gen_ai.agent.name"] == "coach"
+        # No explicit trace_name => trace named after this process's own role
+        # (it is the origin).
+        assert span.attributes["langfuse.trace.name"] == "coach"
+
+    def test_trace_name_overrides_langfuse_trace_name(self, exporter_and_tracer):
+        # A downstream role (strategist) carries the run origin's trace name
+        # (coach) so the whole trace stays named after the initiator, while its
+        # own agent.name + span name stay strategist.
+        exporter, tracer = exporter_and_tracer
+        emitter = OtelGenAIEmitter(tracer, agent_name="strategist", trace_name="coach")
+
+        with emitter.turn_span(session_id="s"):
+            pass
+
+        span = exporter.get_finished_spans()[0]
+        assert span.name == "invoke_agent strategist"
+        assert span.attributes["gen_ai.agent.name"] == "strategist"
+        assert span.attributes["langfuse.trace.name"] == "coach"
 
     def test_chat_span_carries_tokens_cost_and_finish_reason(self, exporter_and_tracer):
         exporter, tracer = exporter_and_tracer
@@ -224,6 +278,71 @@ class TestEmitter:
         spans = _by_name(exporter.get_finished_spans())
         assert spans[OP_INVOKE_AGENT].attributes["gen_ai.prompt"] == "hello"
         assert spans[OP_CHAT].attributes["gen_ai.completion"] == "world"
+
+    def test_tool_content_maps_to_langfuse_input_output(self, exporter_and_tracer):
+        # Tool args/result live on gen_ai.tool.arguments/result, which Langfuse
+        # does NOT surface as Input/Output — so we mirror them onto the
+        # langfuse.observation.input/output attributes too. Content-gated.
+        exporter, tracer = exporter_and_tracer
+        emitter = OtelGenAIEmitter(tracer, capture_content=True)
+
+        with emitter.turn_span(session_id="s"):
+            emitter.record_tool_call(
+                tool_name="mem0_get_all",
+                arguments={"user_id": "u1"},
+                result={"memories": ["a", "b"]},
+            )
+
+        attrs = _by_name(exporter.get_finished_spans())[OP_EXECUTE_TOOL].attributes
+        assert "user_id" in attrs["gen_ai.tool.arguments"]
+        assert "user_id" in attrs["langfuse.observation.input"]
+        assert "memories" in attrs["gen_ai.tool.result"]
+        assert "memories" in attrs["langfuse.observation.output"]
+
+    def test_tool_content_absent_when_capture_disabled(self, exporter_and_tracer):
+        exporter, tracer = exporter_and_tracer
+        emitter = OtelGenAIEmitter(tracer, capture_content=False)
+
+        with emitter.turn_span(session_id="s"):
+            emitter.record_tool_call(
+                tool_name="mem0_get_all",
+                arguments={"user_id": "u1"},
+                result={"memories": ["a"]},
+            )
+
+        attrs = _by_name(exporter.get_finished_spans())[OP_EXECUTE_TOOL].attributes
+        assert "langfuse.observation.input" not in attrs
+        assert "langfuse.observation.output" not in attrs
+
+    def test_finish_llm_span_sets_cost_attribute(self, exporter_and_tracer):
+        # Langfuse reads gen_ai.usage.cost (total USD) for the generation cost
+        # column; cost_usd is the portable duplicate.
+        exporter, tracer = exporter_and_tracer
+        emitter = OtelGenAIEmitter(tracer)
+
+        with emitter.turn_span(session_id="s"):
+            span = emitter.start_llm_span(request_model="m")
+            emitter.finish_llm_span(span, request_model="m", cost_usd=0.0042)
+
+        attrs = _by_name(exporter.get_finished_spans())[OP_CHAT].attributes
+        assert attrs["gen_ai.usage.cost"] == pytest.approx(0.0042)
+        assert attrs["cost_usd"] == pytest.approx(0.0042)
+
+    def test_bracketed_chat_span_captures_elapsed_latency(self, exporter_and_tracer):
+        # start_llm_span → (call elapses) → finish_llm_span records real duration,
+        # unlike the instantaneous record_llm_call.
+        import time
+
+        exporter, tracer = exporter_and_tracer
+        emitter = OtelGenAIEmitter(tracer)
+
+        with emitter.turn_span(session_id="s"):
+            span = emitter.start_llm_span(request_model="m")
+            time.sleep(0.02)
+            emitter.finish_llm_span(span, request_model="m")
+
+        chat = _by_name(exporter.get_finished_spans())[OP_CHAT]
+        assert (chat.end_time - chat.start_time) >= 15_000_000  # ns (~15ms)
 
 
 # ---------------------------------------------------------------------------
@@ -489,7 +608,9 @@ class TestPluginAdapter:
             "on_session_reset",
             "pre_llm_call",
             "transform_llm_output",
+            "pre_api_request",
             "post_api_request",
+            "pre_tool_call",
             "post_tool_call",
         }
 
@@ -526,6 +647,151 @@ class TestPluginAdapter:
         attrs = _by_name(exporter.get_finished_spans())[OP_INVOKE_AGENT].attributes
         assert attrs["gen_ai.prompt"] == "email the report to john@example.com"
         assert attrs["gen_ai.completion"] == "Sure — sending it to john@example.com now."
+
+    def test_turn_span_resolves_identity_from_env(
+        self, exporter_and_tracer, monkeypatch
+    ):
+        """When no session ContextVar is set, the adapter falls back to the
+        spawn-path env vars (HERMES_SESSION_USER_ID / HERMES_TRACE_ID) so
+        Strategist/Executor batch runs still carry user + trace correlation."""
+        monkeypatch.setenv("HERMES_SESSION_USER_ID", "U0AR7E823MG")
+        monkeypatch.setenv("HERMES_TRACE_ID", "10a41000cafe")
+        exporter, tracer = exporter_and_tracer
+        plugin, provider = _fresh_plugin()
+        monkeypatch.setattr(provider, "build_tracer", lambda **_: tracer)
+        _log_exporter, otel_logger = _in_memory_logger()
+        monkeypatch.setattr(provider, "build_logger", lambda **_: otel_logger)
+
+        ctx = _FakeCtx()
+        plugin.register(ctx)
+        ctx.hooks["on_session_start"](session_id="sess-i", model="hermes-x")
+        ctx.hooks["pre_llm_call"](session_id="sess-i", user_message="hi")
+        ctx.hooks["on_session_end"](session_id="sess-i")
+
+        attrs = _by_name(exporter.get_finished_spans())[OP_INVOKE_AGENT].attributes
+        assert attrs["user.id"] == "U0AR7E823MG"
+        assert attrs["langfuse.trace.metadata.hermes_trace_id"] == "10a41000cafe"
+
+    def test_trace_name_maps_origin_role_to_trigger_label(
+        self, exporter_and_tracer, monkeypatch
+    ):
+        """Trace name = trigger label mapped from the origin role (coach ->
+        coach-turn), not the raw role — so the traces list reads as entry points."""
+        monkeypatch.setenv("HERMES_OTEL_AGENT_NAME", "coach")
+        monkeypatch.delenv("HERMES_OTEL_TRACE_NAME", raising=False)
+        exporter, tracer = exporter_and_tracer
+        plugin, provider = _fresh_plugin()
+        monkeypatch.setattr(provider, "build_tracer", lambda **_: tracer)
+        _le, ol = _in_memory_logger()
+        monkeypatch.setattr(provider, "build_logger", lambda **_: ol)
+
+        ctx = _FakeCtx()
+        plugin.register(ctx)
+        ctx.hooks["on_session_start"](session_id="s1", model="m")
+        ctx.hooks["pre_llm_call"](session_id="s1", user_message="hi")
+        ctx.hooks["on_session_end"](session_id="s1")
+
+        attrs = _by_name(exporter.get_finished_spans())[OP_INVOKE_AGENT].attributes
+        assert attrs["langfuse.trace.name"] == "coach-turn"
+
+    def test_trace_name_uses_propagated_origin_not_local_role(
+        self, exporter_and_tracer, monkeypatch
+    ):
+        """The Executor under a strategist cron: local role is executor (span
+        name invoke_agent executor) but the propagated origin (strategist) names
+        the whole trace strategy-refresh — one consistent name across the run."""
+        monkeypatch.setenv("HERMES_OTEL_AGENT_NAME", "executor")
+        monkeypatch.setenv("HERMES_OTEL_TRACE_NAME", "strategist")
+        exporter, tracer = exporter_and_tracer
+        plugin, provider = _fresh_plugin()
+        monkeypatch.setattr(provider, "build_tracer", lambda **_: tracer)
+        _le, ol = _in_memory_logger()
+        monkeypatch.setattr(provider, "build_logger", lambda **_: ol)
+
+        ctx = _FakeCtx()
+        plugin.register(ctx)
+        ctx.hooks["on_session_start"](session_id="s2", model="m")
+        ctx.hooks["pre_llm_call"](session_id="s2", user_message="hi")
+        ctx.hooks["on_session_end"](session_id="s2")
+
+        span = _by_name(exporter.get_finished_spans())[OP_INVOKE_AGENT]
+        assert span.name == "invoke_agent executor"          # local role on the span
+        assert span.attributes["langfuse.trace.name"] == "strategy-refresh"  # origin label
+
+    def test_pre_post_hooks_bracket_chat_and_tool_latency(
+        self, exporter_and_tracer, monkeypatch
+    ):
+        """pre_api_request / pre_tool_call open the span; post_* close it, so
+        each chat/tool span carries the real call latency (not the 0-duration
+        post-only path) — matching the bundled langfuse plugin. Exactly one span
+        of each type (no doubling with the fallback)."""
+        import time
+
+        exporter, tracer = exporter_and_tracer
+        plugin, provider = _fresh_plugin()
+        monkeypatch.setattr(provider, "build_tracer", lambda **_: tracer)
+        _log_exporter, otel_logger = _in_memory_logger()
+        monkeypatch.setattr(provider, "build_logger", lambda **_: otel_logger)
+
+        ctx = _FakeCtx()
+        plugin.register(ctx)
+        ctx.hooks["on_session_start"](session_id="sess-b", model="m")
+        ctx.hooks["pre_llm_call"](session_id="sess-b", user_message="hi")
+
+        ctx.hooks["pre_api_request"](session_id="sess-b", api_call_count=1, model="m")
+        time.sleep(0.02)
+        ctx.hooks["post_api_request"](
+            session_id="sess-b", api_call_count=1, model="m",
+            usage={"input_tokens": 5, "output_tokens": 3}, finish_reason="stop",
+        )
+
+        ctx.hooks["pre_tool_call"](session_id="sess-b", tool_name="read_file", tool_call_id="tc1")
+        time.sleep(0.02)
+        ctx.hooks["post_tool_call"](
+            session_id="sess-b", tool_name="read_file", tool_call_id="tc1",
+            args={"p": "a"}, result="ok",
+        )
+        ctx.hooks["on_session_end"](session_id="sess-b")
+
+        finished = exporter.get_finished_spans()
+        chats = [s for s in finished if s.attributes.get("gen_ai.operation.name") == OP_CHAT]
+        tools = [s for s in finished if s.attributes.get("gen_ai.operation.name") == OP_EXECUTE_TOOL]
+        assert len(chats) == 1 and len(tools) == 1  # bracketed, not doubled
+        assert (chats[0].end_time - chats[0].start_time) >= 15_000_000  # ~15ms
+        assert (tools[0].end_time - tools[0].start_time) >= 15_000_000
+
+    def test_chat_span_records_per_call_response_from_assistant_message(
+        self, exporter_and_tracer, monkeypatch
+    ):
+        """post_api_request fires per LLM call. Upstream (v2026.7.x) + our fork
+        pass the assistant message object; the adapter reads .content so each
+        ``chat`` span carries THIS call's response text (turn-level text still
+        rides invoke_agent via transform_llm_output)."""
+        monkeypatch.setenv("HERMES_OTEL_CAPTURE_CONTENT", "true")
+        exporter, tracer = exporter_and_tracer
+        plugin, provider = _fresh_plugin()
+        monkeypatch.setattr(provider, "build_tracer", lambda **_: tracer)
+        _log_exporter, otel_logger = _in_memory_logger()
+        monkeypatch.setattr(provider, "build_logger", lambda **_: otel_logger)
+
+        class _Msg:
+            content = "partial answer for this call"
+
+        ctx = _FakeCtx()
+        plugin.register(ctx)
+        ctx.hooks["on_session_start"](session_id="sess-c", model="hermes-x")
+        ctx.hooks["pre_llm_call"](session_id="sess-c", user_message="hi")
+        ctx.hooks["post_api_request"](
+            session_id="sess-c",
+            model="hermes-x",
+            usage={"input_tokens": 5, "output_tokens": 3},
+            finish_reason="stop",
+            assistant_message=_Msg(),
+        )
+        ctx.hooks["on_session_end"](session_id="sess-c")
+
+        attrs = _by_name(exporter.get_finished_spans())[OP_CHAT].attributes
+        assert attrs["gen_ai.completion"] == "partial answer for this call"
 
     def test_pre_llm_call_emits_user_prompt_log_record_once_per_turn(
         self, exporter_and_tracer, monkeypatch
@@ -612,8 +878,13 @@ class TestPluginAdapter:
         ctx.hooks["transform_llm_output"](session_id="sess-9", response_text="done")
         ctx.hooks["on_session_end"](session_id="sess-9")
 
-        names = sorted(s.name for s in exporter.get_finished_spans())
-        assert names == [OP_CHAT, OP_EXECUTE_TOOL, OP_INVOKE_AGENT]
+        # Compare operation names (stable) — the invoke_agent span name now
+        # carries the agent role, so its raw .name is "invoke_agent <role>".
+        ops = sorted(
+            (s.attributes or {}).get("gen_ai.operation.name")
+            for s in exporter.get_finished_spans()
+        )
+        assert ops == [OP_CHAT, OP_EXECUTE_TOOL, OP_INVOKE_AGENT]
 
         spans = _by_name(exporter.get_finished_spans())
         assert spans[OP_INVOKE_AGENT].attributes["gen_ai.conversation.id"] == "sess-9"

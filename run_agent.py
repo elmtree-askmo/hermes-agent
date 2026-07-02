@@ -8605,6 +8605,11 @@ class AIAgent:
                         usage=self._usage_summary_for_api_request_hook(response),
                         assistant_content_chars=len(_assistant_text),
                         assistant_tool_call_count=len(_assistant_tool_calls),
+                        # Mirror upstream (v2026.7.x): pass the assistant message
+                        # object so per-call observers (observability/otel chat
+                        # span) can record this call's response text, not just a
+                        # char count. In-process only; content-gated at the plugin.
+                        assistant_message=assistant_message,
                     )
                 except Exception:
                     pass

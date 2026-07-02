@@ -20,6 +20,8 @@ Optional env vars (set via ``hermes tools`` or ``~/.hermes/.env``):
   HERMES_OTEL_SERVICE_NAME    - service.name resource attr (default: agent.coding.hermes)
   HERMES_OTEL_ENDPOINT        - OTLP HTTP endpoint (default: http://localhost:4318)
   HERMES_OTEL_AGENT_NAME      - gen_ai.agent.name value (default: hermes)
+  HERMES_OTEL_TRACE_NAME      - langfuse.trace.name value; run-origin role
+                                propagated across processes (default: agent name)
   HERMES_OTEL_CAPTURE_CONTENT - "true" to attach prompt/response text (default: off, privacy-gated)
   HERMES_OTEL_USER_ID         - stamp user.id on the resource
 
@@ -42,6 +44,16 @@ from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
+# Trace name = what TRIGGERED the run (entry point), mapped from the origin
+# agent's role. Keeps the traces list meaningful (chat turn vs scheduled
+# refresh) and extensible as new entry points are added, while the per-agent
+# role stays on each span. Roles not listed pass through unmapped.
+_TRIGGER_LABELS = {
+    "coach": "coach-turn",          # user Slack message -> Coach turn
+    "strategist": "strategy-refresh",  # 6h strategist cron
+    "executor": "executor-run",     # standalone executor (rare; usually downstream)
+}
+
 # Sentinel: "_get_emitter() tried and failed" — short-circuits every subsequent
 # hook call without re-importing the SDK. Mirrors the langfuse/nemo_relay gate.
 _INIT_FAILED = object()
@@ -59,6 +71,13 @@ _OPEN_TURNS: dict[str, Any] = {}
 # The invoke_agent span object for each open turn (same key + lock). Held so a
 # later hook (pre_llm_call) can stamp the prompt onto the still-open span.
 _OPEN_TURN_SPANS: dict[str, Any] = {}
+
+# Open per-call spans, bracketed pre_*→post_* so each chat/tool span carries
+# the real call latency (start→end), matching the bundled langfuse plugin.
+# LLM keyed by "session:api_call_count"; tools keyed by tool_call_id.
+_OPEN_CALLS_LOCK = threading.Lock()
+_OPEN_LLM_SPANS: dict[str, Any] = {}
+_OPEN_TOOL_SPANS: dict[str, Any] = {}
 
 # Last session id we opened a turn for, used as a fallback when a per-call hook
 # (post_api_request / post_tool_call) does not carry the session id in kwargs.
@@ -103,6 +122,16 @@ def _get_emitter() -> Optional[Any]:
             user_id = _env("HERMES_OTEL_USER_ID") or None
             capture = _env_bool("HERMES_OTEL_CAPTURE_CONTENT")
             agent_name = _env("HERMES_OTEL_AGENT_NAME") or "hermes"
+            # The whole trace is named after what TRIGGERED the run, not the
+            # agent role: the origin's role (propagated across Coach ->
+            # Strategist -> Executor via HERMES_OTEL_TRACE_NAME, else this
+            # process's own agent_name) is mapped to a trigger label. A user
+            # Slack turn -> "coach-turn"; the 6h strategist cron ->
+            # "strategy-refresh". The per-agent role stays on each span
+            # (invoke_agent <role> + gen_ai.agent.name). Unknown roles pass
+            # through unmapped.
+            _origin_role = _env("HERMES_OTEL_TRACE_NAME") or agent_name
+            trace_name = _TRIGGER_LABELS.get(_origin_role, _origin_role)
 
             tracer = build_tracer(
                 service_name=service_name,
@@ -113,6 +142,7 @@ def _get_emitter() -> Optional[Any]:
             _EMITTER = OtelGenAIEmitter(
                 tracer,
                 agent_name=agent_name,
+                trace_name=trace_name,
                 capture_content=capture,
             )
             # Build the parallel dashboard log emitter. Failure here must NOT
@@ -159,6 +189,74 @@ def _get_log_emitter() -> Optional[Any]:
     if le is None or le is _INIT_FAILED:
         return None
     return le
+
+
+def _resolve_identity() -> tuple[Optional[str], Optional[str]]:
+    """Return ``(user_id, run_trace_id)`` for the active turn.
+
+    Mirrors ``agent/trace_index.py``: prefer the Hermes session ContextVars
+    (set in the gateway/task path), fall back to the env vars the subprocess
+    spawn path materializes (``HERMES_SESSION_USER_ID`` / ``HERMES_TRACE_ID``).
+    Defensive import so the plugin still loads outside a Hermes runtime.
+    """
+    user_id = None
+    trace_id = None
+    try:  # pragma: no cover - trivial context read
+        from tools.session_context import get_trace_id, get_user_id
+
+        user_id = get_user_id()
+        trace_id = get_trace_id()
+    except Exception:
+        pass
+    user_id = user_id or os.environ.get("HERMES_SESSION_USER_ID") or None
+    trace_id = trace_id or os.environ.get("HERMES_TRACE_ID") or None
+    return user_id, trace_id
+
+
+def _llm_call_key(kwargs: dict[str, Any]) -> str:
+    """Stable key to pair a pre_api_request span with its post_api_request.
+
+    Our fork's api hooks don't carry an api_request_id, but both sides carry
+    session_id + api_call_count, which is unique per call within a session.
+    """
+    return f"{_session_id_or_active(kwargs)}:{kwargs.get('api_call_count')}"
+
+
+def _tool_call_key(kwargs: dict[str, Any]) -> str:
+    """Pair a pre_tool_call span with its post_tool_call via tool_call_id."""
+    return f"{_session_id_or_active(kwargs)}:{kwargs.get('tool_call_id') or ''}"
+
+
+def _estimate_cost_usd(kwargs: dict[str, Any]) -> Optional[float]:
+    """Real per-call cost via Hermes' pricing module (same one the bundled
+    langfuse plugin uses) — a pricing DB keyed by model/provider, so OpenRouter
+    models resolve to actual USD instead of the local-model-only estimator's 0.
+    Defensive: returns None (cost simply unset) if anything is unavailable."""
+    usage = kwargs.get("usage")
+    if not isinstance(usage, dict):
+        return None
+    try:
+        from agent.usage_pricing import CanonicalUsage, estimate_usage_cost
+
+        # CanonicalUsage holds token counts only; model/provider/base_url go to
+        # estimate_usage_cost as separate args.
+        cu = CanonicalUsage(
+            input_tokens=int(usage.get("input_tokens") or usage.get("prompt_tokens") or 0),
+            output_tokens=int(usage.get("output_tokens") or usage.get("completion_tokens") or 0),
+            cache_read_tokens=int(usage.get("cache_read_tokens") or 0),
+            cache_write_tokens=int(usage.get("cache_write_tokens") or 0),
+        )
+        cost = estimate_usage_cost(
+            kwargs.get("model") or "",
+            cu,
+            provider=kwargs.get("provider"),
+            base_url=kwargs.get("base_url"),
+        )
+        if cost is not None and cost.amount_usd is not None:
+            return float(cost.amount_usd)
+    except Exception:  # pragma: no cover - fail-open (never break the agent)
+        logger.debug("otel: cost estimation failed", exc_info=True)
+    return None
 
 
 def _session_id(kwargs: dict[str, Any]) -> str:
@@ -283,11 +381,14 @@ def on_pre_llm_call(**kwargs: Any) -> None:
     with _OPEN_TURNS_LOCK:
         if session_id in _OPEN_TURNS:
             return  # same turn (tool-loop continuation) — keep the open span
+    user_id, run_trace_id = _resolve_identity()
     try:
         cm = emitter.turn_span(
             session_id=session_id,
             model=kwargs.get("model"),
             user_prompt=kwargs.get("user_message"),
+            user_id=user_id,
+            run_trace_id=run_trace_id,
         )
         span = cm.__enter__()
         with _OPEN_TURNS_LOCK:
@@ -358,12 +459,32 @@ def _close_cm(cm: Any) -> None:
         logger.debug("failed to close turn span", exc_info=True)
 
 
+def on_pre_api_request(**kwargs: Any) -> None:
+    """Open the ``chat`` span for an LLM API call about to be issued.
+
+    Bracketing pre→post is what gives the chat span its real latency (the API
+    call elapses in between). Keyed by session:api_call_count so
+    ``on_post_api_request`` closes the matching span. Never raises.
+    """
+    emitter = _get_emitter()
+    if emitter is None:
+        return
+    try:
+        span = emitter.start_llm_span(request_model=kwargs.get("model"))
+        with _OPEN_CALLS_LOCK:
+            _OPEN_LLM_SPANS[_llm_call_key(kwargs)] = span
+    except Exception:
+        logger.debug("on_pre_api_request: failed to open chat span", exc_info=True)
+
+
 def on_post_api_request(**kwargs: Any) -> None:
-    """Emit a ``chat`` span for a completed LLM API call.
+    """Close the ``chat`` span for a completed LLM API call.
 
     ``post_api_request`` fires once per provider/API call and carries the usage
     summary (CanonicalUsage dict) and finish reason — exactly the per-LLM-call
-    enrichment fields the GenAI ``chat`` span wants.
+    enrichment fields the GenAI ``chat`` span wants. Closes the span opened at
+    ``pre_api_request`` (real latency); falls back to an instantaneous span if
+    no pre-span is open.
     """
     emitter = _get_emitter()
     if emitter is None:
@@ -386,9 +507,14 @@ def on_post_api_request(**kwargs: Any) -> None:
         input_tokens = _usage_field(usage, "input_tokens", "prompt_tokens")
         output_tokens = _usage_field(usage, "output_tokens", "completion_tokens")
         cost_usd = kwargs.get("cost_usd") or kwargs.get("cost")
+        # Prefer Hermes' pricing module (pricing DB + provider cost API) so
+        # OpenRouter/hosted models resolve to real USD — the reason cost showed
+        # $0 was the local-model-only estimator below couldn't price them.
+        if cost_usd is None:
+            cost_usd = _estimate_cost_usd(kwargs)
         # Local backends (Ollama/HF/vLLM) report no price. Mirror
         # genai-otel-instrument: estimate cost from model size + tokens so the
-        # dashboard shows real cost, not $0 — only when the agent gave us none.
+        # dashboard shows real cost, not $0 — only when nothing else priced it.
         if cost_usd is None:
             try:
                 from .cost import estimate_cost_usd
@@ -401,7 +527,17 @@ def on_post_api_request(**kwargs: Any) -> None:
             except Exception:
                 logger.debug("cost estimation failed", exc_info=True)
         finish = _as_list(kwargs.get("finish_reason"))
-        emitter.record_llm_call(
+        # This call's response text. Upstream (v2026.7.x) + our fork pass the
+        # assistant message object on post_api_request; the older PR kwarg name
+        # was assistant_response (turn-level post_llm_call). Prefer the per-call
+        # message content so the chat span carries THIS call's output.
+        _assistant_message = kwargs.get("assistant_message")
+        response_text = kwargs.get("assistant_response")
+        if not response_text and _assistant_message is not None:
+            response_text = getattr(_assistant_message, "content", None)
+        with _OPEN_CALLS_LOCK:
+            span = _OPEN_LLM_SPANS.pop(_llm_call_key(kwargs), None)
+        _fields = dict(
             request_model=kwargs.get("model"),
             response_model=kwargs.get("response_model"),
             input_tokens=input_tokens,
@@ -409,8 +545,13 @@ def on_post_api_request(**kwargs: Any) -> None:
             cost_usd=cost_usd,
             finish_reasons=finish,
             ttft_ms=ttft_ms,
-            response_text=kwargs.get("assistant_response"),
+            response_text=response_text,
         )
+        if span is not None:
+            emitter.finish_llm_span(span, **_fields)
+        else:
+            # No pre-span (plugin loaded mid-call): instantaneous span, no latency.
+            emitter.record_llm_call(**_fields)
     except Exception:
         logger.debug("on_post_api_request: failed to emit chat span", exc_info=True)
         return
@@ -427,14 +568,34 @@ def on_post_api_request(**kwargs: Any) -> None:
                 cost_usd=cost_usd,
                 finish_reasons=finish,
                 ttft_ms=ttft_ms,
-                response_text=kwargs.get("assistant_response"),
+                response_text=response_text,
             )
         except Exception:
             logger.debug("on_post_api_request: failed to emit api_response log", exc_info=True)
 
 
+def on_pre_tool_call(**kwargs: Any) -> None:
+    """Open the ``execute_tool`` span for a tool about to run (real latency)."""
+    emitter = _get_emitter()
+    if emitter is None:
+        return
+    try:
+        span = emitter.start_tool_span(
+            tool_name=str(kwargs.get("tool_name") or "unknown"),
+            tool_type=str(kwargs.get("tool_type") or "function"),
+        )
+        with _OPEN_CALLS_LOCK:
+            _OPEN_TOOL_SPANS[_tool_call_key(kwargs)] = span
+    except Exception:
+        logger.debug("on_pre_tool_call: failed to open execute_tool span", exc_info=True)
+
+
 def on_post_tool_call(**kwargs: Any) -> None:
-    """Emit an ``execute_tool`` span for a completed tool call."""
+    """Close the ``execute_tool`` span for a completed tool call.
+
+    Closes the span opened at ``pre_tool_call`` (real latency); falls back to an
+    instantaneous span if no pre-span is open.
+    """
     emitter = _get_emitter()
     if emitter is None:
         return
@@ -445,13 +606,23 @@ def on_post_tool_call(**kwargs: Any) -> None:
             error = status
         tool_name = str(kwargs.get("tool_name") or "unknown")
         tool_type = str(kwargs.get("tool_type") or "function")
-        emitter.record_tool_call(
-            tool_name=tool_name,
-            tool_type=tool_type,
-            arguments=kwargs.get("args"),
-            result=kwargs.get("result"),
-            error=error,
-        )
+        with _OPEN_CALLS_LOCK:
+            span = _OPEN_TOOL_SPANS.pop(_tool_call_key(kwargs), None)
+        if span is not None:
+            emitter.finish_tool_span(
+                span,
+                arguments=kwargs.get("args"),
+                result=kwargs.get("result"),
+                error=error,
+            )
+        else:
+            emitter.record_tool_call(
+                tool_name=tool_name,
+                tool_type=tool_type,
+                arguments=kwargs.get("args"),
+                result=kwargs.get("result"),
+                error=error,
+            )
     except Exception:
         logger.debug("on_post_tool_call: failed to emit execute_tool span", exc_info=True)
         return
@@ -495,7 +666,9 @@ def register(ctx) -> None:
     ctx.register_hook("on_session_reset", on_session_reset)
     ctx.register_hook("pre_llm_call", on_pre_llm_call)
     ctx.register_hook("transform_llm_output", on_transform_llm_output)
+    ctx.register_hook("pre_api_request", on_pre_api_request)
     ctx.register_hook("post_api_request", on_post_api_request)
+    ctx.register_hook("pre_tool_call", on_pre_tool_call)
     ctx.register_hook("post_tool_call", on_post_tool_call)
 
 
@@ -508,5 +681,8 @@ def reset_for_tests() -> None:
     with _OPEN_TURNS_LOCK:
         _OPEN_TURNS.clear()
         _OPEN_TURN_SPANS.clear()
+    with _OPEN_CALLS_LOCK:
+        _OPEN_LLM_SPANS.clear()
+        _OPEN_TOOL_SPANS.clear()
     with _ACTIVE_SESSION_LOCK:
         _ACTIVE_SESSION_ID = "default"

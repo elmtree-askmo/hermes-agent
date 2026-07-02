@@ -62,7 +62,10 @@ def test_invoke_agent_is_a_real_root(monkeypatch):
     em, exp = _emitter()
     _run_turn(em, "s")
     span = exp.get_finished_spans()[0]
-    assert span.name == "invoke_agent"
+    # Span name now carries the agent role (OTel GenAI convention); default
+    # agent_name is "hermes" here. Operation name stays the bare "invoke_agent".
+    assert span.name == "invoke_agent hermes"
+    assert span.attributes["gen_ai.operation.name"] == "invoke_agent"
     assert span.parent is None
 
 
