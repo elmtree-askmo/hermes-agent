@@ -1696,6 +1696,13 @@ class GatewayRunner:
                 return None
             return APIServerAdapter(config)
 
+        elif platform == Platform.HTTP_CALLBACK:
+            from gateway.platforms.http_callback import HTTPCallbackAdapter, check_http_callback_requirements
+            if not check_http_callback_requirements():
+                logger.warning("HTTP callback: aiohttp not installed")
+                return None
+            return HTTPCallbackAdapter(config)
+
         elif platform == Platform.WEBHOOK:
             from gateway.platforms.webhook import WebhookAdapter, check_webhook_requirements
             if not check_webhook_requirements():

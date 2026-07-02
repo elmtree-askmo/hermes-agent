@@ -61,6 +61,7 @@ class Platform(Enum):
     DINGTALK = "dingtalk"
     API_SERVER = "api_server"
     WEBHOOK = "webhook"
+    HTTP_CALLBACK = "http_callback"
     FEISHU = "feishu"
     WECOM = "wecom"
 
@@ -108,7 +109,7 @@ class SessionResetPolicy:
     at_hour: int = 4  # Hour for daily reset (0-23, local time)
     idle_minutes: int = 1440  # Minutes of inactivity before reset (24 hours)
     notify: bool = True  # Send a notification to the user when auto-reset occurs
-    notify_exclude_platforms: tuple = ("api_server", "webhook")  # Platforms that don't get reset notifications
+    notify_exclude_platforms: tuple = ("api_server", "webhook", "http_callback")  # Platforms that don't get reset notifications
     
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -132,7 +133,7 @@ class SessionResetPolicy:
             at_hour=at_hour if at_hour is not None else 4,
             idle_minutes=idle_minutes if idle_minutes is not None else 1440,
             notify=notify if notify is not None else True,
-            notify_exclude_platforms=tuple(exclude) if exclude is not None else ("api_server", "webhook"),
+            notify_exclude_platforms=tuple(exclude) if exclude is not None else ("api_server", "webhook", "http_callback"),
         )
 
 
@@ -286,6 +287,9 @@ class GatewayConfig:
                 connected.append(platform)
             # Webhook uses enabled flag only (secrets are per-route)
             elif platform == Platform.WEBHOOK:
+                connected.append(platform)
+            # HTTP callback serves local handlers; needs a handler module only
+            elif platform == Platform.HTTP_CALLBACK and config.extra.get("handler_module"):
                 connected.append(platform)
             # Feishu uses extra dict for app credentials
             elif platform == Platform.FEISHU and config.extra.get("app_id"):
@@ -889,6 +893,27 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
                 pass
         if api_server_host:
             config.platforms[Platform.API_SERVER].extra["host"] = api_server_host
+
+    # HTTP callback platform (deployment-supplied handlers, e.g. OAuth redirect)
+    http_cb_module = os.getenv("HERMES_HTTP_CALLBACK_HANDLER_MODULE", "").strip()
+    if http_cb_module:
+        if Platform.HTTP_CALLBACK not in config.platforms:
+            config.platforms[Platform.HTTP_CALLBACK] = PlatformConfig()
+        cb = config.platforms[Platform.HTTP_CALLBACK]
+        cb.enabled = True
+        cb.extra["handler_module"] = http_cb_module
+        http_cb_dir = os.getenv("HERMES_HTTP_CALLBACK_HANDLER_DIR", "").strip()
+        if http_cb_dir:
+            cb.extra["handler_dir"] = os.path.expanduser(http_cb_dir)
+        http_cb_host = os.getenv("HERMES_HTTP_CALLBACK_HOST", "").strip()
+        if http_cb_host:
+            cb.extra["host"] = http_cb_host
+        http_cb_port = os.getenv("HERMES_HTTP_CALLBACK_PORT", "").strip()
+        if http_cb_port:
+            try:
+                cb.extra["port"] = int(http_cb_port)
+            except ValueError:
+                pass
 
     # Webhook platform
     webhook_enabled = os.getenv("WEBHOOK_ENABLED", "").lower() in ("true", "1", "yes")
