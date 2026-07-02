@@ -227,6 +227,25 @@ def _tool_call_key(kwargs: dict[str, Any]) -> str:
     return f"{_session_id_or_active(kwargs)}:{kwargs.get('tool_call_id') or ''}"
 
 
+def _cron_job_id(session_id: str) -> Optional[str]:
+    """Job id from a scheduler session, or ``None`` for a normal turn.
+
+    The Hermes cron scheduler names its sessions ``cron_<job_id>_<ts>``
+    (ts = ``%Y%m%d_%H%M%S``, two ``_``-separated parts); job ids may
+    themselves contain underscores, so strip the two ts parts from the right.
+    This per-call signal is what lets ONE gateway process label user turns and
+    cron runs differently — a process-cached label can't (both entry points
+    share the process). Note: a subprocess a cron turn spawns would still
+    inherit the role-based origin (labelled by role, not "scheduled") — accepted;
+    no cron prompt/skill routes there today, and the trace metadata below tells
+    the truth regardless.
+    """
+    if not session_id.startswith("cron_"):
+        return None
+    parts = session_id[len("cron_"):].rsplit("_", 2)
+    return parts[0] if len(parts) == 3 else (parts[0] if parts else None)
+
+
 def _estimate_cost_usd(kwargs: dict[str, Any]) -> Optional[float]:
     """Real per-call cost via Hermes' pricing module (same one the bundled
     langfuse plugin uses) — a pricing DB keyed by model/provider, so OpenRouter
@@ -382,6 +401,17 @@ def on_pre_llm_call(**kwargs: Any) -> None:
         if session_id in _OPEN_TURNS:
             return  # same turn (tool-loop continuation) — keep the open span
     user_id, run_trace_id = _resolve_identity()
+    # Scheduler-run turn (session cron_<job_id>_<ts>): label the trace
+    # "scheduled" instead of the role label (a briefing/reminder cron runs the
+    # Coach profile — role alone would mislabel it coach-turn), and stamp the
+    # job id as trace metadata for drill-down (which cron was it).
+    job_id = _cron_job_id(session_id)
+    extra = None
+    if job_id:
+        extra = {
+            "hermes.cron_job_id": job_id,
+            "langfuse.trace.metadata.hermes_cron_job_id": job_id,
+        }
     try:
         cm = emitter.turn_span(
             session_id=session_id,
@@ -389,6 +419,8 @@ def on_pre_llm_call(**kwargs: Any) -> None:
             user_prompt=kwargs.get("user_message"),
             user_id=user_id,
             run_trace_id=run_trace_id,
+            trace_name="scheduled" if job_id else None,
+            extra=extra,
         )
         span = cm.__enter__()
         with _OPEN_TURNS_LOCK:

@@ -718,6 +718,37 @@ class TestPluginAdapter:
         assert span.name == "invoke_agent executor"          # local role on the span
         assert span.attributes["langfuse.trace.name"] == "strategy-refresh"  # origin label
 
+    def test_cron_session_labels_trace_scheduled_with_job_id(
+        self, exporter_and_tracer, monkeypatch
+    ):
+        """A scheduler-run turn (session cron_<job_id>_<ts>) must not carry the
+        role label (a briefing cron runs the Coach profile → would mislabel as
+        coach-turn). Per-turn detection labels it "scheduled" and stamps the job
+        id as trace metadata; the role stays on the span."""
+        monkeypatch.setenv("HERMES_OTEL_AGENT_NAME", "coach")
+        monkeypatch.delenv("HERMES_OTEL_TRACE_NAME", raising=False)
+        exporter, tracer = exporter_and_tracer
+        plugin, provider = _fresh_plugin()
+        monkeypatch.setattr(provider, "build_tracer", lambda **_: tracer)
+        _le, ol = _in_memory_logger()
+        monkeypatch.setattr(provider, "build_logger", lambda **_: ol)
+
+        ctx = _FakeCtx()
+        plugin.register(ctx)
+        sid = "cron_test_job_0_20260702_105530"  # job id itself contains "_"
+        ctx.hooks["on_session_start"](session_id=sid, model="m")
+        ctx.hooks["pre_llm_call"](session_id=sid, user_message="daily briefing")
+        ctx.hooks["on_session_end"](session_id=sid)
+
+        span = _by_name(exporter.get_finished_spans())[OP_INVOKE_AGENT]
+        assert span.name == "invoke_agent coach"                      # role kept on span
+        assert span.attributes["langfuse.trace.name"] == "scheduled"  # not coach-turn
+        assert span.attributes["hermes.cron_job_id"] == "test_job_0"
+        assert (
+            span.attributes["langfuse.trace.metadata.hermes_cron_job_id"]
+            == "test_job_0"
+        )
+
     def test_pre_post_hooks_bracket_chat_and_tool_latency(
         self, exporter_and_tracer, monkeypatch
     ):

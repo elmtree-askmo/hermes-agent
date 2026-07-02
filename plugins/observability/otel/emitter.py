@@ -115,6 +115,7 @@ class OtelGenAIEmitter:
         user_prompt: str | None = None,
         user_id: str | None = None,
         run_trace_id: str | None = None,
+        trace_name: str | None = None,
         extra: Mapping[str, Any] | None = None,
     ) -> Iterator[Any]:
         """Open the ``invoke_agent`` span for one Hermes turn.
@@ -143,9 +144,16 @@ class OtelGenAIEmitter:
             # (trace_name, propagated across processes), not each role — three
             # cross-process roots each setting their own role would race and the
             # last exported one would win. Falls back to this process's own role
-            # when it is itself the origin (no inbound trace_name). Other OTLP
+            # when it is itself the origin (no inbound trace_name). A per-turn
+            # trace_name kwarg overrides the constructor value — needed by the
+            # gateway, where ONE process serves both user turns and cron jobs
+            # (per-turn detection, no process-level constant fits). Other OTLP
             # backends ignore this attribute.
-            _set_if(span, "langfuse.trace.name", self._trace_name or self._agent_name)
+            _set_if(
+                span,
+                "langfuse.trace.name",
+                trace_name or self._trace_name or self._agent_name,
+            )
             _set_if(span, "gen_ai.conversation.id", session_id)
             # Belt-and-suspenders: also stamp the bare session.id attribute
             # some backends group on directly.
