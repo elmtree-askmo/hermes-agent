@@ -1645,6 +1645,24 @@ def _observation_directive(job: dict) -> str:
     obs = data.get("observation")
     if not obs or not obs.get("text"):
         return ""
+    direction = obs.get("direction") or {}
+    if direction.get("actionable") and direction.get("value"):
+        # S-0702-01: the observation names a scan-actionable direction, so the
+        # briefing raises it as a scan-steering OFFER (confirm-first), not a
+        # name-only beat. The offer is still one hedged turn — no side effects
+        # here; the user's later confirm routes through Coach's path-4 rule.
+        return (
+            "OBSERVATION: Voice this cross-session observation as ONE hedged, "
+            "first-person beat with a correct-out line (the user did NOT raise it "
+            "— invite them to push back or flip it). Do not stack it onto the "
+            "roles or follow-ups; one beat. It names a direction the job scan can "
+            "act on, so tie the beat to a scan-steering OFFER: name the pattern, "
+            "then offer to steer the scan toward it and ask "
+            f"(e.g. \"I can tilt the job scan toward {direction['value']} — want "
+            "me to?\"). The OFFER is the whole beat — do NOT act, enqueue, or "
+            "change strategy now; wait for the user to confirm.\n"
+            f"\"{obs['text']}\""
+        )
     return (
         "OBSERVATION: Voice this cross-session observation as ONE hedged, "
         "first-person beat, tied to a concrete next step, with a correct-out line "
