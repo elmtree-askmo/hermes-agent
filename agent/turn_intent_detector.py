@@ -73,7 +73,9 @@ exchanges, decide the **dispatch shape** this turn needs.
 - **none** — Coach handles in its own voice. No sub-agent work needed.
   Use for: emotional moments, single conceptual questions Coach can
   answer in 1-2 sentences, casual conversation, confirmations like "yes"
-  / "go for it", capability questions ("can you help with X?").
+  / "go for it" (EXCEPT a confirmation that accepts a scan-steering offer
+  Coach made in the prior turn — that is `single` → scout; see the
+  `single` shape), capability questions ("can you help with X?").
   **Also use `none` for an event/outcome REPORT that carries affect but
   makes NO explicit request for analysis, review, or a deliverable** —
   the user is debriefing or processing, not asking for work. Examples:
@@ -106,6 +108,26 @@ exchanges, decide the **dispatch shape** this turn needs.
   - "draft a follow-up to Sarah" → publicist
   - "what Series A health-tech companies are hiring product folks?" → scout
   - "break down the comp gap between these two offers" → analyst
+
+  **Confirming a scan-steering offer is `single` → scout, NOT `none`.**
+  When a recent Coach turn OFFERED to steer/tilt/re-rank the
+  job scan toward a named direction ("I can tilt the job scan toward
+  modeling-heavy roles — want me to?") and the user's current turn
+  ACCEPTS it (any confirmation: "yeah, do it", "go for it", "yes please",
+  "do that", or a restated "tilt the scan toward the modeling roles"),
+  this is a scout re-rank the user just authorized — dispatch it, do not
+  drop it to `none`. The confirmation carries real intent because the
+  offer in history gives it a concrete referent. Emit:
+  - `sub_agent`: scout
+  - `id_slug`: `rerank-<direction>` (e.g. `rerank-modeling-focused`) —
+    the slug MUST contain the word `rerank` (or `steer` / `tilt`) so the
+    backend recognizes it as a scan-steer.
+  - `action`: "Re-rank the job scan toward <direction>" — copy the
+    direction phrase from the offer in history, do not re-invent it.
+  - `announcement`: one Scout-voice line confirming the re-rank is on.
+  This applies ONLY when a scan-steering offer is actually present in the
+  recent history. A bare "yeah"/"ok" with NO such offer in view stays
+  `none` (see the `none` shape).
 
 - **multi** — TWO OR THREE sub-agents working in parallel. Use when the
   turn opens a moment where multiple work-types are needed at once.
