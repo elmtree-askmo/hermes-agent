@@ -507,8 +507,12 @@ def handle_function_call(
                 session_id=session_id or "",
                 tool_call_id=tool_call_id or "",
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            # Observability/side-effect hooks must not break tool dispatch, but
+            # a raising hook must not vanish either — otel spans and
+            # pathfinder-sync ingest both ride these hooks, and a silent stop
+            # here made them undebuggable (2026-07-03 silent-failure audit).
+            logger.warning("pre_tool_call hook failed for %s: %s", function_name, exc)
 
         if function_name == "execute_code":
             # Prefer the caller-provided list so subagents can't overwrite
@@ -537,8 +541,10 @@ def handle_function_call(
                 session_id=session_id or "",
                 tool_call_id=tool_call_id or "",
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            # Same contract as pre_tool_call above: never break dispatch,
+            # never vanish.
+            logger.warning("post_tool_call hook failed for %s: %s", function_name, exc)
 
         return result
 

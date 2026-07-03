@@ -5886,9 +5886,9 @@ class AIAgent:
                         if not self.quiet_mode:
                             print(f"  🧠 Memory flush: saved to {args.get('target', 'memory')}")
                     except Exception as e:
-                        logger.debug("Memory flush tool call failed: %s", e)
+                        logger.warning("Memory flush tool call failed (memories may be lost): %s", e)
         except Exception as e:
-            logger.debug("Memory flush API call failed: %s", e)
+            logger.warning("Memory flush API call failed (memories may be lost): %s", e)
         finally:
             # Strip flush artifacts: remove everything from the flush message onward.
             # Use sentinel marker instead of identity check for robustness.
