@@ -40,6 +40,55 @@ def test_normalize_usage_openai_subtracts_cached_prompt_tokens():
     assert normalized.output_tokens == 700
 
 
+def test_normalize_usage_openrouter_reads_reasoning_from_completion_tokens_details():
+    # Real OpenRouter chat-completions shape (probe-verified 2026-07-01 on
+    # qwen3.7-plus): reasoning lives under completion_tokens_details, not
+    # output_tokens_details (that name is the Codex Responses shape).
+    usage = SimpleNamespace(
+        prompt_tokens=8422,
+        completion_tokens=1700,
+        prompt_tokens_details=SimpleNamespace(cached_tokens=0, cache_write_tokens=8404),
+        completion_tokens_details=SimpleNamespace(reasoning_tokens=1694),
+    )
+
+    normalized = normalize_usage(usage, provider="openrouter", api_mode="chat_completions")
+
+    assert normalized.output_tokens == 1700
+    assert normalized.reasoning_tokens == 1694
+
+
+def test_normalize_usage_reasoning_zero_output_details_falls_back_to_completion_details():
+    # Upstream 3a122ba4a semantics: an output_tokens_details object that is
+    # present but carries reasoning_tokens=0 must not mask a real value under
+    # completion_tokens_details (SDKs may pre-populate both attrs).
+    usage = SimpleNamespace(
+        prompt_tokens=100,
+        completion_tokens=50,
+        output_tokens_details=SimpleNamespace(reasoning_tokens=0),
+        completion_tokens_details=SimpleNamespace(reasoning_tokens=30),
+    )
+
+    normalized = normalize_usage(usage, provider="openrouter", api_mode="chat_completions")
+
+    assert normalized.reasoning_tokens == 30
+
+
+def test_normalize_usage_codex_reads_reasoning_from_output_tokens_details():
+    # Codex Responses shape keeps reasoning under output_tokens_details —
+    # the completion_tokens_details fix must not break this fallback.
+    usage = SimpleNamespace(
+        input_tokens=3000,
+        output_tokens=900,
+        input_tokens_details=SimpleNamespace(cached_tokens=1000),
+        output_tokens_details=SimpleNamespace(reasoning_tokens=350),
+    )
+
+    normalized = normalize_usage(usage, provider="openai", api_mode="codex_responses")
+
+    assert normalized.output_tokens == 900
+    assert normalized.reasoning_tokens == 350
+
+
 def test_openrouter_models_api_pricing_is_converted_from_per_token_to_per_million(monkeypatch):
     monkeypatch.setattr(
         "agent.usage_pricing.fetch_model_metadata",

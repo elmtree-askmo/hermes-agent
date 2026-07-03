@@ -493,9 +493,24 @@ def normalize_usage(
         input_tokens = max(0, prompt_total - cache_read_tokens - cache_write_tokens)
 
     reasoning_tokens = 0
+    # Responses API shape: output_tokens_details.reasoning_tokens.
+    # Chat Completions shape (OpenAI, OpenRouter, DeepSeek, etc.):
+    # completion_tokens_details.reasoning_tokens. Reading only the former
+    # left reasoning_tokens=0 for every chat_completions reasoning model —
+    # hidden thinking was invisible in session accounting even though it
+    # dominates output spend. Port of upstream 3a122ba4a (postdates the
+    # v2026.4.8 fork base) — drop on the next rebase past it. Reasoning is
+    # already included in output_tokens; this bucket is informational
+    # (never priced separately by estimate_usage_cost).
     output_details = getattr(response_usage, "output_tokens_details", None)
     if output_details:
         reasoning_tokens = _to_int(getattr(output_details, "reasoning_tokens", 0))
+    if not reasoning_tokens:
+        completion_details = getattr(response_usage, "completion_tokens_details", None)
+        if completion_details:
+            reasoning_tokens = _to_int(
+                getattr(completion_details, "reasoning_tokens", 0)
+            )
 
     return CanonicalUsage(
         input_tokens=input_tokens,
