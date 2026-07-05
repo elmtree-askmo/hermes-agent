@@ -769,6 +769,46 @@ class TestPluginAdapter:
         # dicts swept — no leak
         assert not plugin._OPEN_LLM_SPANS and not plugin._OPEN_TOOL_SPANS
 
+    def test_close_open_turns_closes_leftover_turn_at_shutdown(
+        self, exporter_and_tracer, monkeypatch
+    ):
+        """A subprocess (executor) can exit with a turn span still open — its
+        final turn fired pre_llm_call but no transform_llm_output / session-end
+        hook closed it. Left open, the @contextmanager generator is GC'd during
+        interpreter shutdown, after the OTel SDK types are torn down, raising the
+        benign `isinstance() arg 2 must be a type` TypeError (B-0704-02). The
+        atexit sweep must deterministically close the leftover turn(s) before
+        teardown: export the span and clear the dicts."""
+        exporter, tracer = exporter_and_tracer
+        plugin, provider = _fresh_plugin()
+        monkeypatch.setattr(provider, "build_tracer", lambda **_: tracer)
+        _le, ol = _in_memory_logger()
+        monkeypatch.setattr(provider, "build_logger", lambda **_: ol)
+
+        ctx = _FakeCtx()
+        plugin.register(ctx)
+        ctx.hooks["on_session_start"](session_id="sess-x", model="m")
+        ctx.hooks["pre_llm_call"](session_id="sess-x", user_message="hi")
+        # subprocess exits here — no transform_llm_output / session-end hook fires
+        assert plugin._OPEN_TURNS and plugin._OPEN_TURN_SPANS  # turn left open
+
+        plugin.close_open_turns()  # the atexit sweep
+
+        assert OP_INVOKE_AGENT in _by_name(exporter.get_finished_spans())  # exported
+        assert not plugin._OPEN_TURNS and not plugin._OPEN_TURN_SPANS  # drained
+
+    def test_register_arms_atexit_turn_sweep(self, monkeypatch):
+        """register() must arm an atexit handler that drains open turns before
+        interpreter/SDK teardown, so a leftover turn is never GC'd across the
+        OTel teardown (B-0704-02)."""
+        plugin, _provider = _fresh_plugin()
+        registered = []
+        monkeypatch.setattr(plugin.atexit, "register", lambda fn, *a, **k: registered.append(fn))
+
+        plugin.register(_FakeCtx())
+
+        assert plugin.close_open_turns in registered
+
     def test_cron_session_labels_trace_scheduled_with_job_id(
         self, exporter_and_tracer, monkeypatch
     ):

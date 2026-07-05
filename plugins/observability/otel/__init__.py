@@ -39,6 +39,7 @@ Span model (GenAI conventions):
 
 from __future__ import annotations
 
+import atexit
 import logging
 import os
 import threading
@@ -522,6 +523,32 @@ def _close_cm(cm: Any) -> None:
         logger.debug("failed to close turn span", exc_info=True)
 
 
+def close_open_turns() -> None:
+    """Deterministically close any turn spans still open at interpreter exit.
+
+    A subprocess (notably the Executor) can return with a turn span still open:
+    its final turn fired ``pre_llm_call`` — which opens the ``invoke_agent``
+    span — but no ``transform_llm_output`` / session-end hook fired to close it
+    (the process just exits). Left open, the ``@contextmanager`` generator in
+    ``_OPEN_TURNS`` is finalized by CPython during interpreter shutdown, *after*
+    the OTel SDK's module-level type references have been torn down; the SDK's
+    ``use_span`` exit path then runs ``isinstance(error, <cls>)`` against a
+    reference that is no longer a type, raising the benign
+    ``TypeError: isinstance() arg 2 must be a type`` — pure shutdown-time log
+    noise (the span was already exported), tracked as B-0704-02.
+
+    Armed via ``atexit`` in :func:`register`, this drains the open turns *before*
+    that teardown so the generators are exited while the SDK is still intact.
+    Idempotent and never raises (observability must not break shutdown).
+    """
+    with _OPEN_TURNS_LOCK:
+        cms = list(_OPEN_TURNS.values())
+        _OPEN_TURNS.clear()
+        _OPEN_TURN_SPANS.clear()
+    for cm in cms:
+        _close_cm(cm)
+
+
 def on_pre_api_request(**kwargs: Any) -> None:
     """Open the ``chat`` span for an LLM API call about to be issued.
 
@@ -733,6 +760,11 @@ def register(ctx) -> None:
     ctx.register_hook("post_api_request", on_post_api_request)
     ctx.register_hook("pre_tool_call", on_pre_tool_call)
     ctx.register_hook("post_tool_call", on_post_tool_call)
+    # Close any turn span still open at interpreter exit (a subprocess can
+    # return mid-turn with no session-end hook). Without this the leftover
+    # @contextmanager generator is GC'd across the OTel SDK teardown and raises
+    # a benign shutdown-time TypeError (B-0704-02). Idempotent + never raises.
+    atexit.register(close_open_turns)
 
 
 def reset_for_tests() -> None:
