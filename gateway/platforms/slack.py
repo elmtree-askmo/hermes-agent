@@ -1906,16 +1906,31 @@ class SlackAdapter(BasePlatformAdapter):
         """
         import httpx
 
-        payload = {"response_type": "ephemeral", "text": text}
+        # response_url shares chat.postMessage's 40K hard cap per message,
+        # but Slack allows up to 5 responses per response_url within 30
+        # minutes — so oversized output is delivered as up to 5 chunked
+        # ephemeral messages (with (1/n) indicators from truncate_message)
+        # instead of being rejected whole. Anything beyond the 5-post
+        # budget is dropped with an explicit notice.
+        chunks = self.truncate_message(text, self.MAX_MESSAGE_LENGTH)
+        if len(chunks) > 5:
+            dropped = len(chunks) - 5
+            chunks = chunks[:5]
+            notice = f"\n… (output truncated: {dropped} more part(s) dropped)"
+            # Keep the final post within the same budget after the append.
+            chunks[-1] = chunks[-1][: self.MAX_MESSAGE_LENGTH - len(notice)] + notice
+
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:
-                resp = await client.post(response_url, json=payload)
-            if resp.status_code != 200:
-                logger.warning(
-                    "[Slack] response_url post failed: HTTP %s %s",
-                    resp.status_code, str(resp.text)[:200],
-                )
-                return False
+                for chunk in chunks:
+                    payload = {"response_type": "ephemeral", "text": chunk}
+                    resp = await client.post(response_url, json=payload)
+                    if resp.status_code != 200:
+                        logger.warning(
+                            "[Slack] response_url post failed: HTTP %s %s",
+                            resp.status_code, str(resp.text)[:200],
+                        )
+                        return False
             return True
         except Exception as e:
             logger.warning("[Slack] response_url post failed: %s", e)

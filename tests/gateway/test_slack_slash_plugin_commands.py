@@ -674,3 +674,83 @@ class TestSlashPrefixedPluginDispatch:
 
         adapter.handle_message.assert_awaited_once()
         assert adapter.handle_message.await_args.args[0].text == "/status"
+
+
+class TestResponseUrlLengthGuard:
+    """response_url shares chat.postMessage's 40K per-message cap; Slack
+    allows up to 5 responses per response_url in 30 min. Oversized output
+    is chunked into up to 5 ephemeral posts; beyond that it truncates with
+    an explicit notice (local review finding)."""
+
+    @staticmethod
+    def _fake_httpx(monkeypatch, posted):
+        class FakeResponse:
+            status_code = 200
+            text = "ok"
+
+        class FakeClient:
+            def __init__(self, *a, **k):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *a):
+                return False
+
+            async def post(self, url, json=None):
+                posted.append(json)
+                return FakeResponse()
+
+        import httpx
+        monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+
+    @pytest.mark.asyncio
+    async def test_oversized_output_chunked(self, adapter, monkeypatch):
+        import gateway.platforms.slack as slack_mod
+
+        posted = []
+        self._fake_httpx(monkeypatch, posted)
+        # Use the real _post_response_url (fixture replaces it with a mock).
+        real = slack_mod.SlackAdapter._post_response_url
+        big = "x" * (adapter.MAX_MESSAGE_LENGTH + 5000)
+
+        ok = await real(adapter, "https://hooks.slack.com/commands/T1/1/a", big)
+
+        assert ok is True
+        assert len(posted) == 2
+        assert all(len(p["text"]) <= adapter.MAX_MESSAGE_LENGTH for p in posted)
+        assert all(p["response_type"] == "ephemeral" for p in posted)
+        # No content lost within the 5-post budget.
+        joined = "".join(p["text"] for p in posted)
+        assert joined.count("x") == len(big)
+
+    @pytest.mark.asyncio
+    async def test_beyond_five_chunks_truncated_with_notice(self, adapter, monkeypatch):
+        import gateway.platforms.slack as slack_mod
+
+        posted = []
+        self._fake_httpx(monkeypatch, posted)
+        real = slack_mod.SlackAdapter._post_response_url
+        huge = "x" * (adapter.MAX_MESSAGE_LENGTH * 6)
+
+        ok = await real(adapter, "https://hooks.slack.com/commands/T1/1/a", huge)
+
+        assert ok is True
+        assert len(posted) == 5
+        assert "more part(s) dropped" in posted[-1]["text"]
+        # The notice append must not push the final post over the budget.
+        assert all(len(p["text"]) <= adapter.MAX_MESSAGE_LENGTH for p in posted)
+
+    @pytest.mark.asyncio
+    async def test_normal_output_single_untouched_post(self, adapter, monkeypatch):
+        import gateway.platforms.slack as slack_mod
+
+        posted = []
+        self._fake_httpx(monkeypatch, posted)
+        real = slack_mod.SlackAdapter._post_response_url
+
+        await real(adapter, "https://hooks.slack.com/commands/T1/1/a", "digest")
+
+        assert len(posted) == 1
+        assert posted[0]["text"] == "digest"
