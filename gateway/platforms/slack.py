@@ -57,6 +57,29 @@ def _artemis_enabled() -> bool:
     ).strip().lower() in ("1", "true", "yes", "on")
 
 
+def _edit_distance_leq1(a: str, b: str) -> bool:
+    """True when the Levenshtein distance between *a* and *b* is exactly 1.
+
+    Used for the strict-subcommand did-you-mean hint (`debg` → `debug`).
+    Deliberately narrow: distance 0 (exact match) is handled by the
+    subcommand map before this is ever consulted.
+    """
+    if a == b:
+        return False
+    la, lb = len(a), len(b)
+    if abs(la - lb) > 1:
+        return False
+    if la == lb:
+        # Exactly one substitution
+        return sum(1 for x, y in zip(a, b) if x != y) == 1
+    # One insertion/deletion: align the shorter into the longer
+    short, long = (a, b) if la < lb else (b, a)
+    i = 0
+    while i < len(short) and short[i] == long[i]:
+        i += 1
+    return short[i:] == long[i + 1:]
+
+
 # G3 (S-0429-01 / audit M-8): gateway-side format guard for Slack user IDs.
 # ``U…`` covers normal Slack workspaces; ``W…`` covers Enterprise Grid users.
 # Bot IDs (``B…``) are intentionally excluded — bots are not isolated user
@@ -1580,6 +1603,7 @@ class SlackAdapter(BasePlatformAdapter):
         user_id = command.get("user_id", "")
         channel_id = command.get("channel_id", "")
         team_id = command.get("team_id", "")
+        response_url = command.get("response_url", "")
 
         # Track which workspace owns this channel
         if team_id and channel_id:
@@ -1591,12 +1615,31 @@ class SlackAdapter(BasePlatformAdapter):
         subcommand_map = slack_subcommand_map()
         subcommand_map["compact"] = "/compress"
         first_word = text.split()[0] if text else ""
+        is_plugin_cmd = False
         if first_word in subcommand_map:
             # Preserve arguments after the subcommand
             rest = text[len(first_word):].strip()
             text = f"{subcommand_map[first_word]} {rest}".strip() if rest else subcommand_map[first_word]
+            try:
+                from hermes_cli.plugins import get_plugin_command_handler
+                is_plugin_cmd = get_plugin_command_handler(
+                    subcommand_map[first_word].lstrip("/")
+                ) is not None
+            except Exception:
+                is_plugin_cmd = False
         elif text:
-            pass  # Treat as a regular question
+            if self._strict_subcommands_enabled():
+                # Strict-subcommand mode (config-gated, default off): any
+                # /hermes invocation whose first token matches no registered
+                # subcommand gets a deterministic ephemeral rejection and
+                # never reaches the LLM. Closes the silent-LLM-fallback trap:
+                # a typo'd command would otherwise burn a paid agent turn AND
+                # land as a user message in the very session under test.
+                await self._reply_unknown_subcommand(
+                    first_word, subcommand_map, response_url, channel_id
+                )
+                return
+            pass  # Treat as a regular question (upstream default)
         else:
             text = "/help"
 
@@ -1613,7 +1656,91 @@ class SlackAdapter(BasePlatformAdapter):
             raw_message=command,
         )
 
+        # Plugin gateway commands (e.g. /debug): dispatch directly and reply
+        # ephemerally via response_url. Going through handle_message() would
+        # deliver via chat.postMessage, which (a) leaks personal state into
+        # public channels, (b) silently fails in channels the bot isn't a
+        # member of, and (c) pollutes the Coach DM under test.
+        if is_plugin_cmd and response_url and self._message_handler:
+            try:
+                response = await self._message_handler(event)
+            except Exception as e:
+                logger.error("[Slack] Plugin slash command failed: %s", e, exc_info=True)
+                response = f"⚠ Command failed: {e}"
+            await self._post_response_url(response_url, response or "(no output)")
+            return
+
         await self.handle_message(event)
+
+    def _strict_subcommands_enabled(self) -> bool:
+        """True when strict-subcommand mode is enabled for /hermes.
+
+        Config-gated via ``SLACK_STRICT_SUBCOMMANDS`` (default off, so the
+        upstream ask-the-agent free-text fallthrough is preserved). Also
+        honors ``strict_subcommands`` in the platform config extras.
+        """
+        extra_flag = None
+        try:
+            extra_flag = self.config.extra.get("strict_subcommands")
+        except Exception:
+            pass
+        if extra_flag is not None:
+            return str(extra_flag).strip().lower() in ("true", "1", "yes")
+        return os.getenv("SLACK_STRICT_SUBCOMMANDS", "").strip().lower() in ("true", "1", "yes")
+
+    async def _reply_unknown_subcommand(
+        self,
+        first_word: str,
+        subcommand_map: dict,
+        response_url: str,
+        channel_id: str,
+    ) -> None:
+        """Send the strict-mode unknown-command rejection (ephemeral)."""
+        from hermes_cli.commands import resolve_command
+
+        # Canonical names only — aliases would double the list without
+        # adding information.
+        known = []
+        for name in subcommand_map:
+            cmd_def = resolve_command(name)
+            if cmd_def is None or cmd_def.name == name:
+                known.append(name)
+        known.sort()
+        near = [name for name in known if _edit_distance_leq1(first_word.lower(), name)]
+        lines = [f"Unknown command: `{first_word}`."]
+        if near:
+            lines.append(f"Did you mean `{near[0]}`?")
+        lines.append("Available: " + ", ".join(f"`{name}`" for name in known))
+        msg = "\n".join(lines)
+        if response_url:
+            await self._post_response_url(response_url, msg)
+        else:
+            # Slash payloads always carry response_url; this is a safety net.
+            await self.send(channel_id, msg)
+
+    async def _post_response_url(self, response_url: str, text: str) -> bool:
+        """POST an ephemeral reply to a slash command's response_url.
+
+        Ephemeral delivery is deliberate: it works in any channel (no bot
+        membership needed), is only visible to the invoking user, and never
+        persists into the conversation under test. Returns True on success.
+        """
+        import httpx
+
+        payload = {"response_type": "ephemeral", "text": text}
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.post(response_url, json=payload)
+            if resp.status_code != 200:
+                logger.warning(
+                    "[Slack] response_url post failed: HTTP %s %s",
+                    resp.status_code, str(resp.text)[:200],
+                )
+                return False
+            return True
+        except Exception as e:
+            logger.warning("[Slack] response_url post failed: %s", e)
+            return False
 
     def _has_active_session_for_thread(
         self,
