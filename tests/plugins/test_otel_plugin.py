@@ -332,6 +332,36 @@ class TestEmitter:
         attrs = spans[OP_EXECUTE_TOOL].attributes
         assert attrs["error.type"] == "RuntimeError"
 
+    def test_tool_error_marks_span_failed_for_backends(self, exporter_and_tracer):
+        """Error spans must carry OTel status ERROR plus the Langfuse level
+        attributes — error.type alone renders as a normal span in Langfuse
+        (no level:ERROR filter match, invisible to error monitors)."""
+        from opentelemetry.trace import StatusCode
+
+        exporter, tracer = exporter_and_tracer
+        emitter = OtelGenAIEmitter(tracer)
+
+        emitter.record_tool_call(tool_name="run_tests", error=RuntimeError("boom"))
+
+        span = _by_name(exporter.get_finished_spans())[OP_EXECUTE_TOOL]
+        assert span.status.status_code == StatusCode.ERROR
+        assert span.attributes["langfuse.observation.level"] == "ERROR"
+        assert "boom" in span.attributes["langfuse.observation.status_message"]
+
+    def test_tool_error_status_message_truncated(self, exporter_and_tracer):
+        """Tool errors can embed huge payloads (e.g. a full HTTP response body);
+        the status message must be capped like args/results, not exported raw."""
+        exporter, tracer = exporter_and_tracer
+        emitter = OtelGenAIEmitter(tracer)
+
+        emitter.record_tool_call(tool_name="t", error=RuntimeError("x" * 100_000))
+
+        span = _by_name(exporter.get_finished_spans())[OP_EXECUTE_TOOL]
+        message = span.attributes["langfuse.observation.status_message"]
+        assert len(message) < 10_000
+        assert message.endswith("<truncated>")
+        assert (span.status.description or "").endswith("<truncated>")
+
     def test_content_not_captured_by_default(self, exporter_and_tracer):
         exporter, tracer = exporter_and_tracer
         emitter = OtelGenAIEmitter(tracer, capture_content=False)
@@ -843,6 +873,15 @@ class TestPluginAdapter:
         assert len(orphans) == 2  # both the chat and the tool span exported
         # dicts swept — no leak
         assert not plugin._OPEN_LLM_SPANS and not plugin._OPEN_TOOL_SPANS
+        # Orphans are failures: they must surface as ERROR in backends
+        # (status for portable OTel, level attribute for Langfuse filters).
+        from opentelemetry.trace import StatusCode
+
+        assert all(s.status.status_code == StatusCode.ERROR for s in orphans)
+        assert all(
+            s.attributes.get("langfuse.observation.level") == "ERROR"
+            for s in orphans
+        )
 
     def test_close_open_turns_closes_leftover_turn_at_shutdown(
         self, exporter_and_tracer, monkeypatch

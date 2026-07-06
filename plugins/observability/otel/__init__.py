@@ -476,7 +476,8 @@ def _end_turn(**kwargs: Any) -> None:
     Mirrors the bundled langfuse plugin's leftover-generation close at session
     end. Keys are session-prefixed ("<session>:...") so the sweep is scoped.
     """
-    if _get_emitter() is None:
+    emitter = _get_emitter()
+    if emitter is None:
         return
     session_id = _session_id(kwargs)
     with _OPEN_TURNS_LOCK:
@@ -490,7 +491,9 @@ def _end_turn(**kwargs: Any) -> None:
                 orphans.append(d.pop(key))
     for span in orphans:
         try:
-            span.set_attribute("error.type", "orphaned_no_post_hook")
+            # Same failed-marking as a tool error (status + langfuse level),
+            # so orphans surface under level:ERROR, not as healthy spans.
+            emitter._record_error(span, "orphaned_no_post_hook")
             span.end()
         except Exception:
             logger.debug("failed to close orphaned per-call span", exc_info=True)

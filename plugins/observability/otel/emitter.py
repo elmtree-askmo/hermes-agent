@@ -445,10 +445,24 @@ class OtelGenAIEmitter:
     def _record_error(span: Any, error: BaseException | str) -> None:
         try:
             if isinstance(error, BaseException):
-                span.record_exception(error)
+                # error.type first: it survives even if rendering the
+                # exception text below raises (a __str__ that throws).
                 span.set_attribute("error.type", type(error).__name__)
+                span.record_exception(error)
+                message = _safe_str(f"{type(error).__name__}: {error}")
             else:
                 span.set_attribute("error.type", str(error))
+                message = _safe_str(str(error))
+            # error.type alone leaves the span looking healthy to backends:
+            # OTel span status is the portable failed-signal, and Langfuse's
+            # level:ERROR filter / error monitors read the observation level,
+            # not span events. Mirror onto the langfuse.* attributes like
+            # langfuse.trace.name — other backends ignore them.
+            from opentelemetry.trace import Status, StatusCode
+
+            span.set_status(Status(StatusCode.ERROR, message))
+            span.set_attribute("langfuse.observation.level", "ERROR")
+            _set_if(span, "langfuse.observation.status_message", message)
         except Exception:  # pragma: no cover - defensive
             logger.warning("failed to record tool error on span", exc_info=True)
 
