@@ -37,6 +37,7 @@ def plugin_ctx(monkeypatch):
 @pytest.fixture()
 def adapter(monkeypatch):
     monkeypatch.delenv("SLACK_STRICT_SUBCOMMANDS", raising=False)
+    monkeypatch.delenv("HERMES_ARTEMIS_ENABLED", raising=False)
     config = PlatformConfig(enabled=True, token="xoxb-fake-token")
     a = SlackAdapter(config)
     a.handle_message = AsyncMock()
@@ -185,6 +186,32 @@ class TestStrictSubcommandMode:
 
         event = adapter.handle_message.await_args.args[0]
         assert event.text == "/help"
+
+    @pytest.mark.asyncio
+    async def test_artemis_deployment_defaults_to_strict(self, adapter, monkeypatch):
+        """HERMES_ARTEMIS_ENABLED alone turns strict mode on — no separate
+        deploy-time knob to forget."""
+        monkeypatch.setenv("HERMES_ARTEMIS_ENABLED", "1")
+
+        await adapter._handle_slash_command(_slash_payload("frobnicate now"))
+
+        adapter.handle_message.assert_not_awaited()
+        posted = adapter._post_response_url.await_args.args[1]
+        assert "Unknown command: `frobnicate`" in posted
+
+    @pytest.mark.asyncio
+    async def test_explicit_false_overrides_artemis_default(self, adapter, monkeypatch):
+        """SLACK_STRICT_SUBCOMMANDS=false restores upstream fallthrough even
+        on an Artemis deployment (debug escape hatch)."""
+        monkeypatch.setenv("HERMES_ARTEMIS_ENABLED", "1")
+        monkeypatch.setenv("SLACK_STRICT_SUBCOMMANDS", "false")
+
+        await adapter._handle_slash_command(_slash_payload("what is my status?"))
+
+        adapter.handle_message.assert_awaited_once()
+        event = adapter.handle_message.await_args.args[0]
+        assert event.text == "what is my status?"
+        adapter._post_response_url.assert_not_awaited()
 
 
 class TestPostResponseUrl:

@@ -1675,9 +1675,17 @@ class SlackAdapter(BasePlatformAdapter):
     def _strict_subcommands_enabled(self) -> bool:
         """True when strict-subcommand mode is enabled for /hermes.
 
-        Config-gated via ``SLACK_STRICT_SUBCOMMANDS`` (default off, so the
-        upstream ask-the-agent free-text fallthrough is preserved). Also
-        honors ``strict_subcommands`` in the platform config extras.
+        Resolution order:
+        1. ``strict_subcommands`` in the platform config extras (explicit,
+           either direction);
+        2. ``SLACK_STRICT_SUBCOMMANDS`` env var (explicit, either direction);
+        3. ``HERMES_ARTEMIS_ENABLED`` — an Artemis deployment defaults to
+           strict: /hermes there is an internal ops surface with no
+           free-text ask-the-agent consumer, and a typo'd command falling
+           through to the LLM lands in the very Coach session under test.
+
+        With none of the three set (plain upstream deployment) the mode is
+        off and the ask-the-agent free-text fallthrough is preserved.
         """
         extra_flag = None
         try:
@@ -1686,7 +1694,10 @@ class SlackAdapter(BasePlatformAdapter):
             pass
         if extra_flag is not None:
             return str(extra_flag).strip().lower() in ("true", "1", "yes")
-        return os.getenv("SLACK_STRICT_SUBCOMMANDS", "").strip().lower() in ("true", "1", "yes")
+        env_flag = os.getenv("SLACK_STRICT_SUBCOMMANDS", "").strip().lower()
+        if env_flag:
+            return env_flag in ("true", "1", "yes")
+        return _artemis_enabled()
 
     async def _reply_unknown_subcommand(
         self,
