@@ -965,6 +965,28 @@ class TestRenderAlreadyExecutedBlock:
         assert "analyst" in block
         assert "Do NOT call either tool again" in block
 
+    def test_no_disclosure_line_by_default(self):
+        block = tid.render_already_executed_block(
+            sub_agent="scout",
+            action="Re-rank the scan",
+            full_id="coach-commit-rerank-x",
+        )
+        assert "Scan-direction disclosure" not in block
+
+    def test_replaced_direction_adds_disclosure_line(self):
+        """S-0707-01 M5: when the confirm displaced a prior scan tilt, Coach's
+        reply must acknowledge the switch in one line — the displacement is a
+        single-slot consequence the user would otherwise never learn about."""
+        block = tid.render_already_executed_block(
+            sub_agent="scout",
+            action="Re-rank the job scan toward end-to-end-model-ownership",
+            full_id="coach-commit-rerank-end-to-end-model-ownership",
+            replaced_direction="healthcare-mission-driven",
+        )
+        assert "Scan-direction disclosure" in block
+        assert "healthcare-mission-driven" in block
+        assert "one" in block.lower() and "line" in block.lower()
+
 
 # =========================================================================
 # render_team_dispatch_executed_block (multi Type F)

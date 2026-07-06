@@ -1068,6 +1068,7 @@ def render_already_executed_block(
     sub_agent: str,
     action: str,
     full_id: str,
+    replaced_direction: str | None = None,
 ) -> str:
     """Render the system-prompt block for the SINGLE-dispatch
     auto-executed path (Type E, direction C).
@@ -1085,13 +1086,18 @@ def render_already_executed_block(
     This is the architecture-level enforcement: side effects committed
     before LLM sees the turn, leaving Coach with one job that doesn't
     require it to choose between tools.
+
+    `replaced_direction` (S-0707-01 M5): when the confirm's scan_direction
+    write displaced a prior tilt, the server surfaces the old tag here so
+    Coach discloses the switch in one line — the scan holds one direction
+    at a time, and the displacement would otherwise be silent.
     """
     # json.dumps so embedded double-quotes / backslashes don't break the
     # rendered pseudo tool-call syntax for Coach.
     _id_lit = json.dumps(full_id)
     _action_lit = json.dumps(action)
     _sub_lit = json.dumps(sub_agent)
-    return "\n".join([
+    lines = [
         "",
         "**Sub-agent action already executed** "
         "(server pre-executed the Type-E routing for this turn — backend "
@@ -1108,7 +1114,19 @@ def render_already_executed_block(
         "follow-up question. Do NOT inline the artifact content (no "
         "cheat-sheet body, no draft text); the sub-agent will deliver "
         "the artifact separately.",
-    ])
+    ]
+    if isinstance(replaced_direction, str) and replaced_direction.strip():
+        _old_lit = replaced_direction.strip()
+        lines.extend([
+            "",
+            "**Scan-direction disclosure (S-0707-01):** this re-rank replaced "
+            f"the previous scan tilt '{_old_lit}' — the scan follows one "
+            "direction at a time. Include ONE short line in your reply "
+            f"acknowledging the switch (e.g. \"this replaces the {_old_lit} "
+            "tilt we had on\") so the displacement isn't silent. Do NOT ask "
+            "for re-confirmation; the user already confirmed.",
+        ])
+    return "\n".join(lines)
 
 
 def render_team_dispatch_executed_block(

@@ -1651,7 +1651,7 @@ def _observation_directive(job: dict) -> str:
         # briefing raises it as a scan-steering OFFER (confirm-first), not a
         # name-only beat. The offer is still one hedged turn — no side effects
         # here; the user's later confirm routes through Coach's path-4 rule.
-        return (
+        directive = (
             "OBSERVATION: Voice this cross-session observation as ONE hedged, "
             "first-person beat with a correct-out line (the user did NOT raise it "
             "— invite them to push back or flip it). Do not stack it onto the "
@@ -1663,6 +1663,19 @@ def _observation_directive(job: dict) -> str:
             "change strategy now; wait for the user to confirm.\n"
             f"\"{obs['text']}\""
         )
+        # S-0707-01 M4: the selector attached a deterministic history note —
+        # this direction was confirm-applied and later displaced. The offer
+        # must carry that memory instead of presenting the pattern as new.
+        history_note = obs.get("direction_history_note")
+        if isinstance(history_note, str) and history_note.strip():
+            directive += (
+                "\nRE-OFFER HISTORY (deterministic — trust it verbatim): "
+                f"{history_note.strip()}\n"
+                "Voice the offer WITH this memory: acknowledge the earlier tilt "
+                "and the switch, and ask whether to bring it back. Do NOT "
+                "present the pattern as new."
+            )
+        return directive
     return (
         "OBSERVATION: Voice this cross-session observation as ONE hedged, "
         "first-person beat, tied to a concrete next step, with a correct-out line "

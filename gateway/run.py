@@ -2645,10 +2645,18 @@ class GatewayRunner:
                         if _dispatch_type == "single":
                             _d0 = _dispatches[0]
                             _full_id = "coach-commit-" + _d0["id_slug"]
+                            # S-0707-01 M5: the helper forwards enqueue_action's
+                            # full return — surface a displaced scan tilt so the
+                            # rendered block instructs the one-line disclosure.
+                            _enq0 = (
+                                ((_exec_result.get("results") or [{}])[0] or {})
+                                .get("enqueue_result") or {}
+                            )
                             _executed_block = render_already_executed_block(
                                 sub_agent=_d0["sub_agent"],
                                 action=_d0["action"],
                                 full_id=_full_id,
+                                replaced_direction=_enq0.get("replaced_direction"),
                             )
                             logger.info(
                                 "turn-intent: chat=%s auto_executed=single "
