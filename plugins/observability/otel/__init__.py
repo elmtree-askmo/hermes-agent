@@ -258,24 +258,42 @@ def _cron_job_id(session_id: str) -> Optional[str]:
     return parts[0] if len(parts) == 3 else (parts[0] if parts else None)
 
 
-def _estimate_cost_usd(kwargs: dict[str, Any]) -> Optional[float]:
+def _estimate_cost_usd(kwargs: dict[str, Any]) -> tuple[Optional[float], Optional[dict]]:
     """Real per-call cost via Hermes' pricing module (same one the bundled
     langfuse plugin uses) — a pricing DB keyed by model/provider, so OpenRouter
     models resolve to actual USD instead of the local-model-only estimator's 0.
-    Defensive: returns None (cost simply unset) if anything is unavailable."""
+
+    Returns ``(total, breakdown)``. The breakdown prices each usage bucket at
+    its own rate — keys MUST mirror the usage_details keys the emitter sends
+    (input / cache_read_input_tokens / cache_creation_input_tokens / output /
+    output_reasoning_tokens) so Langfuse can pair token and cost per bucket;
+    reasoning is billed at the output rate (provider billing semantics).
+    Defensive: (None, None) if anything is unavailable; breakdown may be None
+    while total is present (rates unknown but API-reported cost exists).
+    """
     usage = kwargs.get("usage")
     if not isinstance(usage, dict):
-        return None
+        return None, None
     try:
-        from agent.usage_pricing import CanonicalUsage, estimate_usage_cost
+        from agent.usage_pricing import (
+            CanonicalUsage,
+            estimate_usage_cost,
+            get_pricing_entry,
+        )
+
+        input_t = int(usage.get("input_tokens") or usage.get("prompt_tokens") or 0)
+        output_t = int(usage.get("output_tokens") or usage.get("completion_tokens") or 0)
+        cache_r = int(usage.get("cache_read_tokens") or 0)
+        cache_w = int(usage.get("cache_write_tokens") or 0)
+        reasoning = int(usage.get("reasoning_tokens") or 0)
 
         # CanonicalUsage holds token counts only; model/provider/base_url go to
         # estimate_usage_cost as separate args.
         cu = CanonicalUsage(
-            input_tokens=int(usage.get("input_tokens") or usage.get("prompt_tokens") or 0),
-            output_tokens=int(usage.get("output_tokens") or usage.get("completion_tokens") or 0),
-            cache_read_tokens=int(usage.get("cache_read_tokens") or 0),
-            cache_write_tokens=int(usage.get("cache_write_tokens") or 0),
+            input_tokens=input_t,
+            output_tokens=output_t,
+            cache_read_tokens=cache_r,
+            cache_write_tokens=cache_w,
         )
         cost = estimate_usage_cost(
             kwargs.get("model") or "",
@@ -283,11 +301,48 @@ def _estimate_cost_usd(kwargs: dict[str, Any]) -> Optional[float]:
             provider=kwargs.get("provider"),
             base_url=kwargs.get("base_url"),
         )
-        if cost is not None and cost.amount_usd is not None:
-            return float(cost.amount_usd)
+        total = float(cost.amount_usd) if cost is not None and cost.amount_usd is not None else None
+        if total is None:
+            return None, None
+
+        details: dict[str, float] = {}
+        try:
+            entry = get_pricing_entry(
+                kwargs.get("model") or "",
+                provider=kwargs.get("provider"),
+                base_url=kwargs.get("base_url"),
+            )
+            m = 1_000_000
+            if entry is not None:
+                if input_t and entry.input_cost_per_million is not None:
+                    details["input"] = float(entry.input_cost_per_million) * input_t / m
+                if cache_r and entry.cache_read_cost_per_million is not None:
+                    details["cache_read_input_tokens"] = (
+                        float(entry.cache_read_cost_per_million) * cache_r / m
+                    )
+                if cache_w and entry.cache_write_cost_per_million is not None:
+                    details["cache_creation_input_tokens"] = (
+                        float(entry.cache_write_cost_per_million) * cache_w / m
+                    )
+                if output_t and entry.output_cost_per_million is not None:
+                    rate = float(entry.output_cost_per_million)
+                    if 0 < reasoning <= output_t:
+                        # Mirror the emitter's carve: visible output + reasoning
+                        # as disjoint buckets, both at the output rate.
+                        details["output"] = rate * (output_t - reasoning) / m
+                        details["output_reasoning_tokens"] = rate * reasoning / m
+                    else:
+                        details["output"] = rate * output_t / m
+        except Exception:  # pragma: no cover - breakdown is best-effort
+            logger.debug("otel: cost breakdown failed", exc_info=True)
+            details = {}
+        if details:
+            details["total"] = total
+            return total, details
+        return total, None
     except Exception:  # pragma: no cover - fail-open (never break the agent)
         logger.debug("otel: cost estimation failed", exc_info=True)
-    return None
+    return None, None
 
 
 def _session_id(kwargs: dict[str, Any]) -> str:
@@ -600,11 +655,12 @@ def on_post_api_request(**kwargs: Any) -> None:
         cache_write = _usage_field(usage, "cache_write_tokens")
         reasoning = _usage_field(usage, "reasoning_tokens")
         cost_usd = kwargs.get("cost_usd") or kwargs.get("cost")
+        cost_details = None
         # Prefer Hermes' pricing module (pricing DB + provider cost API) so
         # OpenRouter/hosted models resolve to real USD — the reason cost showed
         # $0 was the local-model-only estimator below couldn't price them.
         if cost_usd is None:
-            cost_usd = _estimate_cost_usd(kwargs)
+            cost_usd, cost_details = _estimate_cost_usd(kwargs)
         # Local backends (Ollama/HF/vLLM) report no price. Mirror
         # genai-otel-instrument: estimate cost from model size + tokens so the
         # dashboard shows real cost, not $0 — only when nothing else priced it.
@@ -639,6 +695,7 @@ def on_post_api_request(**kwargs: Any) -> None:
             cache_write_tokens=cache_write,
             reasoning_tokens=reasoning,
             cost_usd=cost_usd,
+            cost_details=cost_details,
             finish_reasons=finish,
             ttft_ms=ttft_ms,
             response_text=response_text,

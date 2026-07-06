@@ -218,6 +218,7 @@ class OtelGenAIEmitter:
         cache_write_tokens: int | None = None,
         reasoning_tokens: int | None = None,
         cost_usd: float | None = None,
+        cost_details: Mapping[str, float] | None = None,
         finish_reasons: Sequence[str] | None = None,
         ttft_ms: float | None = None,
         response_text: str | None = None,
@@ -233,11 +234,24 @@ class OtelGenAIEmitter:
 
         Deliberate deviation from the OTel GenAI semconv, which says
         ``output_tokens`` SHOULD include reasoning (with a descriptive
-        sub-count attribute). Langfuse's OTLP ingestion sums every usage
-        bucket, so the semconv shape double-counts there — a known open bug
-        (langfuse/langfuse#11244); this carve-out is the community
-        workaround from that issue. When it's fixed, revert to the semconv
-        shape: full ``output_tokens`` + ``gen_ai.usage.reasoning_tokens``.
+        sub-count attribute). Langfuse's generic OTLP ingestion sums every
+        usage bucket, so the semconv shape double-counts the total there.
+        langfuse/langfuse#11244 reported this and was closed 2025-12-23, but
+        the fix covered only the Vercel AI SDK attribute mapping — a
+        three-shape probe against Langfuse Cloud (2026-07-06) confirmed the
+        semconv shape and the OpenAI flat key both still total 140/110 wrong
+        on the gen_ai.usage.* path while this carve-out totals correctly.
+        Revert to the semconv shape (full ``output_tokens`` +
+        ``gen_ai.usage.reasoning_tokens``) only after re-running that probe
+        shows the OTLP path no longer double-counts.
+
+        Bucket NAMES are load-bearing: Langfuse's aggregate measures classify
+        usage keys by name ("...input..." -> Input Tokens, "output..." ->
+        Output Tokens; Metrics-API-verified 2026-07-06), so despite the carve
+        the widget-level Output Tokens still equals the provider's full
+        completion count (visible + reasoning) and Input Tokens includes the
+        cache buckets — aggregates keep provider semantics while the
+        per-observation details stay disjoint.
         """
         try:
             _set_if(span, "gen_ai.request.model", request_model)
@@ -263,6 +277,21 @@ class OtelGenAIEmitter:
             # Langfuse reads gen_ai.usage.cost (total USD) for a generation's
             # cost column; cost_usd is the portable duplicate.
             _set_if(span, "gen_ai.usage.cost", _cost)
+            # Per-bucket costs: Langfuse pairs cost_details with usage_details
+            # by key, so callers must use the same bucket names. Sent as the
+            # Langfuse-specific JSON attribute (the only OTLP carrier for a
+            # cost breakdown); other backends ignore it.
+            if cost_details:
+                try:
+                    import json as _json
+
+                    _set_if(
+                        span,
+                        "langfuse.observation.cost_details",
+                        _json.dumps(dict(cost_details)),
+                    )
+                except Exception:  # pragma: no cover - defensive
+                    logger.warning("failed to serialize cost_details", exc_info=True)
             if finish_reasons:
                 # OTel models this as an array; backends read index [0].
                 span.set_attribute(
@@ -288,6 +317,7 @@ class OtelGenAIEmitter:
         cache_write_tokens: int | None = None,
         reasoning_tokens: int | None = None,
         cost_usd: float | None = None,
+        cost_details: Mapping[str, float] | None = None,
         finish_reasons: Sequence[str] | None = None,
         ttft_ms: float | None = None,
         response_text: str | None = None,
@@ -311,6 +341,7 @@ class OtelGenAIEmitter:
             cache_write_tokens=cache_write_tokens,
             reasoning_tokens=reasoning_tokens,
             cost_usd=cost_usd,
+            cost_details=cost_details,
             finish_reasons=finish_reasons,
             ttft_ms=ttft_ms,
             response_text=response_text,

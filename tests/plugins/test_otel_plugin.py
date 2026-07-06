@@ -247,6 +247,29 @@ class TestEmitter:
         assert bogus.attributes["gen_ai.usage.output_tokens"] == 50       # clamped: not split
         assert "gen_ai.usage.output_reasoning_tokens" not in bogus.attributes
 
+    def test_cost_details_emitted_as_langfuse_json(self, exporter_and_tracer):
+        import json
+
+        exporter, tracer = exporter_and_tracer
+        emitter = OtelGenAIEmitter(tracer)
+
+        with emitter.turn_span(session_id="s"):
+            emitter.record_llm_call(
+                request_model="m",
+                cost_usd=0.01,
+                cost_details={"input": 0.002, "output": 0.008, "total": 0.01},
+            )
+            emitter.record_llm_call(request_model="m", cost_usd=0.01)  # no breakdown
+
+        chats = [
+            s for s in exporter.get_finished_spans()
+            if s.attributes.get("gen_ai.operation.name") == OP_CHAT
+        ]
+        withd, without = chats
+        parsed = json.loads(withd.attributes["langfuse.observation.cost_details"])
+        assert parsed == {"input": 0.002, "output": 0.008, "total": 0.01}
+        assert "langfuse.observation.cost_details" not in without.attributes
+
     def test_chat_span_carries_tokens_cost_and_finish_reason(self, exporter_and_tracer):
         exporter, tracer = exporter_and_tracer
         emitter = OtelGenAIEmitter(tracer)
@@ -933,6 +956,46 @@ class TestPluginAdapter:
         assert len(chats) == 1 and len(tools) == 1  # bracketed, not doubled
         assert (chats[0].end_time - chats[0].start_time) >= 15_000_000  # ~15ms
         assert (tools[0].end_time - tools[0].start_time) >= 15_000_000
+
+    def test_post_api_request_emits_per_bucket_cost_details(
+        self, exporter_and_tracer, monkeypatch
+    ):
+        """End-to-end: pricing DB rates x disjoint buckets -> cost_details JSON
+        whose keys mirror usage_details and whose parts sum to the authoritative
+        total. Uses the pinned qwen3.6-plus snapshot entry (deterministic:
+        input 0.325 / output 1.95 / cache_read 0.0325 per million)."""
+        import json
+
+        exporter, tracer = exporter_and_tracer
+        plugin, provider = _fresh_plugin()
+        monkeypatch.setattr(provider, "build_tracer", lambda **_: tracer)
+        _le, ol = _in_memory_logger()
+        monkeypatch.setattr(provider, "build_logger", lambda **_: ol)
+
+        ctx = _FakeCtx()
+        plugin.register(ctx)
+        ctx.hooks["on_session_start"](session_id="sess-cd", model="qwen/qwen3.6-plus")
+        ctx.hooks["pre_llm_call"](session_id="sess-cd", user_message="hi")
+        ctx.hooks["post_api_request"](
+            session_id="sess-cd",
+            model="qwen/qwen3.6-plus",
+            provider="openrouter",
+            usage={"input_tokens": 2000, "output_tokens": 1000,
+                   "cache_read_tokens": 40000, "reasoning_tokens": 400},
+            finish_reason="stop",
+        )
+        ctx.hooks["on_session_end"](session_id="sess-cd")
+
+        attrs = _by_name(exporter.get_finished_spans())[OP_CHAT].attributes
+        details = json.loads(attrs["langfuse.observation.cost_details"])
+        assert details["input"] == pytest.approx(0.325 * 2000 / 1e6)
+        assert details["cache_read_input_tokens"] == pytest.approx(0.0325 * 40000 / 1e6)
+        assert details["output"] == pytest.approx(1.95 * 600 / 1e6)              # visible = 1000-400
+        assert details["output_reasoning_tokens"] == pytest.approx(1.95 * 400 / 1e6)
+        assert details["total"] == pytest.approx(attrs["gen_ai.usage.cost"])
+        # parts reconcile with the authoritative total (same rate table)
+        parts = sum(v for k, v in details.items() if k != "total")
+        assert parts == pytest.approx(details["total"], rel=1e-6)
 
     def test_post_api_request_passes_cache_buckets(self, exporter_and_tracer, monkeypatch):
         exporter, tracer = exporter_and_tracer
