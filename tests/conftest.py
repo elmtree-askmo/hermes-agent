@@ -38,6 +38,16 @@ def _isolate_hermes_home(tmp_path, monkeypatch):
     monkeypatch.delenv("HERMES_SESSION_CHAT_ID", raising=False)
     monkeypatch.delenv("HERMES_SESSION_CHAT_NAME", raising=False)
     monkeypatch.delenv("HERMES_GATEWAY_SESSION", raising=False)
+    # Slack slash-command surface flags. Any test that triggers agent
+    # creation loads ~/.hermes/.env with override=True (env_loader), so a
+    # developer machine with HERMES_ARTEMIS_ENABLED=1 leaks it into
+    # os.environ mid-run — flipping slash names to /artemis, activating the
+    # debug-only allowlist, and turning strict mode on for every later test.
+    # Tests that want these behaviors set the flags explicitly.
+    monkeypatch.delenv("HERMES_ARTEMIS_ENABLED", raising=False)
+    monkeypatch.delenv("SLACK_SLASH_COMMANDS", raising=False)
+    monkeypatch.delenv("SLACK_SUBCOMMAND_ALLOWLIST", raising=False)
+    monkeypatch.delenv("SLACK_STRICT_SUBCOMMANDS", raising=False)
 
 
 @pytest.fixture()
