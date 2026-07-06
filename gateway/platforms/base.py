@@ -591,6 +591,7 @@ class BasePlatformAdapter(ABC):
         self.config = config
         self.platform = platform
         self._message_handler: Optional[MessageHandler] = None
+        self._authorization_check: Optional[Callable[[Any], bool]] = None
         self._running = False
         self._fatal_error_code: Optional[str] = None
         self._fatal_error_message: Optional[str] = None
@@ -713,7 +714,20 @@ class BasePlatformAdapter(ABC):
         an optional response string.
         """
         self._message_handler = handler
-    
+
+    def set_authorization_check(self, check: Callable[[Any], bool]) -> None:
+        """
+        Set the gateway's user-authorization predicate.
+
+        Receives a SessionSource and returns True when that user may use
+        the bot. Adapters that reply to platform events BEFORE dispatching
+        through the message handler (e.g. Slack slash-command help) must
+        consult this so pre-dispatch replies don't leak to unauthorized
+        users. Dispatch paths are unaffected — the gateway re-checks
+        authorization inside the message handler.
+        """
+        self._authorization_check = check
+
     def set_session_store(self, session_store: Any) -> None:
         """
         Set the session store for checking active sessions.

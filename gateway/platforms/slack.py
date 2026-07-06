@@ -1656,6 +1656,38 @@ class SlackAdapter(BasePlatformAdapter):
         if team_id and channel_id:
             self._channel_team[channel_id] = team_id
 
+        # Authorization gate. Slash commands are workspace-scoped (any member
+        # can invoke them from any conversation), and several branches below
+        # reply BEFORE dispatching through the gateway's auth check — the
+        # help overview and unknown-subcommand rejection would leak the
+        # internal command surface to non-allowlisted members. Deny first,
+        # with the same private-beta reply the gateway gives unauthorized
+        # DMs. When no check is wired (standalone adapter, unit tests) the
+        # pre-dispatch replies keep legacy behavior; dispatch paths are
+        # still covered by the gateway's own check either way.
+        if self._authorization_check is not None:
+            auth_source = self.build_source(
+                chat_id=channel_id, chat_type="dm", user_id=user_id
+            )
+            try:
+                authorized = bool(self._authorization_check(auth_source))
+            except Exception:
+                logger.error("[Slack] Authorization check failed", exc_info=True)
+                authorized = False
+            if not authorized:
+                logger.warning(
+                    "[Slack] Unauthorized slash command from %s: %r", user_id, text
+                )
+                msg = (
+                    "Sorry, this bot is currently in private beta. "
+                    "Please contact the team for access."
+                )
+                if response_url:
+                    await self._post_response_url(response_url, msg)
+                else:
+                    await self.send(channel_id, msg)
+                return
+
         # Map subcommands to gateway commands — derived from central registry.
         # Also keep "compact" as a Slack-specific alias for /compress.
         from hermes_cli.commands import resolve_command, slack_subcommand_map
@@ -1669,9 +1701,14 @@ class SlackAdapter(BasePlatformAdapter):
         if allowlist is not None:
             filtered = {}
             for name, target in subcommand_map.items():
-                cmd_def = resolve_command(name)
+                # Slack-only aliases ("compact") don't resolve by name —
+                # fall back to the alias TARGET so allowlisting the
+                # canonical command keeps its aliases working.
+                cmd_def = resolve_command(name) or resolve_command(target.lstrip("/"))
                 canonical = cmd_def.name if cmd_def else name
-                if canonical in allowlist:
+                # Match on canonical OR literal name so allowlisting either
+                # `compress` or its alias `compact` keeps the alias alive.
+                if canonical in allowlist or name in allowlist:
                     filtered[name] = target
             subcommand_map = filtered
 
@@ -1824,10 +1861,14 @@ class SlackAdapter(BasePlatformAdapter):
         from hermes_cli.commands import resolve_command
 
         # Canonical names only — aliases would double the list without
-        # adding information.
+        # adding information. Slack-only aliases ("compact") don't resolve
+        # by name; resolve their TARGET so they are recognized as aliases
+        # rather than listed as pseudo-canonicals.
         known = []
-        for name in subcommand_map:
-            cmd_def = resolve_command(name)
+        for name, target in subcommand_map.items():
+            cmd_def = resolve_command(name) or resolve_command(
+                str(target).lstrip("/")
+            )
             if cmd_def is None or cmd_def.name == name:
                 known.append(name)
         known.sort()

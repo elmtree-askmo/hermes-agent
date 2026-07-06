@@ -26,6 +26,14 @@ from hermes_cli.plugins import PluginContext, PluginManifest, PluginManager
 @pytest.fixture()
 def plugin_ctx(monkeypatch):
     registry_snapshot = list(commands_mod.COMMAND_REGISTRY)
+    # An earlier test may have run real plugin discovery (gateway boot) and
+    # registered a locally-installed plugin's CommandDef (e.g. artemis-debug's
+    # "debug") into the global registry — which would make this fixture's own
+    # registrations collide. Purge those names; the snapshot restores them.
+    commands_mod.COMMAND_REGISTRY[:] = [
+        c for c in commands_mod.COMMAND_REGISTRY if c.name not in ("debug", "testdbg")
+    ]
+    commands_mod.rebuild_lookups()
     manager = PluginManager()
     monkeypatch.setattr(plugins_mod, "_plugin_manager", manager)
     ctx = PluginContext(PluginManifest(name="test-plugin"), manager)
@@ -470,3 +478,142 @@ class TestEditDistance:
     def test_distance_two_is_false(self):
         assert not _edit_distance_leq1("dbg", "debug")
         assert not _edit_distance_leq1("status", "debug")
+
+
+class TestSlashAuthorizationGate:
+    """Pre-dispatch replies (help overview, unknown-subcommand rejection)
+    expose the internal command surface, and slash commands are
+    workspace-scoped — codex round-2 P2. With the gateway's authorization
+    check wired, unauthorized invokers get the same private-beta reply the
+    gateway gives unauthorized DMs, and nothing else."""
+
+    @pytest.mark.asyncio
+    async def test_unauthorized_bare_invocation_gets_no_command_surface(
+        self, adapter, monkeypatch
+    ):
+        monkeypatch.setenv("HERMES_ARTEMIS_ENABLED", "1")
+        adapter.set_authorization_check(lambda source: False)
+
+        await adapter._handle_slash_command(_slash_payload(""))
+
+        posted = adapter._post_response_url.await_args.args[1]
+        assert "private beta" in posted
+        assert "Available" not in posted
+        assert "debug" not in posted
+        adapter.handle_message.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_unauthorized_typo_gets_no_available_list(
+        self, adapter, monkeypatch
+    ):
+        monkeypatch.setenv("HERMES_ARTEMIS_ENABLED", "1")
+        adapter.set_authorization_check(lambda source: False)
+
+        await adapter._handle_slash_command(_slash_payload("debg"))
+
+        posted = adapter._post_response_url.await_args.args[1]
+        assert "private beta" in posted
+        assert "Unknown command" not in posted
+        assert "Available" not in posted
+
+    @pytest.mark.asyncio
+    async def test_unauthorized_plugin_dispatch_blocked(
+        self, adapter, plugin_ctx, monkeypatch
+    ):
+        plugin_ctx.register_gateway_command(
+            "testdbg", "Test debug", lambda args, source=None: "digest-output"
+        )
+        handler = AsyncMock(return_value="digest-output")
+        adapter._message_handler = handler
+        adapter.set_authorization_check(lambda source: False)
+
+        await adapter._handle_slash_command(_slash_payload("testdbg"))
+
+        handler.assert_not_awaited()
+        posted = adapter._post_response_url.await_args.args[1]
+        assert "private beta" in posted
+
+    @pytest.mark.asyncio
+    async def test_authorized_invoker_unchanged(self, adapter, monkeypatch):
+        monkeypatch.setenv("HERMES_ARTEMIS_ENABLED", "1")
+        seen = []
+
+        def check(source):
+            seen.append(source)
+            return True
+
+        adapter.set_authorization_check(check)
+
+        await adapter._handle_slash_command(_slash_payload(""))
+
+        posted = adapter._post_response_url.await_args.args[1]
+        assert "Available commands:" in posted
+        assert seen and seen[0].user_id == "U777"
+
+    @pytest.mark.asyncio
+    async def test_check_exception_fails_closed(self, adapter, monkeypatch):
+        monkeypatch.setenv("HERMES_ARTEMIS_ENABLED", "1")
+
+        def check(source):
+            raise RuntimeError("auth backend down")
+
+        adapter.set_authorization_check(check)
+
+        await adapter._handle_slash_command(_slash_payload(""))
+
+        posted = adapter._post_response_url.await_args.args[1]
+        assert "private beta" in posted
+        assert "Available" not in posted
+
+    @pytest.mark.asyncio
+    async def test_no_check_wired_keeps_legacy_behavior(self, adapter, monkeypatch):
+        """Standalone adapter (no gateway runner): pre-dispatch replies work
+        as before; dispatch paths still hit the gateway's own auth check."""
+        monkeypatch.setenv("HERMES_ARTEMIS_ENABLED", "1")
+
+        await adapter._handle_slash_command(_slash_payload(""))
+
+        posted = adapter._post_response_url.await_args.args[1]
+        assert "Available commands:" in posted
+
+
+class TestAliasAllowlistCanonicalization:
+    """Slack-only aliases ("compact" -> /compress) don't resolve via
+    resolve_command — codex round-2 P3. Allowlisting the canonical command
+    must keep its aliases working, and the rejection's Available list must
+    not show aliases as pseudo-canonicals."""
+
+    @pytest.mark.asyncio
+    async def test_compact_survives_compress_allowlist(self, adapter, monkeypatch):
+        monkeypatch.setenv("SLACK_SUBCOMMAND_ALLOWLIST", "compress")
+
+        await adapter._handle_slash_command(
+            _slash_payload("compact keep it short", command="/hermes")
+        )
+
+        adapter.handle_message.assert_awaited_once()
+        event = adapter.handle_message.await_args.args[0]
+        assert event.text == "/compress keep it short"
+
+    @pytest.mark.asyncio
+    async def test_alias_name_in_allowlist_keeps_alias(self, adapter, monkeypatch):
+        monkeypatch.setenv("SLACK_SUBCOMMAND_ALLOWLIST", "compact")
+
+        await adapter._handle_slash_command(
+            _slash_payload("compact keep it short", command="/hermes")
+        )
+
+        adapter.handle_message.assert_awaited_once()
+        event = adapter.handle_message.await_args.args[0]
+        assert event.text == "/compress keep it short"
+
+    @pytest.mark.asyncio
+    async def test_available_list_hides_slack_only_alias(self, adapter, monkeypatch):
+        monkeypatch.setenv("SLACK_SUBCOMMAND_ALLOWLIST", "compress")
+        monkeypatch.setenv("SLACK_STRICT_SUBCOMMANDS", "true")
+
+        await adapter._handle_slash_command(_slash_payload("zzz", command="/hermes"))
+
+        posted = adapter._post_response_url.await_args.args[1]
+        assert "`compress`" in posted
+        assert "compact" not in posted
