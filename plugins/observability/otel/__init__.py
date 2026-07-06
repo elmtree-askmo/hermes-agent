@@ -598,6 +598,7 @@ def on_post_api_request(**kwargs: Any) -> None:
         output_tokens = _usage_field(usage, "output_tokens", "completion_tokens")
         cache_read = _usage_field(usage, "cache_read_tokens")
         cache_write = _usage_field(usage, "cache_write_tokens")
+        reasoning = _usage_field(usage, "reasoning_tokens")
         cost_usd = kwargs.get("cost_usd") or kwargs.get("cost")
         # Prefer Hermes' pricing module (pricing DB + provider cost API) so
         # OpenRouter/hosted models resolve to real USD — the reason cost showed
@@ -636,6 +637,7 @@ def on_post_api_request(**kwargs: Any) -> None:
             output_tokens=output_tokens,
             cache_read_tokens=cache_read,
             cache_write_tokens=cache_write,
+            reasoning_tokens=reasoning,
             cost_usd=cost_usd,
             finish_reasons=finish,
             ttft_ms=ttft_ms,

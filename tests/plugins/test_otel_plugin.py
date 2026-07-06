@@ -222,6 +222,31 @@ class TestEmitter:
         assert cached.attributes["gen_ai.usage.cache_creation_input_tokens"] == 1200
         assert "gen_ai.usage.cache_read_input_tokens" not in plain.attributes
 
+    def test_reasoning_carved_out_of_output_bucket(self, exporter_and_tracer):
+        """Provider reasoning_tokens is a SUB-count of completion tokens;
+        Langfuse totals usage by summing buckets, so reasoning must be carved
+        OUT of output (disjoint buckets), never added beside the full output —
+        and a bogus reasoning > output must not go negative."""
+        exporter, tracer = exporter_and_tracer
+        emitter = OtelGenAIEmitter(tracer)
+
+        with emitter.turn_span(session_id="s"):
+            emitter.record_llm_call(request_model="m", output_tokens=1861, reasoning_tokens=1500)
+            emitter.record_llm_call(request_model="m", output_tokens=100)            # no reasoning
+            emitter.record_llm_call(request_model="m", output_tokens=50, reasoning_tokens=999)  # bogus
+
+        chats = [
+            s for s in exporter.get_finished_spans()
+            if s.attributes.get("gen_ai.operation.name") == OP_CHAT
+        ]
+        r, plain, bogus = chats
+        assert r.attributes["gen_ai.usage.output_tokens"] == 361          # 1861 - 1500
+        assert r.attributes["gen_ai.usage.output_reasoning_tokens"] == 1500
+        assert plain.attributes["gen_ai.usage.output_tokens"] == 100
+        assert "gen_ai.usage.output_reasoning_tokens" not in plain.attributes
+        assert bogus.attributes["gen_ai.usage.output_tokens"] == 50       # clamped: not split
+        assert "gen_ai.usage.output_reasoning_tokens" not in bogus.attributes
+
     def test_chat_span_carries_tokens_cost_and_finish_reason(self, exporter_and_tracer):
         exporter, tracer = exporter_and_tracer
         emitter = OtelGenAIEmitter(tracer)

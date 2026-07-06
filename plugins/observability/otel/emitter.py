@@ -216,18 +216,32 @@ class OtelGenAIEmitter:
         output_tokens: int | None = None,
         cache_read_tokens: int | None = None,
         cache_write_tokens: int | None = None,
+        reasoning_tokens: int | None = None,
         cost_usd: float | None = None,
         finish_reasons: Sequence[str] | None = None,
         ttft_ms: float | None = None,
         response_text: str | None = None,
         extra: Mapping[str, Any] | None = None,
     ) -> None:
-        """Stamp usage/cost/finish onto an open ``chat`` span and close it."""
+        """Stamp usage/cost/finish onto an open ``chat`` span and close it.
+
+        Usage buckets are emitted DISJOINT (Langfuse totals by summing them):
+        ``input`` is the non-cached slice beside the two cache buckets, and —
+        since provider ``reasoning_tokens`` is a SUB-count of completion
+        tokens — reasoning is carved out of ``output`` into its own bucket
+        rather than added on top (adding it would double-count the total).
+        """
         try:
             _set_if(span, "gen_ai.request.model", request_model)
             _set_if(span, "gen_ai.response.model", response_model or request_model)
             _set_if(span, "gen_ai.usage.input_tokens", _as_int(input_tokens))
-            _set_if(span, "gen_ai.usage.output_tokens", _as_int(output_tokens))
+            _out = _as_int(output_tokens)
+            _reason = _as_int(reasoning_tokens) or 0
+            if _out is not None and 0 < _reason <= _out:
+                _set_if(span, "gen_ai.usage.output_tokens", _out - _reason)
+                _set_if(span, "gen_ai.usage.output_reasoning_tokens", _reason)
+            else:
+                _set_if(span, "gen_ai.usage.output_tokens", _out)
             # Cache buckets, under the Anthropic-convention names Langfuse's
             # usage-details mapping recognises. input_tokens above is the
             # NON-cached slice (CanonicalUsage semantics), so without these two
@@ -264,6 +278,7 @@ class OtelGenAIEmitter:
         output_tokens: int | None = None,
         cache_read_tokens: int | None = None,
         cache_write_tokens: int | None = None,
+        reasoning_tokens: int | None = None,
         cost_usd: float | None = None,
         finish_reasons: Sequence[str] | None = None,
         ttft_ms: float | None = None,
@@ -286,6 +301,7 @@ class OtelGenAIEmitter:
             output_tokens=output_tokens,
             cache_read_tokens=cache_read_tokens,
             cache_write_tokens=cache_write_tokens,
+            reasoning_tokens=reasoning_tokens,
             cost_usd=cost_usd,
             finish_reasons=finish_reasons,
             ttft_ms=ttft_ms,
