@@ -1706,7 +1706,13 @@ class SlackAdapter(BasePlatformAdapter):
             if cmd_def is None or cmd_def.name == name:
                 known.append(name)
         known.sort()
-        near = [name for name in known if _edit_distance_leq1(first_word.lower(), name)]
+        # Case slip first (`DEBUG` → `debug` — distance 0 after lowering,
+        # which the edit-distance-1 check would miss), then real typos.
+        lowered = first_word.lower()
+        if lowered in subcommand_map:
+            near = [lowered]
+        else:
+            near = [name for name in known if _edit_distance_leq1(lowered, name)]
         lines = [f"Unknown command: `{first_word}`."]
         if near:
             lines.append(f"Did you mean `{near[0]}`?")

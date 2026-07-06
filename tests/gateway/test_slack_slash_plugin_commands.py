@@ -156,6 +156,18 @@ class TestStrictSubcommandMode:
         assert "Did you mean `debug`?" in posted
 
     @pytest.mark.asyncio
+    async def test_flag_on_case_slip_gets_did_you_mean(self, adapter, monkeypatch):
+        """`DEBUG` is distance 0 from `debug` after lowering — the edit-
+        distance-1 check alone would miss it and reject with no hint."""
+        monkeypatch.setenv("SLACK_STRICT_SUBCOMMANDS", "true")
+
+        await adapter._handle_slash_command(_slash_payload("STATUS"))
+
+        posted = adapter._post_response_url.await_args.args[1]
+        assert "Unknown command: `STATUS`" in posted
+        assert "Did you mean `status`?" in posted
+
+    @pytest.mark.asyncio
     async def test_flag_on_registered_subcommand_unaffected(self, adapter, monkeypatch):
         monkeypatch.setenv("SLACK_STRICT_SUBCOMMANDS", "true")
 
