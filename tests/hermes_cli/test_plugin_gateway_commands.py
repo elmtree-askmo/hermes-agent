@@ -30,6 +30,13 @@ from hermes_cli.plugins import (
 def plugin_ctx(monkeypatch):
     """Fresh plugin manager + command-registry snapshot/restore."""
     registry_snapshot = list(commands_mod.COMMAND_REGISTRY)
+    # Purge CommandDefs a prior test's real plugin discovery may have left
+    # behind (locally-installed artemis-debug registers "debug") so this
+    # fixture's own registrations don't hit the collision guard.
+    commands_mod.COMMAND_REGISTRY[:] = [
+        c for c in commands_mod.COMMAND_REGISTRY if c.name not in ("debug", "testdbg")
+    ]
+    commands_mod.rebuild_lookups()
     manager = PluginManager()
     monkeypatch.setattr(plugins_mod, "_plugin_manager", manager)
     ctx = PluginContext(PluginManifest(name="test-plugin"), manager)
@@ -91,3 +98,34 @@ class TestGuards:
         plugin_ctx.register_gateway_command("testdbg", "Second", other)
         # First registration wins; the second is refused as a collision.
         assert get_plugin_command_handler("testdbg") is _handler
+
+
+class TestNativeCommandSync:
+    """Gateway commands must reach the shared platform command collection
+    (Discord native slash sync, Telegram menu) — codex round-2 P2. The
+    collected ``cmd_key`` must be the dispatchable ``/<name>`` text: Discord
+    dispatches ``f"{cmd_key} {args}"``, so an empty placeholder key would
+    register a slash command that dispatches an empty string."""
+
+    def test_collection_includes_gateway_command(self, plugin_ctx):
+        plugin_ctx.register_gateway_command("testdbg", "Test debug output", _handler)
+        from hermes_cli.commands import _collect_gateway_skill_entries
+
+        entries, _hidden = _collect_gateway_skill_entries(
+            platform="discord", max_slots=50, reserved_names=set()
+        )
+        match = [e for e in entries if e[0] == "testdbg"]
+        assert match, f"gateway command missing from collection: {entries}"
+        name, desc, cmd_key = match[0]
+        assert desc == "Test debug output"
+        assert cmd_key == "/testdbg"
+
+    def test_discord_skill_commands_offers_gateway_command(self, plugin_ctx):
+        plugin_ctx.register_gateway_command("testdbg", "Test debug output", _handler)
+        from hermes_cli.commands import discord_skill_commands
+
+        entries, _hidden = discord_skill_commands(max_slots=50, reserved_names=set())
+        assert any(
+            name == "testdbg" and cmd_key == "/testdbg"
+            for name, _desc, cmd_key in entries
+        )
