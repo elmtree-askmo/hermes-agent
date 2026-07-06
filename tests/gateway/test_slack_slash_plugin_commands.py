@@ -334,6 +334,44 @@ class TestSubcommandAllowlist:
         adapter.handle_message.assert_awaited_once()
         assert adapter.handle_message.await_args.args[0].text == "/status"
 
+    @pytest.mark.asyncio
+    async def test_slash_prefixed_bypass_rejected_when_strict_off(self, adapter, monkeypatch):
+        """Codex P1: `/hermes /yolo` misses the subcommand map (leading
+        slash), and with strict off would fall through as free text — but
+        `text.startswith("/")` makes it a COMMAND event, so the gateway
+        would execute the built-in and sidestep the allowlist. Must reject
+        whenever an allowlist is active, strict or not."""
+        monkeypatch.setenv("HERMES_ARTEMIS_ENABLED", "1")
+        monkeypatch.setenv("SLACK_STRICT_SUBCOMMANDS", "false")
+
+        await adapter._handle_slash_command(_slash_payload("/yolo"))
+
+        adapter.handle_message.assert_not_awaited()
+        posted = adapter._post_response_url.await_args.args[1]
+        assert "Unknown command: `/yolo`" in posted
+
+    @pytest.mark.asyncio
+    async def test_slash_prefixed_bypass_rejected_upstream_allowlist(self, adapter, monkeypatch):
+        """Same bypass on a plain upstream deployment that opted into an
+        allowlist without strict mode."""
+        monkeypatch.setenv("SLACK_SUBCOMMAND_ALLOWLIST", "debug")
+
+        await adapter._handle_slash_command(_slash_payload("/yolo", command="/hermes"))
+
+        adapter.handle_message.assert_not_awaited()
+        posted = adapter._post_response_url.await_args.args[1]
+        assert "Unknown command: `/yolo`" in posted
+
+    @pytest.mark.asyncio
+    async def test_slash_prefixed_falls_through_without_allowlist(self, adapter):
+        """No allowlist = upstream semantics unchanged: slash-prefixed text
+        still reaches the gateway as a COMMAND event (every registry command
+        is legitimately invocable, so no boundary is crossed)."""
+        await adapter._handle_slash_command(_slash_payload("/status", command="/hermes"))
+
+        adapter.handle_message.assert_awaited_once()
+        assert adapter.handle_message.await_args.args[0].text == "/status"
+
 
 class TestSlashCommandNames:
     def test_upstream_default(self, monkeypatch):

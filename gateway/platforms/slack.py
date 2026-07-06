@@ -1717,6 +1717,19 @@ class SlackAdapter(BasePlatformAdapter):
                     first_word, subcommand_map, response_url, channel_id
                 )
                 return
+            if allowlist is not None and text.lstrip().startswith("/"):
+                # Allowlist bypass guard: slash-prefixed free text (e.g.
+                # `/hermes /yolo`) would be built as a COMMAND event below
+                # (`text.startswith("/")`) and dispatched by the gateway as
+                # the built-in it names — sidestepping the allowlist that
+                # filtered it out of the subcommand map. With an allowlist
+                # active this must reject deterministically even when strict
+                # mode is off (the strict escape hatch restores free-text →
+                # LLM, never command execution).
+                await self._reply_unknown_subcommand(
+                    first_word, subcommand_map, response_url, channel_id
+                )
+                return
             pass  # Treat as a regular question (upstream default)
         else:
             # Bare invocation with /help exposed (or no allowlist): upstream
