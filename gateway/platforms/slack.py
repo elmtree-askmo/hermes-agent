@@ -1712,7 +1712,14 @@ class SlackAdapter(BasePlatformAdapter):
                     filtered[name] = target
             subcommand_map = filtered
 
-        first_word = text.split()[0] if text else ""
+        raw_first = text.split()[0] if text else ""
+        # Normalize an optional leading slash for the map lookup so
+        # `/hermes /debug` behaves like `/hermes debug`. Without this a
+        # slash-prefixed plugin command misses the subcommand map, gets
+        # built as a COMMAND event, and its per-user output is delivered
+        # through the public channel path instead of the ephemeral
+        # response_url. Rejection replies keep showing the raw token.
+        first_word = raw_first.lstrip("/")
 
         # With an allowlist active and /help itself not exposed, a bare
         # invocation or `help` answers with the exposed-command overview
@@ -1729,7 +1736,7 @@ class SlackAdapter(BasePlatformAdapter):
         is_plugin_cmd = False
         if first_word in subcommand_map:
             # Preserve arguments after the subcommand
-            rest = text[len(first_word):].strip()
+            rest = text[len(raw_first):].strip()
             text = f"{subcommand_map[first_word]} {rest}".strip() if rest else subcommand_map[first_word]
             try:
                 from hermes_cli.plugins import get_plugin_command_handler
@@ -1751,7 +1758,7 @@ class SlackAdapter(BasePlatformAdapter):
                 # command can at worst reach the LLM as plain text, never
                 # execute); strict decides where unmatched text GOES.
                 await self._reply_unknown_subcommand(
-                    first_word, subcommand_map, response_url, channel_id
+                    raw_first, subcommand_map, response_url, channel_id
                 )
                 return
             if allowlist is not None and text.lstrip().startswith("/"):
@@ -1764,7 +1771,7 @@ class SlackAdapter(BasePlatformAdapter):
                 # mode is off (the strict escape hatch restores free-text →
                 # LLM, never command execution).
                 await self._reply_unknown_subcommand(
-                    first_word, subcommand_map, response_url, channel_id
+                    raw_first, subcommand_map, response_url, channel_id
                 )
                 return
             pass  # Treat as a regular question (upstream default)

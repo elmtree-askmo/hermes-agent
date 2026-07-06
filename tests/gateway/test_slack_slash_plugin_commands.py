@@ -617,3 +617,60 @@ class TestAliasAllowlistCanonicalization:
         posted = adapter._post_response_url.await_args.args[1]
         assert "`compress`" in posted
         assert "compact" not in posted
+
+
+class TestSlashPrefixedPluginDispatch:
+    """`/hermes /debug` must behave like `/hermes debug` — codex r4 P2. A
+    slash-prefixed plugin command that missed the subcommand map was built
+    as a COMMAND event and delivered via the public channel path instead of
+    the ephemeral response_url."""
+
+    @pytest.mark.asyncio
+    async def test_slash_prefixed_plugin_command_stays_ephemeral(
+        self, adapter, plugin_ctx
+    ):
+        """Upstream (no allowlist, strict off): the exact reported case."""
+        plugin_ctx.register_gateway_command(
+            "testdbg", "Test debug", lambda args, source=None: "digest-output"
+        )
+        handler = AsyncMock(return_value="digest-output")
+        adapter._message_handler = handler
+
+        await adapter._handle_slash_command(
+            _slash_payload("/testdbg raw strategy.json", command="/hermes")
+        )
+
+        handler.assert_awaited_once()
+        event = handler.await_args.args[0]
+        assert event.text == "/testdbg raw strategy.json"
+        adapter._post_response_url.assert_awaited_once_with(
+            "https://hooks.slack.com/commands/T1/123/abc", "digest-output"
+        )
+        adapter.handle_message.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_slash_prefixed_allowlisted_command_dispatches(
+        self, adapter, plugin_ctx, monkeypatch
+    ):
+        """Artemis: `/artemis /debug` matches the allowlisted subcommand."""
+        monkeypatch.setenv("HERMES_ARTEMIS_ENABLED", "1")
+        plugin_ctx.register_gateway_command(
+            "debug", "Debug digest", lambda args, source=None: "digest"
+        )
+        handler = AsyncMock(return_value="digest")
+        adapter._message_handler = handler
+
+        await adapter._handle_slash_command(_slash_payload("/debug"))
+
+        handler.assert_awaited_once()
+        assert handler.await_args.args[0].text == "/debug"
+
+    @pytest.mark.asyncio
+    async def test_slash_prefixed_builtin_unchanged(self, adapter):
+        """`/hermes /status` keeps dispatching the built-in as before."""
+        await adapter._handle_slash_command(
+            _slash_payload("/status", command="/hermes")
+        )
+
+        adapter.handle_message.assert_awaited_once()
+        assert adapter.handle_message.await_args.args[0].text == "/status"
