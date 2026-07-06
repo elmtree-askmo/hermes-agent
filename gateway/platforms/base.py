@@ -37,6 +37,23 @@ GATEWAY_SECRET_CAPTURE_UNSUPPORTED_MESSAGE = (
 )
 
 
+def _is_plugin_gateway_command(cmd: Optional[str]) -> bool:
+    """True when *cmd* is a plugin-registered gateway command (e.g. /debug).
+
+    Plugin gateway commands are deterministic, session-free utilities and
+    must bypass the active-session guard — "agent seems stuck" is exactly
+    when they get typed. Fail-closed: any lookup error means "not a plugin
+    command" so normal message handling is never disrupted.
+    """
+    if not cmd:
+        return False
+    try:
+        from hermes_cli.plugins import get_plugin_command_handler
+        return get_plugin_command_handler(cmd.replace("_", "-")) is not None
+    except Exception:
+        return False
+
+
 def _safe_url_for_log(url: str, max_len: int = 80) -> str:
     """Return a URL string safe for logs (no query/fragment/userinfo)."""
     if max_len <= 0:
@@ -1485,14 +1502,18 @@ class BasePlatformAdapter(ABC):
             # session lifecycle and its cleanup races with the running task
             # (see PR #4926).
             cmd = event.get_command()
-            if cmd in ("approve", "deny", "status", "stop", "new", "reset"):
+            _is_plugin_cmd = _is_plugin_gateway_command(cmd)
+            if cmd in ("approve", "deny", "status", "stop", "new", "reset") or _is_plugin_cmd:
                 logger.debug(
                     "[%s] Command '/%s' bypassing active-session guard for %s",
                     self.name, cmd, session_key,
                 )
                 # Drop any buffered debounce burst so it doesn't get processed
-                # after a /reset, /new, or /stop.
-                self._discard_text_debounce(session_key)
+                # after a /reset, /new, or /stop.  Plugin gateway commands
+                # are read-only inspection utilities — keep the buffered
+                # burst so the user's pending text is not silently lost.
+                if not _is_plugin_cmd:
+                    self._discard_text_debounce(session_key)
                 try:
                     _thread_meta = {"thread_id": event.source.thread_id} if event.source.thread_id else None
                     response = await self._message_handler(event)

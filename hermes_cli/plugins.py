@@ -214,6 +214,72 @@ class PluginContext:
         }
         logger.debug("Plugin %s registered CLI command: %s", self.manifest.name, name)
 
+    def register_gateway_command(
+        self,
+        name: str,
+        help: str,
+        handler: Callable,
+        category: str = "Tools & Skills",
+        args_hint: str = "",
+        subcommands: tuple = (),
+    ) -> None:
+        """Register a gateway slash command (e.g. ``/debug`` in Slack/Telegram).
+
+        Completes the plugin-command interface anticipated by the gateway
+        dispatch in ``gateway/run.py`` (which looks up handlers via
+        ``get_plugin_command_handler``). Registration does two things:
+
+        1. Stores *handler* in the gateway-command registry so the gateway
+           dispatch can invoke it (zero LLM involvement).
+        2. Registers a ``CommandDef`` so the command appears in every
+           registry-derived surface — Slack subcommand map, Telegram menu,
+           /help, /commands.
+
+        The *handler* is called as ``handler(args)`` — or
+        ``handler(args, source=source)`` when its signature accepts a
+        ``source`` keyword (the gateway passes the invoking
+        ``SessionSource`` so per-user commands can resolve identity). It may
+        be sync or async and should return the reply text.
+
+        Names that collide with an existing command are refused (plugins
+        must not shadow built-ins).
+        """
+        from hermes_cli.commands import CommandDef, register_plugin_command, resolve_command
+
+        name = name.lstrip("/").strip().lower()
+        if not name:
+            logger.warning(
+                "Plugin '%s' tried to register an empty gateway command name",
+                self.manifest.name,
+            )
+            return
+        if resolve_command(name) is not None:
+            logger.warning(
+                "Plugin '%s' tried to register gateway command '/%s' which "
+                "collides with an existing command — refused",
+                self.manifest.name,
+                name,
+            )
+            return
+
+        self._manager._gateway_commands[name] = {
+            "name": name,
+            "help": help,
+            "handler": handler,
+            "plugin": self.manifest.name,
+        }
+        register_plugin_command(
+            CommandDef(
+                name,
+                help,
+                category,
+                args_hint=args_hint,
+                subcommands=tuple(subcommands),
+                gateway_only=True,
+            )
+        )
+        logger.debug("Plugin %s registered gateway command: /%s", self.manifest.name, name)
+
     # -- hook registration --------------------------------------------------
 
     def register_hook(self, hook_name: str, callback: Callable) -> None:
@@ -246,6 +312,7 @@ class PluginManager:
         self._hooks: Dict[str, List[Callable]] = {}
         self._plugin_tool_names: Set[str] = set()
         self._cli_commands: Dict[str, dict] = {}
+        self._gateway_commands: Dict[str, dict] = {}
         self._discovered: bool = False
         self._cli_ref = None  # Set by CLI after plugin discovery
 
@@ -612,6 +679,23 @@ def get_plugin_cli_commands() -> Dict[str, dict]:
     suitable for wiring into argparse subparsers.
     """
     return dict(get_plugin_manager()._cli_commands)
+
+
+def get_plugin_command_handler(name: str) -> Optional[Callable]:
+    """Return the handler for a plugin-registered gateway command, or None.
+
+    *name* is the command without the leading slash (hyphenated form —
+    callers normalize Telegram's underscored variants before lookup).
+    Used by the gateway dispatch in ``gateway/run.py`` and by the
+    platform adapters' active-session bypass checks.
+    """
+    entry = get_plugin_manager()._gateway_commands.get(name.lstrip("/").strip().lower())
+    return entry["handler"] if entry else None
+
+
+def get_plugin_gateway_commands() -> Dict[str, dict]:
+    """Return gateway commands registered by plugins (name -> metadata)."""
+    return dict(get_plugin_manager()._gateway_commands)
 
 
 def get_plugin_toolsets() -> List[tuple]:
