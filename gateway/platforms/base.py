@@ -1505,6 +1505,16 @@ class BasePlatformAdapter(ABC):
                         )
                 except Exception as e:
                     logger.error("[%s] Command '/%s' dispatch failed: %s", self.name, cmd, e, exc_info=True)
+                finally:
+                    # Inline dispatch bypasses _process_message_background, so
+                    # this path clears the session ContextVars itself (the
+                    # handler seeds them; see the task-end clear there).
+                    try:
+                        from tools.session_context import clear_session
+
+                        clear_session()
+                    except Exception:
+                        pass
                 return
 
             # Special case: photo bursts/albums frequently arrive as multiple near-
@@ -1909,6 +1919,21 @@ class BasePlatformAdapter(ABC):
             if self._session_tasks.get(session_key) is current_task:
                 self._active_sessions.pop(session_key, None)
                 self._session_tasks.pop(session_key, None)
+            # True end of the message task: clear the task-local session
+            # ContextVars (platform/chat/user/trace). Deliberately HERE and
+            # not in the agent handler's own finally — the post-processing
+            # tail above (on_processing_complete hooks, auto-title) must
+            # still see the turn's identity for log tagging and aux-call
+            # trace parenting (S-0629-01 turn-teardown gap). Same task, same
+            # turn, same user throughout, so the isolation contract is
+            # unchanged. Guarded import: platform adapters must work outside
+            # a full Hermes runtime.
+            try:
+                from tools.session_context import clear_session
+
+                clear_session()
+            except Exception:
+                pass
 
     async def cancel_background_tasks(self) -> None:
         """Cancel any in-flight background message-processing tasks.

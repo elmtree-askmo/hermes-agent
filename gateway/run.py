@@ -4199,9 +4199,16 @@ class GatewayRunner:
                 "Try again or use /reset to start a fresh session."
             )
         finally:
-            # Clear session env
-            self._clear_session_env()
-    
+            # Session ContextVars are deliberately NOT cleared here — the
+            # message task isn't over: the platform adapter still runs the
+            # post-processing tail (on_processing_complete hooks, auto-title),
+            # which needs the turn's identity (trace id for log tagging +
+            # aux-generation trace parenting; S-0629-01 turn-teardown gap).
+            # The clear now lives at the true end of the message task in
+            # gateway/platforms/base.py (_process_message_background finally
+            # + the inline command-bypass path).
+            pass
+
     def _format_session_info(self) -> str:
         """Resolve current model config and return a formatted info block.
 
