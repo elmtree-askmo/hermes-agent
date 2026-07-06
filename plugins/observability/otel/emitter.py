@@ -230,6 +230,14 @@ class OtelGenAIEmitter:
         since provider ``reasoning_tokens`` is a SUB-count of completion
         tokens — reasoning is carved out of ``output`` into its own bucket
         rather than added on top (adding it would double-count the total).
+
+        Deliberate deviation from the OTel GenAI semconv, which says
+        ``output_tokens`` SHOULD include reasoning (with a descriptive
+        sub-count attribute). Langfuse's OTLP ingestion sums every usage
+        bucket, so the semconv shape double-counts there — a known open bug
+        (langfuse/langfuse#11244); this carve-out is the community
+        workaround from that issue. When it's fixed, revert to the semconv
+        shape: full ``output_tokens`` + ``gen_ai.usage.reasoning_tokens``.
         """
         try:
             _set_if(span, "gen_ai.request.model", request_model)
