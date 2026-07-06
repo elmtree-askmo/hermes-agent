@@ -40,6 +40,12 @@ def plugin_ctx(monkeypatch):
 @pytest.fixture()
 def runner(monkeypatch, tmp_path):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    # _handle_message checks user authorization before any dispatch. Grant
+    # it explicitly — on dev machines the flag leaks in from ~/.hermes/.env
+    # (loaded override=True at runner init), which masked this dependency;
+    # clean CI has no such env and would deny U777 before the code under
+    # test is ever reached (codex r5).
+    monkeypatch.setenv("GATEWAY_ALLOW_ALL_USERS", "true")
     config = GatewayConfig(platforms={}, sessions_dir=tmp_path / "sessions")
     return GatewayRunner(config)
 
