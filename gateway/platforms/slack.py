@@ -57,6 +57,49 @@ def _artemis_enabled() -> bool:
     ).strip().lower() in ("1", "true", "yes", "on")
 
 
+def _slash_command_names() -> list:
+    """Slash command names this gateway listens on.
+
+    ``SLACK_SLASH_COMMANDS`` (comma-separated, e.g. ``/artemis``) overrides.
+    An Artemis deployment listens on ``/artemis`` ONLY — ``/hermes`` is
+    deliberately not registered, so even a workspace whose app manifest
+    still defines it gets no handler (Slack shows a dispatch failure instead
+    of reaching the gateway). Plain upstream stays ``/hermes``. Names not
+    present in the app manifest simply never receive traffic.
+    """
+    raw = os.getenv("SLACK_SLASH_COMMANDS", "").strip()
+    if raw:
+        names = ["/" + t.strip().lstrip("/") for t in raw.split(",") if t.strip()]
+        if names:
+            return names
+    if _artemis_enabled():
+        return ["/artemis"]
+    return ["/hermes"]
+
+
+def _subcommand_allowlist():
+    """Set of canonical subcommand names exposed via slash commands, or None.
+
+    None = upstream behavior (every gateway command in the registry is
+    invocable). ``SLACK_SUBCOMMAND_ALLOWLIST`` (comma-separated) overrides;
+    the special value ``all`` disables filtering explicitly. An Artemis
+    deployment defaults to ``{"debug"}``: the full upstream surface includes
+    operator commands (yolo / model / update / reload-mcp) that must not be
+    invocable by workspace members — slash commands are workspace-scoped, so
+    every allowlisted Slack user could otherwise reach them.
+    """
+    raw = os.getenv("SLACK_SUBCOMMAND_ALLOWLIST", "").strip()
+    if raw:
+        if raw.lower() in ("all", "*"):
+            return None
+        names = {t.strip().lstrip("/").lower() for t in raw.split(",") if t.strip()}
+        if names:
+            return names
+    if _artemis_enabled():
+        return {"debug"}
+    return None
+
+
 def _edit_distance_leq1(a: str, b: str) -> bool:
     """True when the Levenshtein distance between *a* and *b* is exactly 1.
 
@@ -225,10 +268,14 @@ class SlackAdapter(BasePlatformAdapter):
                 pass
 
             # Register slash command handler
-            @self._app.command("/hermes")
-            async def handle_hermes_command(ack, command):
-                await ack()
-                await self._handle_slash_command(command)
+            # Register slash command handler(s). Names are configurable so a
+            # deployment can present its own command (e.g. /artemis) — the
+            # Slack app manifest must define the same names.
+            for _cmd_name in _slash_command_names():
+                @self._app.command(_cmd_name)
+                async def handle_hermes_command(ack, command):
+                    await ack()
+                    await self._handle_slash_command(command)
 
             # Register Block Kit action handlers for approval buttons
             for _action_id in (
@@ -1611,9 +1658,23 @@ class SlackAdapter(BasePlatformAdapter):
 
         # Map subcommands to gateway commands — derived from central registry.
         # Also keep "compact" as a Slack-specific alias for /compress.
-        from hermes_cli.commands import slack_subcommand_map
+        from hermes_cli.commands import resolve_command, slack_subcommand_map
         subcommand_map = slack_subcommand_map()
         subcommand_map["compact"] = "/compress"
+
+        # Subcommand allowlist: filter the map (canonical names AND their
+        # aliases) so non-allowlisted commands behave exactly like unknown
+        # ones — deterministic ephemeral rejection, never dispatched.
+        allowlist = _subcommand_allowlist()
+        if allowlist is not None:
+            filtered = {}
+            for name, target in subcommand_map.items():
+                cmd_def = resolve_command(name)
+                canonical = cmd_def.name if cmd_def else name
+                if canonical in allowlist:
+                    filtered[name] = target
+            subcommand_map = filtered
+
         first_word = text.split()[0] if text else ""
         is_plugin_cmd = False
         if first_word in subcommand_map:
@@ -1629,18 +1690,32 @@ class SlackAdapter(BasePlatformAdapter):
                 is_plugin_cmd = False
         elif text:
             if self._strict_subcommands_enabled():
-                # Strict-subcommand mode (config-gated, default off): any
-                # /hermes invocation whose first token matches no registered
-                # subcommand gets a deterministic ephemeral rejection and
-                # never reaches the LLM. Closes the silent-LLM-fallback trap:
-                # a typo'd command would otherwise burn a paid agent turn AND
-                # land as a user message in the very session under test.
+                # Strict-subcommand mode (defaults on under Artemis): any
+                # invocation whose first token matches no exposed subcommand
+                # gets a deterministic ephemeral rejection and never reaches
+                # the LLM. Closes the silent-LLM-fallback trap: a typo'd
+                # command would otherwise burn a paid agent turn AND land as
+                # a user message in the very session under test. The two
+                # gates are deliberately decoupled: the allowlist decides
+                # which commands EXIST (security boundary — a filtered
+                # command can at worst reach the LLM as plain text, never
+                # execute); strict decides where unmatched text GOES.
                 await self._reply_unknown_subcommand(
                     first_word, subcommand_map, response_url, channel_id
                 )
                 return
             pass  # Treat as a regular question (upstream default)
         else:
+            if allowlist is not None and "help" not in allowlist:
+                # Bare invocation with /help not exposed: answer with the
+                # exposed command list instead of dispatching /help.
+                known = ", ".join(f"`{n}`" for n in sorted(allowlist))
+                msg = f"Available commands: {known}"
+                if response_url:
+                    await self._post_response_url(response_url, msg)
+                else:
+                    await self.send(channel_id, msg)
+                return
             text = "/help"
 
         source = self.build_source(

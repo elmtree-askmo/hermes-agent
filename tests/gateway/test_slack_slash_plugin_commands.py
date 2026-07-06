@@ -38,6 +38,8 @@ def plugin_ctx(monkeypatch):
 def adapter(monkeypatch):
     monkeypatch.delenv("SLACK_STRICT_SUBCOMMANDS", raising=False)
     monkeypatch.delenv("HERMES_ARTEMIS_ENABLED", raising=False)
+    monkeypatch.delenv("SLACK_SUBCOMMAND_ALLOWLIST", raising=False)
+    monkeypatch.delenv("SLACK_SLASH_COMMANDS", raising=False)
     config = PlatformConfig(enabled=True, token="xoxb-fake-token")
     a = SlackAdapter(config)
     a.handle_message = AsyncMock()
@@ -212,6 +214,118 @@ class TestStrictSubcommandMode:
         event = adapter.handle_message.await_args.args[0]
         assert event.text == "what is my status?"
         adapter._post_response_url.assert_not_awaited()
+
+
+class TestSubcommandAllowlist:
+    @pytest.mark.asyncio
+    async def test_artemis_default_blocks_builtin_operator_commands(self, adapter, plugin_ctx, monkeypatch):
+        """Slash commands are workspace-scoped: every allowlisted Slack user
+        can invoke them. The Artemis default exposes ONLY debug — operator
+        commands (yolo/model/update/...) must reject."""
+        monkeypatch.setenv("HERMES_ARTEMIS_ENABLED", "1")
+        plugin_ctx.register_gateway_command(
+            "debug", "Debug digest", lambda args, source=None: "digest"
+        )
+
+        await adapter._handle_slash_command(_slash_payload("yolo"))
+
+        adapter.handle_message.assert_not_awaited()
+        posted = adapter._post_response_url.await_args.args[1]
+        assert "Unknown command: `yolo`" in posted
+        assert "Available: `debug`" in posted
+        assert "`status`" not in posted
+
+    @pytest.mark.asyncio
+    async def test_artemis_default_still_dispatches_debug(self, adapter, plugin_ctx, monkeypatch):
+        monkeypatch.setenv("HERMES_ARTEMIS_ENABLED", "1")
+        plugin_ctx.register_gateway_command(
+            "debug", "Debug digest", lambda args, source=None: "digest"
+        )
+        handler = AsyncMock(return_value="digest")
+        adapter._message_handler = handler
+
+        await adapter._handle_slash_command(_slash_payload("debug"))
+
+        handler.assert_awaited_once()
+        adapter._post_response_url.assert_awaited_once_with(
+            "https://hooks.slack.com/commands/T1/123/abc", "digest"
+        )
+
+    @pytest.mark.asyncio
+    async def test_alias_of_blocked_command_also_rejected(self, adapter, monkeypatch):
+        """`reset` is an alias of `new` — allowlist filtering must cover
+        aliases, not just canonical names."""
+        monkeypatch.setenv("HERMES_ARTEMIS_ENABLED", "1")
+
+        await adapter._handle_slash_command(_slash_payload("reset"))
+
+        adapter.handle_message.assert_not_awaited()
+        posted = adapter._post_response_url.await_args.args[1]
+        assert "Unknown command: `reset`" in posted
+
+    @pytest.mark.asyncio
+    async def test_env_allowlist_widens_exposure(self, adapter, monkeypatch):
+        monkeypatch.setenv("HERMES_ARTEMIS_ENABLED", "1")
+        monkeypatch.setenv("SLACK_SUBCOMMAND_ALLOWLIST", "debug,status")
+
+        await adapter._handle_slash_command(_slash_payload("status"))
+
+        adapter.handle_message.assert_awaited_once()
+        event = adapter.handle_message.await_args.args[0]
+        assert event.text == "/status"
+
+    @pytest.mark.asyncio
+    async def test_allowlist_all_restores_upstream_surface(self, adapter, monkeypatch):
+        monkeypatch.setenv("HERMES_ARTEMIS_ENABLED", "1")
+        monkeypatch.setenv("SLACK_SUBCOMMAND_ALLOWLIST", "all")
+
+        await adapter._handle_slash_command(_slash_payload("status"))
+
+        adapter.handle_message.assert_awaited_once()
+        assert adapter.handle_message.await_args.args[0].text == "/status"
+
+    @pytest.mark.asyncio
+    async def test_bare_invocation_lists_exposed_commands_not_help(self, adapter, monkeypatch):
+        """/help is not in the Artemis allowlist — a bare invocation must
+        answer with the exposed list instead of dispatching /help."""
+        monkeypatch.setenv("HERMES_ARTEMIS_ENABLED", "1")
+
+        await adapter._handle_slash_command(_slash_payload(""))
+
+        adapter.handle_message.assert_not_awaited()
+        posted = adapter._post_response_url.await_args.args[1]
+        assert posted == "Available commands: `debug`"
+
+    @pytest.mark.asyncio
+    async def test_upstream_without_flags_unfiltered(self, adapter):
+        await adapter._handle_slash_command(_slash_payload("status"))
+
+        adapter.handle_message.assert_awaited_once()
+        assert adapter.handle_message.await_args.args[0].text == "/status"
+
+
+class TestSlashCommandNames:
+    def test_upstream_default(self, monkeypatch):
+        from gateway.platforms.slack import _slash_command_names
+
+        monkeypatch.delenv("SLACK_SLASH_COMMANDS", raising=False)
+        monkeypatch.delenv("HERMES_ARTEMIS_ENABLED", raising=False)
+        assert _slash_command_names() == ["/hermes"]
+
+    def test_artemis_listens_on_artemis_only(self, monkeypatch):
+        """Artemis never registers a /hermes handler — the full upstream
+        command surface is unreachable even if the app manifest lags."""
+        from gateway.platforms.slack import _slash_command_names
+
+        monkeypatch.delenv("SLACK_SLASH_COMMANDS", raising=False)
+        monkeypatch.setenv("HERMES_ARTEMIS_ENABLED", "1")
+        assert _slash_command_names() == ["/artemis"]
+
+    def test_env_override_normalizes_slashes(self, monkeypatch):
+        from gateway.platforms.slack import _slash_command_names
+
+        monkeypatch.setenv("SLACK_SLASH_COMMANDS", "artemis, /coach")
+        assert _slash_command_names() == ["/artemis", "/coach"]
 
 
 class TestPostResponseUrl:
