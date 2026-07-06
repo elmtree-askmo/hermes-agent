@@ -1676,6 +1676,19 @@ class SlackAdapter(BasePlatformAdapter):
             subcommand_map = filtered
 
         first_word = text.split()[0] if text else ""
+
+        # With an allowlist active and /help itself not exposed, a bare
+        # invocation or `help` answers with the exposed-command overview
+        # (name + args hint + description) instead of dispatching /help.
+        if allowlist is not None and "help" not in allowlist and first_word in ("", "help"):
+            slash_name = command.get("command") or "/hermes"
+            msg = self._render_command_help(slash_name, allowlist)
+            if response_url:
+                await self._post_response_url(response_url, msg)
+            else:
+                await self.send(channel_id, msg)
+            return
+
         is_plugin_cmd = False
         if first_word in subcommand_map:
             # Preserve arguments after the subcommand
@@ -1706,16 +1719,8 @@ class SlackAdapter(BasePlatformAdapter):
                 return
             pass  # Treat as a regular question (upstream default)
         else:
-            if allowlist is not None and "help" not in allowlist:
-                # Bare invocation with /help not exposed: answer with the
-                # exposed command list instead of dispatching /help.
-                known = ", ".join(f"`{n}`" for n in sorted(allowlist))
-                msg = f"Available commands: {known}"
-                if response_url:
-                    await self._post_response_url(response_url, msg)
-                else:
-                    await self.send(channel_id, msg)
-                return
+            # Bare invocation with /help exposed (or no allowlist): upstream
+            # behavior. The allowlist-without-help case was answered above.
             text = "/help"
 
         source = self.build_source(
@@ -1773,6 +1778,27 @@ class SlackAdapter(BasePlatformAdapter):
         if env_flag:
             return env_flag in ("true", "1", "yes")
         return _artemis_enabled()
+
+    def _render_command_help(self, slash_name: str, allowlist) -> str:
+        """Exposed-command overview for `<slash> help` under an allowlist.
+
+        Pulls each command's args hint + description from the registry so
+        the help text never drifts from what is actually invocable.
+        """
+        from hermes_cli.commands import resolve_command
+
+        lines = ["Available commands:"]
+        for name in sorted(allowlist):
+            cmd_def = resolve_command(name)
+            if cmd_def is None:
+                # Allowlisted but not registered (e.g. plugin missing) —
+                # show the bare name so the gap is visible.
+                lines.append(f"  {slash_name} {name}")
+                continue
+            hint = f" {cmd_def.args_hint}" if cmd_def.args_hint else ""
+            lines.append(f"  {slash_name} {name}{hint} — {cmd_def.description}")
+        lines.append(f"Type `{slash_name} <command> help` for details where supported.")
+        return "\n".join(lines)
 
     async def _reply_unknown_subcommand(
         self,

@@ -47,8 +47,9 @@ def adapter(monkeypatch):
     return a
 
 
-def _slash_payload(text):
+def _slash_payload(text, command="/artemis"):
     return {
+        "command": command,
         "text": text,
         "user_id": "U777",
         "channel_id": "D123",
@@ -285,16 +286,46 @@ class TestSubcommandAllowlist:
         assert adapter.handle_message.await_args.args[0].text == "/status"
 
     @pytest.mark.asyncio
-    async def test_bare_invocation_lists_exposed_commands_not_help(self, adapter, monkeypatch):
+    async def test_bare_invocation_shows_command_overview(self, adapter, plugin_ctx, monkeypatch):
         """/help is not in the Artemis allowlist — a bare invocation must
-        answer with the exposed list instead of dispatching /help."""
+        answer with the exposed-command overview instead of dispatching /help."""
         monkeypatch.setenv("HERMES_ARTEMIS_ENABLED", "1")
+        plugin_ctx.register_gateway_command(
+            "debug", "Artemis per-user state digest (zero-LLM)", lambda args, source=None: "digest",
+            args_hint="[apps|mem0|raw <file>|snapshot|help]",
+        )
 
         await adapter._handle_slash_command(_slash_payload(""))
 
         adapter.handle_message.assert_not_awaited()
         posted = adapter._post_response_url.await_args.args[1]
-        assert posted == "Available commands: `debug`"
+        assert "Available commands:" in posted
+        assert "/artemis debug [apps|mem0|raw <file>|snapshot|help] — Artemis per-user state digest (zero-LLM)" in posted
+
+    @pytest.mark.asyncio
+    async def test_help_token_shows_same_overview(self, adapter, plugin_ctx, monkeypatch):
+        monkeypatch.setenv("HERMES_ARTEMIS_ENABLED", "1")
+        plugin_ctx.register_gateway_command(
+            "debug", "Artemis per-user state digest (zero-LLM)", lambda args, source=None: "digest",
+        )
+
+        await adapter._handle_slash_command(_slash_payload("help"))
+
+        adapter.handle_message.assert_not_awaited()
+        posted = adapter._post_response_url.await_args.args[1]
+        assert "Available commands:" in posted
+        assert "/artemis debug" in posted
+        assert "`/artemis <command> help`" in posted
+
+    @pytest.mark.asyncio
+    async def test_help_dispatches_upstream_when_allowlisted(self, adapter, monkeypatch):
+        monkeypatch.setenv("HERMES_ARTEMIS_ENABLED", "1")
+        monkeypatch.setenv("SLACK_SUBCOMMAND_ALLOWLIST", "debug,help")
+
+        await adapter._handle_slash_command(_slash_payload("help"))
+
+        adapter.handle_message.assert_awaited_once()
+        assert adapter.handle_message.await_args.args[0].text == "/help"
 
     @pytest.mark.asyncio
     async def test_upstream_without_flags_unfiltered(self, adapter):
