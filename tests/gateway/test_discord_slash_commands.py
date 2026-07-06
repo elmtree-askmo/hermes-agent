@@ -43,6 +43,7 @@ from gateway.platforms.discord import DiscordAdapter  # noqa: E402
 class FakeTree:
     def __init__(self):
         self.commands = {}
+        self.added = []
 
     def command(self, *, name, description):
         def decorator(fn):
@@ -50,6 +51,12 @@ class FakeTree:
             return fn
 
         return decorator
+
+    def get_commands(self):
+        return [SimpleNamespace(name=n) for n in self.commands]
+
+    def add_command(self, cmd):
+        self.added.append(cmd)
 
 
 @pytest.fixture
@@ -497,3 +504,108 @@ def test_discord_auto_thread_config_bridge(monkeypatch, tmp_path):
 
     import os
     assert os.getenv("DISCORD_AUTO_THREAD") == "true"
+
+
+# ------------------------------------------------------------------
+# Plugin gateway commands — ephemeral interaction delivery (codex r3 P2)
+# ------------------------------------------------------------------
+
+
+def _plugin_interaction():
+    return SimpleNamespace(
+        response=SimpleNamespace(defer=AsyncMock()),
+        edit_original_response=AsyncMock(),
+        delete_original_response=AsyncMock(),
+        channel=SimpleNamespace(),
+        channel_id=555,
+        user=SimpleNamespace(id=42, display_name="Maya"),
+    )
+
+
+@pytest.fixture
+def plugin_ctx(monkeypatch):
+    from hermes_cli import commands as commands_mod
+    from hermes_cli import plugins as plugins_mod
+    from hermes_cli.plugins import PluginContext, PluginManifest, PluginManager
+
+    registry_snapshot = list(commands_mod.COMMAND_REGISTRY)
+    commands_mod.COMMAND_REGISTRY[:] = [
+        c for c in commands_mod.COMMAND_REGISTRY if c.name not in ("debug", "testdbg")
+    ]
+    commands_mod.rebuild_lookups()
+    manager = PluginManager()
+    monkeypatch.setattr(plugins_mod, "_plugin_manager", manager)
+    ctx = PluginContext(PluginManifest(name="test-plugin"), manager)
+    yield ctx
+    commands_mod.COMMAND_REGISTRY[:] = registry_snapshot
+    commands_mod.rebuild_lookups()
+
+
+@pytest.mark.asyncio
+async def test_run_plugin_slash_replies_inside_ephemeral_interaction(adapter):
+    """The digest must stay in the deferred ephemeral interaction — never
+    reach handle_message(), whose delivery is a public channel.send()."""
+    adapter._message_handler = AsyncMock(return_value="digest-output")
+    adapter.handle_message = AsyncMock()
+    interaction = _plugin_interaction()
+
+    await adapter._run_plugin_slash(interaction, "/testdbg")
+
+    interaction.response.defer.assert_awaited_once_with(ephemeral=True)
+    interaction.edit_original_response.assert_awaited_once_with(content="digest-output")
+    adapter.handle_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_run_plugin_slash_empty_response_deletes_indicator(adapter):
+    adapter._message_handler = AsyncMock(return_value=None)
+    interaction = _plugin_interaction()
+
+    await adapter._run_plugin_slash(interaction, "/testdbg")
+
+    interaction.delete_original_response.assert_awaited_once()
+    interaction.edit_original_response.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_run_plugin_slash_handler_error_reported_ephemerally(adapter):
+    adapter._message_handler = AsyncMock(side_effect=RuntimeError("boom"))
+    interaction = _plugin_interaction()
+
+    await adapter._run_plugin_slash(interaction, "/testdbg")
+
+    content = interaction.edit_original_response.await_args.kwargs["content"]
+    assert "boom" in content
+
+
+@pytest.mark.asyncio
+async def test_registered_gateway_command_routes_to_plugin_dispatch(
+    adapter, plugin_ctx, monkeypatch
+):
+    """The generated native slash handler for a plugin gateway command must
+    take the ephemeral plugin path, not _run_simple_slash."""
+    import sys
+
+    plugin_ctx.register_gateway_command(
+        "testdbg", "Test debug", lambda args, source=None: "digest-output"
+    )
+    discord_mod = sys.modules["discord"]
+    cmd_factory = MagicMock()
+    monkeypatch.setattr(discord_mod.app_commands, "Command", cmd_factory, raising=False)
+
+    adapter._register_slash_commands()
+
+    handler = None
+    for call in cmd_factory.call_args_list:
+        if call.kwargs.get("name") == "testdbg":
+            handler = call.kwargs["callback"]
+    assert handler is not None, "testdbg native slash command was not registered"
+
+    adapter._message_handler = AsyncMock(return_value="digest-output")
+    adapter.handle_message = AsyncMock()
+    interaction = _plugin_interaction()
+
+    await handler(interaction, args="")
+
+    interaction.edit_original_response.assert_awaited_once_with(content="digest-output")
+    adapter.handle_message.assert_not_awaited()
