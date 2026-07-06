@@ -129,3 +129,32 @@ class TestNativeCommandSync:
             name == "testdbg" and cmd_key == "/testdbg"
             for name, _desc, cmd_key in entries
         )
+
+
+class TestTelegramMenuSafety:
+    """A registered gateway command feeds telegram_bot_commands() as an
+    unclamped core entry — codex r6 P2. One oversized or sanitize-colliding
+    name would fail Telegram set_my_commands for the whole bot."""
+
+    def test_oversized_name_refused_at_registration(self, plugin_ctx):
+        long_name = "x" * 33
+        plugin_ctx.register_gateway_command(long_name, "Too long", _handler)
+
+        assert get_plugin_command_handler(long_name) is None
+        from hermes_cli.commands import telegram_bot_commands
+        assert all(len(n) <= 32 for n, _d in telegram_bot_commands())
+
+    def test_32_char_name_accepted(self, plugin_ctx):
+        name = "y" * 32
+        plugin_ctx.register_gateway_command(name, "Max length", _handler)
+        assert get_plugin_command_handler(name) is _handler
+
+    def test_telegram_menu_dedupes_sanitize_collisions(self, plugin_ctx):
+        """"test-dbg" and "test_dbg" both sanitize to "test_dbg" — the menu
+        must keep one, not send a duplicate payload."""
+        plugin_ctx.register_gateway_command("test-dbg", "Hyphenated", _handler)
+        plugin_ctx.register_gateway_command("test_dbg", "Underscored", _handler)
+
+        from hermes_cli.commands import telegram_bot_commands
+        names = [n for n, _d in telegram_bot_commands()]
+        assert names.count("test_dbg") == 1

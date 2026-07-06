@@ -355,11 +355,16 @@ def telegram_bot_commands() -> list[tuple[str, str]]:
     """
     overrides = _resolve_config_gates()
     result: list[tuple[str, str]] = []
+    seen: set[str] = set()
     for cmd in COMMAND_REGISTRY:
         if not _is_gateway_available(cmd, overrides):
             continue
         tg_name = _sanitize_telegram_name(cmd.name)
-        if tg_name:
+        # Sanitizing can collapse distinct names ("my-cmd" / "my_cmd") into
+        # one; a duplicate in the payload fails set_my_commands for the
+        # whole menu, so keep the first and drop later collisions.
+        if tg_name and tg_name not in seen:
+            seen.add(tg_name)
             result.append((tg_name, cmd.description))
     return result
 

@@ -253,6 +253,20 @@ class PluginContext:
                 self.manifest.name,
             )
             return
+        if len(name) > 32:
+            # Telegram and Discord cap command names at 32 chars, and the
+            # registry CommandDef feeds their native menus as an unclamped
+            # core entry — one oversized name would fail set_my_commands
+            # for the whole bot. Refuse at the source.
+            logger.warning(
+                "Plugin '%s' tried to register gateway command '/%s' "
+                "(%d chars) — exceeds the 32-char platform command-name "
+                "limit, refused",
+                self.manifest.name,
+                name,
+                len(name),
+            )
+            return
         if resolve_command(name) is not None:
             logger.warning(
                 "Plugin '%s' tried to register gateway command '/%s' which "
