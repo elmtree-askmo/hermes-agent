@@ -43,6 +43,7 @@ import atexit
 import logging
 import os
 import threading
+from collections import OrderedDict
 from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
@@ -86,6 +87,41 @@ _OPEN_TOOL_SPANS: dict[str, Any] = {}
 # (post_api_request / post_tool_call) does not carry the session id in kwargs.
 _ACTIVE_SESSION_LOCK = threading.Lock()
 _ACTIVE_SESSION_ID: str = "default"
+
+# hermes trace_id -> OTel Context carrying that turn's invoke_agent span, so
+# POST-turn auxiliary calls (session title, detectors) can join the turn's
+# trace after its span closed and the ambient OTel context is gone. Identity
+# is explicit (the aux hook passes the hermes trace_id it captured from its
+# own task ContextVar) — deliberately NOT a "last closed turn" global, which
+# would misattribute across concurrently-served users. Bounded LRU: post-turn
+# aux fires within seconds, so a handful of recent turns is plenty.
+_TURN_CONTEXTS_LOCK = threading.Lock()
+_TURN_CONTEXTS: "OrderedDict[str, Any]" = OrderedDict()
+_TURN_CONTEXTS_MAX = 32
+
+
+def _remember_turn_context(run_trace_id: Optional[str], span: Any) -> None:
+    """Record the OTel parent context for a turn, keyed by hermes trace_id."""
+    if not run_trace_id:
+        return
+    try:
+        from opentelemetry import trace as _otel_trace
+
+        ctx = _otel_trace.set_span_in_context(span)
+    except Exception:
+        return
+    with _TURN_CONTEXTS_LOCK:
+        _TURN_CONTEXTS[run_trace_id] = ctx
+        _TURN_CONTEXTS.move_to_end(run_trace_id)
+        while len(_TURN_CONTEXTS) > _TURN_CONTEXTS_MAX:
+            _TURN_CONTEXTS.popitem(last=False)
+
+
+def _lookup_turn_context(run_trace_id: Any) -> Optional[Any]:
+    if not run_trace_id:
+        return None
+    with _TURN_CONTEXTS_LOCK:
+        return _TURN_CONTEXTS.get(str(run_trace_id))
 
 
 def _env(name: str, default: str = "") -> str:
@@ -513,6 +549,7 @@ def on_pre_llm_call(**kwargs: Any) -> None:
         with _OPEN_TURNS_LOCK:
             _OPEN_TURNS[session_id] = cm
             _OPEN_TURN_SPANS[session_id] = span
+        _remember_turn_context(run_trace_id, span)
     except Exception:
         logger.debug("on_pre_llm_call: failed to open turn span", exc_info=True)
     # Dashboard log record for the prompt (best-effort, never raises). The span
@@ -684,6 +721,20 @@ def on_post_api_request(**kwargs: Any) -> None:
         response_text = kwargs.get("assistant_response")
         if not response_text and _assistant_message is not None:
             response_text = getattr(_assistant_message, "content", None)
+        # Request-side content for callers that pass raw chat messages
+        # (auxiliary calls) — serialized here, content-gated at the emitter
+        # like every other gen_ai.prompt/completion attribute.
+        prompt_text = None
+        _prompt_messages = kwargs.get("prompt_messages")
+        if _prompt_messages is not None:
+            try:
+                import json as _json
+
+                prompt_text = _json.dumps(
+                    _prompt_messages, ensure_ascii=False, default=str
+                )
+            except Exception:
+                prompt_text = str(_prompt_messages)
         with _OPEN_CALLS_LOCK:
             span = _OPEN_LLM_SPANS.pop(_llm_call_key(kwargs), None)
         _fields = dict(
@@ -698,13 +749,26 @@ def on_post_api_request(**kwargs: Any) -> None:
             cost_details=cost_details,
             finish_reasons=finish,
             ttft_ms=ttft_ms,
+            prompt_text=prompt_text,
             response_text=response_text,
         )
         if span is not None:
             emitter.finish_llm_span(span, **_fields)
         else:
-            # No pre-span (plugin loaded mid-call): instantaneous span, no latency.
-            emitter.record_llm_call(**_fields)
+            # No pre-span (plugin loaded mid-call, or an auxiliary call —
+            # auxiliary_client fires only post): instantaneous span, no latency.
+            _aux_task = kwargs.get("aux_task")
+            if _aux_task:
+                _fields["extra"] = {"hermes.aux_task": str(_aux_task)}
+                # Join the originating turn's trace when the caller carried
+                # its hermes trace_id (post-turn aux: ambient context gone,
+                # explicit parent still valid). Unknown id -> standalone.
+                _parent = _lookup_turn_context(kwargs.get("hermes_trace_id"))
+                emitter.record_llm_call(
+                    name=f"aux:{_aux_task}", parent_context=_parent, **_fields
+                )
+            else:
+                emitter.record_llm_call(**_fields)
     except Exception:
         logger.debug("on_post_api_request: failed to emit chat span", exc_info=True)
         return

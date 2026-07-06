@@ -190,7 +190,13 @@ class OtelGenAIEmitter:
 
     # -- LLM call -----------------------------------------------------------
 
-    def start_llm_span(self, *, request_model: str | None = None) -> Any:
+    def start_llm_span(
+        self,
+        *,
+        request_model: str | None = None,
+        name: str | None = None,
+        parent_context: Any = None,
+    ) -> Any:
         """Open (but do not close) a ``chat`` span for one LLM API call.
 
         Called from ``pre_api_request`` so the span brackets the real API call
@@ -199,8 +205,17 @@ class OtelGenAIEmitter:
         ``start_as_current_span``) parents to the currently-active
         ``invoke_agent`` turn span without making the chat span current — the
         API call itself is what elapses between this and :meth:`finish_llm_span`.
+
+        ``name`` overrides the span name (Langfuse observation name) — used by
+        auxiliary-call generations (``aux:<task>``) so dashboards can split aux
+        cost per task; ``gen_ai.operation.name`` stays ``chat`` either way.
+
+        ``parent_context`` pins the span into an explicit trace (an OTel
+        Context carrying the turn span) — used for post-turn auxiliary calls
+        whose ambient context is gone; a child created after its parent ended
+        is valid OTel and renders normally in Langfuse.
         """
-        span = self._tracer.start_span(OP_CHAT)
+        span = self._tracer.start_span(name or OP_CHAT, context=parent_context)
         span.set_attribute("gen_ai.operation.name", OP_CHAT)
         span.set_attribute("gen_ai.system", GEN_AI_SYSTEM)
         _set_if(span, "gen_ai.request.model", request_model)
@@ -221,6 +236,7 @@ class OtelGenAIEmitter:
         cost_details: Mapping[str, float] | None = None,
         finish_reasons: Sequence[str] | None = None,
         ttft_ms: float | None = None,
+        prompt_text: str | None = None,
         response_text: str | None = None,
         extra: Mapping[str, Any] | None = None,
     ) -> None:
@@ -301,6 +317,7 @@ class OtelGenAIEmitter:
             # (copilot_chat.time_to_first_token).
             _set_if(span, "copilot_chat.time_to_first_token", _as_float(ttft_ms))
             if self._capture_content:
+                _set_if(span, "gen_ai.prompt", prompt_text)
                 _set_if(span, "gen_ai.completion", response_text)
             self._apply_extra(span, extra)
         finally:
@@ -310,6 +327,8 @@ class OtelGenAIEmitter:
         self,
         *,
         request_model: str | None,
+        name: str | None = None,
+        parent_context: Any = None,
         response_model: str | None = None,
         input_tokens: int | None = None,
         output_tokens: int | None = None,
@@ -320,6 +339,7 @@ class OtelGenAIEmitter:
         cost_details: Mapping[str, float] | None = None,
         finish_reasons: Sequence[str] | None = None,
         ttft_ms: float | None = None,
+        prompt_text: str | None = None,
         response_text: str | None = None,
         extra: Mapping[str, Any] | None = None,
     ) -> None:
@@ -330,7 +350,9 @@ class OtelGenAIEmitter:
         :meth:`start_llm_span` / :meth:`finish_llm_span` to bracket the call and
         capture its duration.
         """
-        span = self.start_llm_span(request_model=request_model)
+        span = self.start_llm_span(
+            request_model=request_model, name=name, parent_context=parent_context
+        )
         self.finish_llm_span(
             span,
             request_model=request_model,
@@ -344,6 +366,7 @@ class OtelGenAIEmitter:
             cost_details=cost_details,
             finish_reasons=finish_reasons,
             ttft_ms=ttft_ms,
+            prompt_text=prompt_text,
             response_text=response_text,
             extra=extra,
         )

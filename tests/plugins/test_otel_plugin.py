@@ -1227,3 +1227,197 @@ class TestPluginAdapter:
 
         spans = _by_name(exporter.get_finished_spans())
         assert spans[OP_EXECUTE_TOOL].attributes["error.type"] == "error"
+
+
+class TestAuxUsageSpans:
+    """Auxiliary-call generations (Artemis P-0706-01): post_api_request fired
+    from agent/auxiliary_client.py carries aux_task; the span must be named
+    aux:<task> so Langfuse dashboards can split aux cost per task, while
+    gen_ai.operation.name stays OP_CHAT (semconv grouping unbroken)."""
+
+    def test_record_llm_call_name_override(self, exporter_and_tracer):
+        exporter, tracer = exporter_and_tracer
+        emitter = OtelGenAIEmitter(tracer)
+
+        with emitter.turn_span(session_id="s"):
+            emitter.record_llm_call(
+                request_model="m",
+                name="aux:compression",
+                input_tokens=10,
+                output_tokens=2,
+                extra={"hermes.aux_task": "compression"},
+            )
+            emitter.record_llm_call(request_model="m", input_tokens=1, output_tokens=1)
+
+        chats = [
+            s for s in exporter.get_finished_spans()
+            if s.attributes.get("gen_ai.operation.name") == OP_CHAT
+        ]
+        aux, plain = chats[0], chats[1]
+        assert aux.name == "aux:compression"
+        assert aux.attributes["hermes.aux_task"] == "compression"
+        assert plain.name == OP_CHAT
+
+    def test_post_api_request_hook_routes_aux_task(self, monkeypatch):
+        import importlib
+
+        otel_mod = importlib.import_module("plugins.observability.otel")
+        calls = {}
+
+        class _Stub:
+            def record_llm_call(self, **kw):
+                calls.update(kw)
+
+        monkeypatch.setattr(otel_mod, "_get_emitter", lambda: _Stub())
+        monkeypatch.setattr(otel_mod, "_get_log_emitter", lambda: None)
+
+        otel_mod.on_post_api_request(
+            model="google/gemini-3-flash-preview",
+            provider="openrouter",
+            api_mode="chat_completions",
+            usage={
+                "input_tokens": 10,
+                "output_tokens": 2,
+                "cache_read_tokens": 0,
+                "cache_write_tokens": 0,
+                "reasoning_tokens": 0,
+                "prompt_tokens": 10,
+                "total_tokens": 12,
+            },
+            cost_usd=0.001,
+            aux_task="compression",
+        )
+
+        assert calls.get("name") == "aux:compression"
+        assert (calls.get("extra") or {}).get("hermes.aux_task") == "compression"
+
+    def test_aux_span_carries_content_when_capture_on(self, exporter_and_tracer):
+        """Aux generations carry prompt/completion under the same
+        HERMES_OTEL_CAPTURE_CONTENT gate as main generations — via the
+        prompt_text/response_text params, so Langfuse shows Input/Output."""
+        exporter, tracer = exporter_and_tracer
+        emitter = OtelGenAIEmitter(tracer, capture_content=True)
+
+        with emitter.turn_span(session_id="s"):
+            emitter.record_llm_call(
+                request_model="m",
+                name="aux:compression",
+                prompt_text='[{"role":"user","content":"classify this"}]',
+                response_text='{"intent":"none"}',
+            )
+
+        span = [s for s in exporter.get_finished_spans() if s.name == "aux:compression"][0]
+        assert span.attributes["gen_ai.prompt"] == '[{"role":"user","content":"classify this"}]'
+        assert span.attributes["gen_ai.completion"] == '{"intent":"none"}'
+
+    def test_aux_span_content_suppressed_when_capture_off(self, exporter_and_tracer):
+        exporter, tracer = exporter_and_tracer
+        emitter = OtelGenAIEmitter(tracer, capture_content=False)
+
+        with emitter.turn_span(session_id="s"):
+            emitter.record_llm_call(
+                request_model="m",
+                name="aux:x",
+                prompt_text="secret prompt",
+                response_text="secret reply",
+            )
+
+        span = [s for s in exporter.get_finished_spans() if s.name == "aux:x"][0]
+        assert "gen_ai.prompt" not in span.attributes
+        assert "gen_ai.completion" not in span.attributes
+
+    def test_post_api_request_hook_serializes_prompt_messages(self, monkeypatch):
+        import importlib
+
+        otel_mod = importlib.import_module("plugins.observability.otel")
+        calls = {}
+
+        class _Stub:
+            def record_llm_call(self, **kw):
+                calls.update(kw)
+
+        monkeypatch.setattr(otel_mod, "_get_emitter", lambda: _Stub())
+        monkeypatch.setattr(otel_mod, "_get_log_emitter", lambda: None)
+
+        otel_mod.on_post_api_request(
+            model="google/gemini-3-flash-preview",
+            usage={"input_tokens": 5, "output_tokens": 1, "prompt_tokens": 5, "total_tokens": 6},
+            cost_usd=0.0001,
+            aux_task="compression",
+            prompt_messages=[{"role": "user", "content": "hi"}],
+            assistant_response='{"ok":true}',
+        )
+
+        assert calls.get("prompt_text") == '[{"role": "user", "content": "hi"}]'
+        assert calls.get("response_text") == '{"ok":true}'
+
+    def test_record_llm_call_with_explicit_parent_context(self, exporter_and_tracer):
+        """A parent_context pins the aux span into a given trace even after
+        the parent span has ended (late children are valid OTel)."""
+        from opentelemetry import trace as otel_trace
+
+        exporter, tracer = exporter_and_tracer
+        emitter = OtelGenAIEmitter(tracer)
+
+        parent = tracer.start_span("turn")
+        parent_ctx = otel_trace.set_span_in_context(parent)
+        parent.end()  # parent already closed — late child must still attach
+
+        emitter.record_llm_call(
+            request_model="m", name="aux:title", parent_context=parent_ctx
+        )
+
+        spans = {s.name: s for s in exporter.get_finished_spans()}
+        assert spans["aux:title"].context.trace_id == spans["turn"].context.trace_id
+        assert spans["aux:title"].parent.span_id == spans["turn"].context.span_id
+
+    def test_aux_span_joins_turn_trace_via_hermes_trace_id(self, monkeypatch, exporter_and_tracer):
+        """End-to-end through the hooks: the turn opens (recording the
+        hermes-trace-id -> span-context mapping), the turn CLOSES, then a
+        post-turn aux post_api_request carrying hermes_trace_id lands in the
+        same trace. Identity is explicit — no last-turn-global fallback (a
+        cross-user race in the multi-user gateway)."""
+        import importlib
+
+        otel_mod = importlib.import_module("plugins.observability.otel")
+        exporter, tracer = exporter_and_tracer
+        emitter = OtelGenAIEmitter(tracer)
+        monkeypatch.setattr(otel_mod, "_get_emitter", lambda: emitter)
+        monkeypatch.setattr(otel_mod, "_get_log_emitter", lambda: None)
+        monkeypatch.setattr(otel_mod, "_resolve_identity", lambda: ("U1", "ht-123"))
+
+        otel_mod.on_pre_llm_call(session_id="s-parent-test", user_message="hi", model="m")
+        otel_mod.on_session_end(session_id="s-parent-test")  # turn span closed
+
+        otel_mod.on_post_api_request(
+            model="google/gemini-3-flash-preview",
+            usage={"input_tokens": 5, "output_tokens": 1, "prompt_tokens": 5, "total_tokens": 6},
+            cost_usd=0.0001,
+            aux_task="compression",
+            hermes_trace_id="ht-123",
+        )
+
+        spans = {s.name: s for s in exporter.get_finished_spans()}
+        turn = [s for s in spans.values() if "invoke_agent" in s.name][0]
+        aux = spans["aux:compression"]
+        assert aux.context.trace_id == turn.context.trace_id
+
+    def test_aux_span_without_known_trace_id_stays_standalone(self, monkeypatch, exporter_and_tracer):
+        import importlib
+
+        otel_mod = importlib.import_module("plugins.observability.otel")
+        exporter, tracer = exporter_and_tracer
+        emitter = OtelGenAIEmitter(tracer)
+        monkeypatch.setattr(otel_mod, "_get_emitter", lambda: emitter)
+        monkeypatch.setattr(otel_mod, "_get_log_emitter", lambda: None)
+
+        otel_mod.on_post_api_request(
+            model="m",
+            usage={"input_tokens": 5, "output_tokens": 1, "prompt_tokens": 5, "total_tokens": 6},
+            cost_usd=0.0001,
+            aux_task="compression",
+            hermes_trace_id="ht-unknown",
+        )
+
+        spans = [s for s in exporter.get_finished_spans() if s.name == "aux:compression"]
+        assert spans and spans[0].parent is None  # root of its own trace, no misattachment

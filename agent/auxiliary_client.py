@@ -1932,6 +1932,75 @@ def _build_call_kwargs(
     return kwargs
 
 
+def _emit_usage_hook(
+    response: Any, *, task, provider, model, base_url, messages=None
+) -> Any:
+    """Fire ``post_api_request`` for one auxiliary LLM call and return the
+    response unchanged.
+
+    Auxiliary calls bill the same provider key as the main loop but never
+    reached observability — usage died at each caller (Artemis P-0706-01,
+    measured ~13% of a live turn's real spend). Emitting the same hook the
+    main loop fires (run_agent.py post-call) lets observability plugins
+    account aux calls with zero plugin-specific coupling here. Session
+    token accounting is deliberately NOT touched: the gateway path writes
+    absolute totals that would clobber increments, and aux models differ
+    from the session model (attribution poison). Fail-open — a broken
+    plugin must never break the aux call.
+    """
+    try:
+        raw = getattr(response, "usage", None)
+        if not raw:
+            return response
+        from dataclasses import asdict
+
+        from agent.usage_pricing import normalize_usage
+        from hermes_cli.plugins import invoke_hook
+
+        # The auto-detect chain leaves provider as the literal "auto"/"custom",
+        # which the pricing route can't resolve — pass None so consumers price
+        # by base_url (the client's real endpoint) instead.
+        if (provider or "").strip().lower() in ("", "auto", "custom"):
+            provider = None
+        cu = normalize_usage(raw, provider=provider, api_mode="chat_completions")
+        summary = asdict(cu)
+        summary.pop("raw_usage", None)
+        summary["prompt_tokens"] = cu.prompt_tokens
+        summary["total_tokens"] = cu.total_tokens
+        # Request/response content rides along unconditionally — the emitter
+        # gates it on HERMES_OTEL_CAPTURE_CONTENT, same as main-loop calls
+        # ("content-gated at the plugin", run_agent.py post_api_request).
+        try:
+            _resp_text = response.choices[0].message.content
+        except Exception:
+            _resp_text = None
+        # Own-task hermes trace id (asyncio-task-local ContextVar) so
+        # observability can join this aux call to its originating turn's
+        # trace — explicit identity, never a "most recent turn" guess.
+        try:
+            from tools.session_context import get_trace_id
+
+            _hermes_trace_id = get_trace_id()
+        except Exception:
+            _hermes_trace_id = None
+        invoke_hook(
+            "post_api_request",
+            model=model or "",
+            provider=provider,
+            base_url=base_url,
+            api_mode="chat_completions",
+            usage=summary,
+            aux_task=str(task or "aux"),
+            response_model=getattr(response, "model", None),
+            prompt_messages=messages,
+            assistant_response=_resp_text,
+            hermes_trace_id=_hermes_trace_id,
+        )
+    except Exception:
+        logger.debug("Auxiliary usage hook failed", exc_info=True)
+    return response
+
+
 def call_llm(
     task: str = None,
     *,
@@ -2045,15 +2114,20 @@ def call_llm(
         base_url=resolved_base_url)
 
     # Handle max_tokens vs max_completion_tokens retry, then payment fallback.
+    _hook_kw = dict(task=task, provider=resolved_provider, model=final_model,
+                    base_url=str(getattr(client, "base_url", "") or "")
+                    or resolved_base_url, messages=messages)
     try:
-        return client.chat.completions.create(**kwargs)
+        return _emit_usage_hook(
+            client.chat.completions.create(**kwargs), **_hook_kw)
     except Exception as first_err:
         err_str = str(first_err)
         if "max_tokens" in err_str or "unsupported_parameter" in err_str:
             kwargs.pop("max_tokens", None)
             kwargs["max_completion_tokens"] = max_tokens
             try:
-                return client.chat.completions.create(**kwargs)
+                return _emit_usage_hook(
+                    client.chat.completions.create(**kwargs), **_hook_kw)
             except Exception as retry_err:
                 # If the max_tokens retry also hits a payment error,
                 # fall through to the payment fallback below.
@@ -2075,7 +2149,10 @@ def call_llm(
                     temperature=temperature, max_tokens=max_tokens,
                     tools=tools, timeout=effective_timeout,
                     extra_body=extra_body)
-                return fb_client.chat.completions.create(**fb_kwargs)
+                return _emit_usage_hook(
+                    fb_client.chat.completions.create(**fb_kwargs),
+                    task=task, provider=fb_label, model=fb_model, base_url=None,
+                    messages=messages)
         raise
 
 
@@ -2215,12 +2292,17 @@ async def async_call_llm(
         tools=tools, timeout=effective_timeout, extra_body=extra_body,
         base_url=resolved_base_url)
 
+    _hook_kw = dict(task=task, provider=resolved_provider, model=final_model,
+                    base_url=str(getattr(client, "base_url", "") or "")
+                    or resolved_base_url, messages=messages)
     try:
-        return await client.chat.completions.create(**kwargs)
+        return _emit_usage_hook(
+            await client.chat.completions.create(**kwargs), **_hook_kw)
     except Exception as first_err:
         err_str = str(first_err)
         if "max_tokens" in err_str or "unsupported_parameter" in err_str:
             kwargs.pop("max_tokens", None)
             kwargs["max_completion_tokens"] = max_tokens
-            return await client.chat.completions.create(**kwargs)
+            return _emit_usage_hook(
+                await client.chat.completions.create(**kwargs), **_hook_kw)
         raise

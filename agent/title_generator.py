@@ -4,6 +4,7 @@ Runs asynchronously after the first response is delivered so it never
 adds latency to the user-facing reply.
 """
 
+import contextvars
 import logging
 import threading
 from typing import Optional
@@ -116,9 +117,14 @@ def maybe_auto_title(
     if user_msg_count > 2:
         return
 
+    # Run inside a copy of the caller's context so asyncio-task-local
+    # ContextVars (session scope, hermes trace_id) survive into the worker
+    # thread — a bare Thread drops them, orphaning this call's telemetry
+    # from its originating turn.
+    ctx = contextvars.copy_context()
     thread = threading.Thread(
-        target=auto_title_session,
-        args=(session_db, session_id, user_message, assistant_response),
+        target=ctx.run,
+        args=(auto_title_session, session_db, session_id, user_message, assistant_response),
         daemon=True,
         name="auto-title",
     )
