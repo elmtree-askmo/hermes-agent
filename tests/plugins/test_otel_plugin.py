@@ -195,6 +195,33 @@ class TestEmitter:
         assert span.attributes["gen_ai.agent.name"] == "strategist"
         assert span.attributes["langfuse.trace.name"] == "coach"
 
+    def test_chat_span_carries_cache_buckets(self, exporter_and_tracer):
+        """Cache read/write tokens emit under the Anthropic-convention names
+        Langfuse maps into usage_details — without them the UI shows only the
+        non-cached input slice and hides the cache hit ratio. Zero/absent
+        buckets are omitted (spans stay clean on non-caching models)."""
+        exporter, tracer = exporter_and_tracer
+        emitter = OtelGenAIEmitter(tracer)
+
+        with emitter.turn_span(session_id="s"):
+            emitter.record_llm_call(
+                request_model="m",
+                input_tokens=487,
+                output_tokens=61,
+                cache_read_tokens=54000,
+                cache_write_tokens=1200,
+            )
+            emitter.record_llm_call(request_model="m", input_tokens=10, output_tokens=2)
+
+        chats = [
+            s for s in exporter.get_finished_spans()
+            if s.attributes.get("gen_ai.operation.name") == OP_CHAT
+        ]
+        cached, plain = chats[0], chats[1]
+        assert cached.attributes["gen_ai.usage.cache_read_input_tokens"] == 54000
+        assert cached.attributes["gen_ai.usage.cache_creation_input_tokens"] == 1200
+        assert "gen_ai.usage.cache_read_input_tokens" not in plain.attributes
+
     def test_chat_span_carries_tokens_cost_and_finish_reason(self, exporter_and_tracer):
         exporter, tracer = exporter_and_tracer
         emitter = OtelGenAIEmitter(tracer)
@@ -881,6 +908,30 @@ class TestPluginAdapter:
         assert len(chats) == 1 and len(tools) == 1  # bracketed, not doubled
         assert (chats[0].end_time - chats[0].start_time) >= 15_000_000  # ~15ms
         assert (tools[0].end_time - tools[0].start_time) >= 15_000_000
+
+    def test_post_api_request_passes_cache_buckets(self, exporter_and_tracer, monkeypatch):
+        exporter, tracer = exporter_and_tracer
+        plugin, provider = _fresh_plugin()
+        monkeypatch.setattr(provider, "build_tracer", lambda **_: tracer)
+        _le, ol = _in_memory_logger()
+        monkeypatch.setattr(provider, "build_logger", lambda **_: ol)
+
+        ctx = _FakeCtx()
+        plugin.register(ctx)
+        ctx.hooks["on_session_start"](session_id="sess-cc", model="m")
+        ctx.hooks["pre_llm_call"](session_id="sess-cc", user_message="hi")
+        ctx.hooks["post_api_request"](
+            session_id="sess-cc",
+            model="m",
+            usage={"input_tokens": 487, "output_tokens": 61,
+                   "cache_read_tokens": 54000, "cache_write_tokens": 1200},
+            finish_reason="stop",
+        )
+        ctx.hooks["on_session_end"](session_id="sess-cc")
+
+        attrs = _by_name(exporter.get_finished_spans())[OP_CHAT].attributes
+        assert attrs["gen_ai.usage.cache_read_input_tokens"] == 54000
+        assert attrs["gen_ai.usage.cache_creation_input_tokens"] == 1200
 
     def test_chat_span_records_per_call_response_from_assistant_message(
         self, exporter_and_tracer, monkeypatch

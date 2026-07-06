@@ -214,6 +214,8 @@ class OtelGenAIEmitter:
         response_model: str | None = None,
         input_tokens: int | None = None,
         output_tokens: int | None = None,
+        cache_read_tokens: int | None = None,
+        cache_write_tokens: int | None = None,
         cost_usd: float | None = None,
         finish_reasons: Sequence[str] | None = None,
         ttft_ms: float | None = None,
@@ -226,6 +228,14 @@ class OtelGenAIEmitter:
             _set_if(span, "gen_ai.response.model", response_model or request_model)
             _set_if(span, "gen_ai.usage.input_tokens", _as_int(input_tokens))
             _set_if(span, "gen_ai.usage.output_tokens", _as_int(output_tokens))
+            # Cache buckets, under the Anthropic-convention names Langfuse's
+            # usage-details mapping recognises. input_tokens above is the
+            # NON-cached slice (CanonicalUsage semantics), so without these two
+            # buckets the UI under-reports the request size and hides the cache
+            # hit ratio — while the (provided) cost already includes the cached
+            # tokens at their discounted rate. Only set when > 0.
+            _set_if(span, "gen_ai.usage.cache_read_input_tokens", _as_int(cache_read_tokens) or None)
+            _set_if(span, "gen_ai.usage.cache_creation_input_tokens", _as_int(cache_write_tokens) or None)
             _cost = _as_float(cost_usd)
             _set_if(span, "cost_usd", _cost)
             # Langfuse reads gen_ai.usage.cost (total USD) for a generation's
@@ -252,6 +262,8 @@ class OtelGenAIEmitter:
         response_model: str | None = None,
         input_tokens: int | None = None,
         output_tokens: int | None = None,
+        cache_read_tokens: int | None = None,
+        cache_write_tokens: int | None = None,
         cost_usd: float | None = None,
         finish_reasons: Sequence[str] | None = None,
         ttft_ms: float | None = None,
@@ -272,6 +284,8 @@ class OtelGenAIEmitter:
             response_model=response_model,
             input_tokens=input_tokens,
             output_tokens=output_tokens,
+            cache_read_tokens=cache_read_tokens,
+            cache_write_tokens=cache_write_tokens,
             cost_usd=cost_usd,
             finish_reasons=finish_reasons,
             ttft_ms=ttft_ms,
