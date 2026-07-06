@@ -311,3 +311,47 @@ class TestBypassWithBotnameSuffix:
 
         assert sk not in adapter._pending_messages
         assert any("handled:new" in r for r in adapter.sent_responses)
+
+
+class TestPluginCommandBypass:
+    """Plugin gateway commands (e.g. /debug) must bypass the guard too —
+    "agent seems stuck" is exactly when they get typed."""
+
+    @pytest.mark.asyncio
+    async def test_plugin_command_bypasses_guard(self, monkeypatch):
+        from hermes_cli import commands as commands_mod
+        from hermes_cli import plugins as plugins_mod
+        from hermes_cli.plugins import PluginContext, PluginManifest, PluginManager
+
+        registry_snapshot = list(commands_mod.COMMAND_REGISTRY)
+        manager = PluginManager()
+        monkeypatch.setattr(plugins_mod, "_plugin_manager", manager)
+        ctx = PluginContext(PluginManifest(name="test-plugin"), manager)
+        ctx.register_gateway_command(
+            "testdbg", "Test debug", lambda args, source=None: "state"
+        )
+        try:
+            adapter = _make_adapter()
+            sk = _session_key()
+            adapter._active_sessions[sk] = asyncio.Event()
+
+            await adapter.handle_message(_make_event("/testdbg"))
+
+            assert sk not in adapter._pending_messages, (
+                "/testdbg was queued instead of bypassing the guard"
+            )
+            assert any("handled:testdbg" in r for r in adapter.sent_responses)
+        finally:
+            commands_mod.COMMAND_REGISTRY[:] = registry_snapshot
+            commands_mod.rebuild_lookups()
+
+    @pytest.mark.asyncio
+    async def test_unknown_command_still_interrupts(self):
+        """A non-plugin, non-bypass command keeps the interrupt semantics."""
+        adapter = _make_adapter()
+        sk = _session_key()
+        adapter._active_sessions[sk] = asyncio.Event()
+
+        await adapter.handle_message(_make_event("/model gpt"))
+
+        assert sk in adapter._pending_messages

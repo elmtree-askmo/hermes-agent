@@ -1145,7 +1145,18 @@ class GatewayRunner:
         
         # Discover and load event hooks
         self.hooks.discover_and_load()
-        
+
+        # Discover and load plugins (idempotent). Without this, plugin
+        # gateway commands registered via register_gateway_command() would
+        # hit an empty registry after a gateway restart — the first slash
+        # command would fall through to the LLM instead of dispatching.
+        try:
+            from hermes_cli.plugins import discover_plugins
+            discover_plugins()
+        except Exception as e:
+            logger.warning("Plugin discovery at gateway boot failed: %s", e)
+
+
         # Recover background processes from checkpoint (crash recovery)
         try:
             from tools.process_registry import process_registry
@@ -1173,6 +1184,7 @@ class GatewayRunner:
             
             # Set up message + fatal error handlers
             adapter.set_message_handler(self._handle_message)
+            adapter.set_authorization_check(self._is_user_authorized)
             adapter.set_fatal_error_handler(self._handle_adapter_fatal_error)
             adapter.set_session_store(self.session_store)
             
@@ -1471,6 +1483,7 @@ class GatewayRunner:
                         continue
 
                     adapter.set_message_handler(self._handle_message)
+                    adapter.set_authorization_check(self._is_user_authorized)
                     adapter.set_fatal_error_handler(self._handle_adapter_fatal_error)
                     adapter.set_session_store(self.session_store)
 
@@ -2037,6 +2050,21 @@ class GatewayRunner:
                     return await self._handle_approve_command(event)
                 return await self._handle_deny_command(event)
 
+            # Plugin gateway commands (e.g. /debug) must bypass the
+            # running-agent interrupt path: they are deterministic
+            # inspection utilities, and "agent seems stuck" is exactly when
+            # they get typed. Interrupting would inject the command text
+            # into the LLM conversation instead of answering it.
+            if _evt_cmd:
+                try:
+                    from hermes_cli.plugins import get_plugin_command_handler as _get_pch
+                    _plugin_handler = _get_pch(_evt_cmd.replace("_", "-"))
+                except Exception:
+                    _plugin_handler = None
+                if _plugin_handler:
+                    logger.debug("PRIORITY plugin command /%s for session %s — dispatching without interrupt", _evt_cmd, _quick_key[:20])
+                    return await self._dispatch_plugin_command(_plugin_handler, event, source)
+
             if event.message_type == MessageType.PHOTO:
                 logger.debug("PRIORITY photo follow-up for session %s — queueing without interrupt", _quick_key[:20])
                 adapter = self.adapters.get(source.platform)
@@ -2250,21 +2278,17 @@ class GatewayRunner:
 
         # Plugin-registered slash commands
         if command:
+            plugin_handler = None
             try:
                 from hermes_cli.plugins import get_plugin_command_handler
                 # Normalize underscores to hyphens so Telegram's underscored
                 # autocomplete form matches plugin commands registered with
                 # hyphens. See hermes_cli/commands.py:_build_telegram_menu.
                 plugin_handler = get_plugin_command_handler(command.replace("_", "-"))
-                if plugin_handler:
-                    user_args = event.get_command_args().strip()
-                    import asyncio as _aio
-                    result = plugin_handler(user_args)
-                    if _aio.iscoroutine(result):
-                        result = await result
-                    return str(result) if result else None
             except Exception as e:
-                logger.debug("Plugin command dispatch failed (non-fatal): %s", e)
+                logger.debug("Plugin command lookup failed (non-fatal): %s", e)
+            if plugin_handler:
+                return await self._dispatch_plugin_command(plugin_handler, event, source)
 
         # Skill slash commands: /skill-name loads the skill and sends to agent.
         # resolve_skill_command_key() handles the Telegram underscore/hyphen
@@ -4287,6 +4311,39 @@ class GatewayRunner:
             lines.append(f"◆ Endpoint: {base_url}")
 
         return "\n".join(lines)
+
+    async def _dispatch_plugin_command(self, plugin_handler, event: MessageEvent, source: SessionSource) -> Optional[str]:
+        """Invoke a plugin-registered gateway command handler.
+
+        Passes the invoking identity when the handler accepts a ``source``
+        keyword (signature-inspected for backward compatibility with
+        handlers written against the older ``handler(args)`` contract).
+
+        A raising handler returns an error string instead of propagating —
+        falling through to the LLM here would silently turn a broken
+        zero-token command into a paid agent turn.
+        """
+        user_args = event.get_command_args().strip()
+        try:
+            import inspect
+            accepts_source = False
+            try:
+                sig_params = inspect.signature(plugin_handler).parameters
+                accepts_source = "source" in sig_params or any(
+                    p.kind is inspect.Parameter.VAR_KEYWORD for p in sig_params.values()
+                )
+            except (TypeError, ValueError):
+                pass
+            if accepts_source:
+                result = plugin_handler(user_args, source=source)
+            else:
+                result = plugin_handler(user_args)
+            if asyncio.iscoroutine(result):
+                result = await result
+            return str(result) if result else None
+        except Exception as e:
+            logger.warning("Plugin command '/%s' failed: %s", event.get_command(), e, exc_info=True)
+            return f"⚠ Command failed: {e}"
 
     async def _handle_reset_command(self, event: MessageEvent) -> str:
         """Handle /new or /reset command."""

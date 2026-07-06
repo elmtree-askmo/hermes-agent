@@ -355,11 +355,16 @@ def telegram_bot_commands() -> list[tuple[str, str]]:
     """
     overrides = _resolve_config_gates()
     result: list[tuple[str, str]] = []
+    seen: set[str] = set()
     for cmd in COMMAND_REGISTRY:
         if not _is_gateway_available(cmd, overrides):
             continue
         tg_name = _sanitize_telegram_name(cmd.name)
-        if tg_name:
+        # Sanitizing can collapse distinct names ("my-cmd" / "my_cmd") into
+        # one; a duplicate in the payload fails set_my_commands for the
+        # whole menu, so keep the first and drop later collisions.
+        if tg_name and tg_name not in seen:
+            seen.add(tg_name)
             result.append((tg_name, cmd.description))
     return result
 
@@ -465,32 +470,46 @@ def _collect_gateway_skill_entries(
         ``(entries, hidden_count)`` where *entries* is a list of
         ``(name, description, cmd_key)`` triples and *hidden_count* is the
         number of skill entries dropped due to the cap.  ``cmd_key`` is the
-        original ``/skill-name`` key from :func:`get_skill_commands`.
+        dispatchable ``/command`` text: the original ``/skill-name`` key
+        from :func:`get_skill_commands` for skills, ``/<name>`` for plugin
+        gateway commands.
     """
     all_entries: list[tuple[str, str, str]] = []
 
     # --- Tier 1: Plugin slash commands (never trimmed) ---------------------
+    # (name, cmd_key) pairs — the desc slot carries the cmd_key through
+    # _clamp_command_names so a truncated display name keeps dispatching
+    # the ORIGINAL /command; real descriptions are rebuilt from plugin_meta.
     plugin_pairs: list[tuple[str, str]] = []
+    plugin_meta: dict[str, str] = {}  # cmd_key -> description
     try:
         from hermes_cli.plugins import get_plugin_manager
         pm = get_plugin_manager()
-        plugin_cmds = getattr(pm, "_plugin_commands", {})
+        plugin_cmds = dict(getattr(pm, "_plugin_commands", {}))
+        # Gateway commands (register_gateway_command) live in a separate
+        # registry but are invocable through the same platform command
+        # surfaces — merge them so native slash-command sync (Discord,
+        # Telegram menu) offers them too.
+        for gw_name, gw_entry in getattr(pm, "_gateway_commands", {}).items():
+            plugin_cmds.setdefault(gw_name, gw_entry)
         for cmd_name in sorted(plugin_cmds):
             name = sanitize_name(cmd_name) if sanitize_name else cmd_name
             if not name:
                 continue
-            desc = "Plugin command"
+            entry = plugin_cmds[cmd_name]
+            desc = (entry.get("help") if isinstance(entry, dict) else "") or "Plugin command"
             if len(desc) > desc_limit:
                 desc = desc[:desc_limit - 3] + "..."
-            plugin_pairs.append((name, desc))
+            cmd_key = f"/{cmd_name}"
+            plugin_meta[cmd_key] = desc
+            plugin_pairs.append((name, cmd_key))
     except Exception:
         pass
 
     plugin_pairs = _clamp_command_names(plugin_pairs, reserved_names)
     reserved_names.update(n for n, _ in plugin_pairs)
-    # Plugins have no cmd_key — use empty string as placeholder
-    for n, d in plugin_pairs:
-        all_entries.append((n, d, ""))
+    for n, cmd_key in plugin_pairs:
+        all_entries.append((n, plugin_meta.get(cmd_key, "Plugin command"), cmd_key))
 
     # --- Tier 2: Built-in skill commands (trimmed at cap) -----------------
     _platform_disabled: set[str] = set()

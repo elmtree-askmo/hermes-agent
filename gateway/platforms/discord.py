@@ -1558,6 +1558,38 @@ class DiscordAdapter(BasePlatformAdapter):
         except Exception as e:
             logger.debug("Discord interaction cleanup failed: %s", e)
 
+    async def _run_plugin_slash(
+        self,
+        interaction: discord.Interaction,
+        command_text: str,
+    ) -> None:
+        """Dispatch a plugin gateway command and reply inside the interaction.
+
+        Plugin gateway commands render per-user state (e.g. a /debug
+        digest); routing them through handle_message() would deliver the
+        output via channel.send(), publishing it to the guild channel.
+        Dispatch directly and keep the reply in the deferred *ephemeral*
+        interaction instead — the Discord analogue of the Slack
+        response_url path.
+        """
+        await interaction.response.defer(ephemeral=True)
+        if not self._message_handler:
+            return
+        event = self._build_slash_event(interaction, command_text)
+        try:
+            response = await self._message_handler(event)
+        except Exception as e:
+            logger.error("[Discord] Plugin slash command failed: %s", e, exc_info=True)
+            response = f"⚠ Command failed: {e}"
+        try:
+            if response:
+                # Discord caps message content at 2000 chars.
+                await interaction.edit_original_response(content=str(response)[:2000])
+            else:
+                await interaction.delete_original_response()
+        except Exception as e:
+            logger.debug("Discord interaction cleanup failed: %s", e)
+
     def _register_slash_commands(self) -> None:
         """Register Discord slash commands on the command tree."""
         if not self._client:
@@ -1719,7 +1751,20 @@ class DiscordAdapter(BasePlatformAdapter):
                 # Closure factory to capture cmd_key per iteration
                 def _make_skill_handler(_key: str):
                     async def _skill_slash(interaction: discord.Interaction, args: str = ""):
-                        await self._run_simple_slash(interaction, f"{_key} {args}".strip())
+                        text = f"{_key} {args}".strip()
+                        # Plugin gateway commands reply ephemerally inside
+                        # the interaction — handle_message() would publish
+                        # their per-user output to the channel. Checked at
+                        # invocation time so plugin availability stays live.
+                        try:
+                            from hermes_cli.plugins import get_plugin_command_handler
+                            is_plugin = get_plugin_command_handler(_key.lstrip("/")) is not None
+                        except Exception:
+                            is_plugin = False
+                        if is_plugin:
+                            await self._run_plugin_slash(interaction, text)
+                        else:
+                            await self._run_simple_slash(interaction, text)
                     return _skill_slash
 
                 handler = _make_skill_handler(cmd_key)
