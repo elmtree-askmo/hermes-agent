@@ -1442,6 +1442,18 @@ def execute_via_helper(
         _tts = None
     if _tts:
         _subprocess_env["HERMES_SESSION_THREAD_TS"] = _tts
+    # Run-scoped trace id: it lives only in the asyncio-task ContextVar, so
+    # os.environ.copy() above does NOT carry it. Without this the helper's
+    # in-process server import resolves no trace, the Executor it spawns
+    # inherits none, and every helper-lane Executor run lands as a nameless
+    # standalone trace instead of joining its Coach turn (S-0629-01).
+    try:
+        from tools.session_context import get_trace_id as _ctx_trace_id
+        _trace = _ctx_trace_id()
+    except Exception:
+        _trace = None
+    if _trace:
+        _subprocess_env["HERMES_TRACE_ID"] = _trace
 
     try:
         proc = subprocess.run(

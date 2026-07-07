@@ -1904,3 +1904,69 @@ class TestIsScanSteerDispatch:
         assert tid.is_scan_steer_dispatch({}) is False
         assert tid.is_scan_steer_dispatch({"dispatch_type": "single", "dispatches": []}) is False
         assert tid.is_scan_steer_dispatch(None) is False
+
+
+class TestHelperSubprocessEnv:
+    """The dispatch helper's subprocess env must carry the turn's identity.
+
+    The helper transitively spawns the Executor (helper → server
+    _spawn_executor → run-executor.sh); anything missing from this env is
+    missing from the whole chain. HERMES_TRACE_ID lives only in the
+    asyncio-task ContextVar — os.environ.copy() does not carry it, which
+    orphaned every helper-lane Executor run as a nameless standalone trace
+    (S-0629-01 propagation gap, found via dev double-executor forensics
+    2026-07-07).
+    """
+
+    def _run_captured(self, tmp_path, monkeypatch):
+        import subprocess as _subprocess
+        from types import SimpleNamespace
+
+        from agent import turn_intent_detector as tid
+
+        helper = tmp_path / "helper.py"
+        helper.write_text("# stub\n")
+        captured = {}
+
+        def fake_run(cmd, **kwargs):
+            captured["env"] = kwargs.get("env")
+            return SimpleNamespace(returncode=0, stdout='{"ok": true, "results": []}', stderr="")
+
+        monkeypatch.setattr(_subprocess, "run", fake_run)
+        out = tid.execute_via_helper(
+            "U0TESTUSER",
+            {"dispatch_type": "single", "dispatches": [{"sub_agent": "scout", "action": "x"}]},
+            helper_path=str(helper),
+        )
+        assert out.get("ok") is True
+        return captured["env"]
+
+    def test_trace_id_injected_from_contextvar(self, tmp_path, monkeypatch):
+        from tools.session_context import set_trace_id
+
+        token = set_trace_id("ht-helper-9")
+        try:
+            env = self._run_captured(tmp_path, monkeypatch)
+        finally:
+            set_trace_id(None)
+        assert env["HERMES_TRACE_ID"] == "ht-helper-9"
+
+    def test_thread_ts_injected_from_contextvar(self, tmp_path, monkeypatch):
+        from tools.session_context import set_session, clear_session
+
+        set_session(platform="slack", chat_id="D0TEST", thread_id=None)
+        try:
+            from tools.session_context import set_thread_ts
+
+            set_thread_ts("1783318376.415729")
+            env = self._run_captured(tmp_path, monkeypatch)
+        finally:
+            clear_session()
+        assert env["HERMES_SESSION_THREAD_TS"] == "1783318376.415729"
+
+    def test_no_contextvar_no_key(self, tmp_path, monkeypatch):
+        from tools.session_context import clear_session
+
+        clear_session()
+        env = self._run_captured(tmp_path, monkeypatch)
+        assert "HERMES_TRACE_ID" not in env
