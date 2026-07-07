@@ -355,6 +355,7 @@ Write only the summary body. Do not include any preamble or prefix."""
         try:
             call_kwargs = {
                 "task": "compression",
+                "purpose": "context-compression",
                 "messages": [{"role": "user", "content": prompt}],
                 "max_tokens": summary_budget * 2,
                 # timeout resolved from auxiliary.compression.timeout config by call_llm

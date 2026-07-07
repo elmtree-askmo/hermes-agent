@@ -234,6 +234,7 @@ def detect_followup_acceptance(
     try:
         response = call_llm(
             task="compression",
+            purpose="followup-acceptance",
             messages=[
                 {"role": "system", "content": "You return only strict JSON."},
                 {"role": "user", "content": prompt},

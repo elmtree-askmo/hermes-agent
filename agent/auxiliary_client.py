@@ -1933,7 +1933,7 @@ def _build_call_kwargs(
 
 
 def _emit_usage_hook(
-    response: Any, *, task, provider, model, base_url, messages=None
+    response: Any, *, task, provider, model, base_url, messages=None, purpose=None
 ) -> Any:
     """Fire ``post_api_request`` for one auxiliary LLM call and return the
     response unchanged.
@@ -1990,7 +1990,7 @@ def _emit_usage_hook(
             base_url=base_url,
             api_mode="chat_completions",
             usage=summary,
-            aux_task=str(task or "aux"),
+            aux_task=str(purpose or task or "aux"),
             response_model=getattr(response, "model", None),
             prompt_messages=messages,
             assistant_response=_resp_text,
@@ -2004,6 +2004,7 @@ def _emit_usage_hook(
 def call_llm(
     task: str = None,
     *,
+    purpose: str = None,
     provider: str = None,
     model: str = None,
     base_url: str = None,
@@ -2024,6 +2025,11 @@ def call_llm(
         task: Auxiliary task name ("compression", "vision", "web_extract",
               "session_search", "skills_hub", "mcp", "flush_memories").
               Reads provider:model from config/env. Ignored if provider is set.
+        purpose: What this call is actually FOR, when it borrows another
+              task's config (several consumers reuse "compression" for its
+              cheap/fast model). Labels telemetry (aux:<purpose> generation)
+              and the "Auxiliary <label>" log line; never affects config
+              resolution. Defaults to the task name.
         provider: Explicit provider override.
         model: Explicit model override.
         messages: Chat messages list.
@@ -2104,7 +2110,7 @@ def call_llm(
     _base_info = str(getattr(client, "base_url", resolved_base_url) or "")
     if task:
         logger.info("Auxiliary %s: using %s (%s)%s",
-                     task, resolved_provider or "auto", final_model or "default",
+                     purpose or task, resolved_provider or "auto", final_model or "default",
                      f" at {_base_info}" if _base_info and "openrouter" not in _base_info else "")
 
     kwargs = _build_call_kwargs(
@@ -2116,7 +2122,7 @@ def call_llm(
     # Handle max_tokens vs max_completion_tokens retry, then payment fallback.
     _hook_kw = dict(task=task, provider=resolved_provider, model=final_model,
                     base_url=str(getattr(client, "base_url", "") or "")
-                    or resolved_base_url, messages=messages)
+                    or resolved_base_url, messages=messages, purpose=purpose)
     try:
         return _emit_usage_hook(
             client.chat.completions.create(**kwargs), **_hook_kw)
@@ -2152,7 +2158,7 @@ def call_llm(
                 return _emit_usage_hook(
                     fb_client.chat.completions.create(**fb_kwargs),
                     task=task, provider=fb_label, model=fb_model, base_url=None,
-                    messages=messages)
+                    messages=messages, purpose=purpose)
         raise
 
 
@@ -2215,6 +2221,7 @@ def extract_content_or_reasoning(response) -> str:
 async def async_call_llm(
     task: str = None,
     *,
+    purpose: str = None,
     provider: str = None,
     model: str = None,
     base_url: str = None,
@@ -2294,7 +2301,7 @@ async def async_call_llm(
 
     _hook_kw = dict(task=task, provider=resolved_provider, model=final_model,
                     base_url=str(getattr(client, "base_url", "") or "")
-                    or resolved_base_url, messages=messages)
+                    or resolved_base_url, messages=messages, purpose=purpose)
     try:
         return _emit_usage_hook(
             await client.chat.completions.create(**kwargs), **_hook_kw)

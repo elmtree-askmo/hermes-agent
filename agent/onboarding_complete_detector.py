@@ -250,6 +250,7 @@ def detect_onboarding_complete(
     try:
         response = call_llm(
             task="compression",
+            purpose="onboarding-complete",
             messages=[
                 {"role": "system", "content": "You return only strict JSON."},
                 {"role": "user", "content": prompt},

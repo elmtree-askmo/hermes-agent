@@ -643,6 +643,7 @@ def detect_turn_intent(
     try:
         response = call_llm(
             task="compression",
+            purpose="turn-intent",
             messages=[
                 {"role": "system", "content": "You return only strict JSON."},
                 {"role": "user", "content": prompt},

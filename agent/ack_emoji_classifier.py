@@ -164,6 +164,7 @@ def detect_ack_emoji(user_message: str) -> dict[str, Any]:
     try:
         response = call_llm(
             task="compression",
+            purpose="ack-emoji",
             messages=[
                 {"role": "system", "content": "You return only strict JSON."},
                 {"role": "user", "content": prompt},

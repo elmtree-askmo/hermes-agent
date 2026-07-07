@@ -222,3 +222,46 @@ def test_title_thread_inherits_context(monkeypatch):
 
     assert done.wait(5), "title thread never ran"
     assert seen["trace_id"] == "ht-title-7"
+
+
+def test_purpose_overrides_aux_task_label(monkeypatch, hook_calls):
+    """Seven consumers borrow task="compression" for its cheap-model config,
+    so the task name alone mislabels them all as compression in telemetry
+    (P-0707-01). An explicit purpose must win the aux_task label; the task
+    keeps driving config resolution."""
+    resp = _fake_response()
+    _wire(monkeypatch, resp)
+
+    aux.call_llm(
+        task="compression",
+        purpose="turn-intent",
+        messages=[{"role": "user", "content": "x"}],
+    )
+
+    _, kw = hook_calls[0]
+    assert kw["aux_task"] == "turn-intent"
+
+
+@pytest.mark.asyncio
+async def test_async_purpose_overrides_aux_task_label(monkeypatch, hook_calls):
+    resp = _fake_response()
+    _wire(monkeypatch, resp, async_mode=True)
+
+    await aux.async_call_llm(
+        task="compression",
+        purpose="ack-emoji",
+        messages=[{"role": "user", "content": "x"}],
+    )
+
+    _, kw = hook_calls[0]
+    assert kw["aux_task"] == "ack-emoji"
+
+
+def test_no_purpose_falls_back_to_task(monkeypatch, hook_calls):
+    resp = _fake_response()
+    _wire(monkeypatch, resp)
+
+    aux.call_llm(task="web_extract", messages=[{"role": "user", "content": "x"}])
+
+    _, kw = hook_calls[0]
+    assert kw["aux_task"] == "web_extract"

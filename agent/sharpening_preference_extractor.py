@@ -198,6 +198,7 @@ def extract_sharpening_preferences(
     try:
         response = call_llm(
             task="compression",
+            purpose="sharpening-preference",
             messages=[
                 {"role": "system", "content": "You return only strict JSON."},
                 {"role": "user", "content": prompt},
