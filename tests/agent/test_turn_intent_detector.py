@@ -1862,3 +1862,45 @@ class TestExtractSubmittedApps:
         data = [{"company": "x", "display_name": "X", "status": "submitted"}]
         out = tid.extract_submitted_apps(data)
         assert out[0]["display_name"] == "X"
+
+
+# =========================================================================
+# is_scan_steer_dispatch (B-0707-01 pending-announce bypass predicate)
+# =========================================================================
+
+class TestIsScanSteerDispatch:
+    """B-0707-01: a high-confidence scan-steering single dispatch bypasses the
+    pending-announcement suppression gate — its scan_direction write is the
+    load-bearing side effect (dropping it loses user state), and duplicate-work
+    risk is structurally blocked downstream (verbatim id slug → id-collision
+    rejection; same-tag → server no-op). The predicate mirrors the Artemis
+    server's _SCAN_STEER_MARKERS."""
+
+    def _detection(self, sub_agent="scout", id_slug="rerank-healthcare-mission-driven",
+                   action="Re-rank the job scan toward healthcare-mission-driven",
+                   dispatch_type="single", n=1):
+        d = {"sub_agent": sub_agent, "id_slug": id_slug, "action": action}
+        return {"dispatch_type": dispatch_type, "dispatches": [d] * n}
+
+    def test_rerank_scout_single_is_steer(self):
+        assert tid.is_scan_steer_dispatch(self._detection()) is True
+
+    def test_tilt_marker_in_action_is_steer(self):
+        det = self._detection(id_slug="scan-mission", action="Tilt the scan toward mission-driven roles")
+        assert tid.is_scan_steer_dispatch(det) is True
+
+    def test_non_scout_is_not_steer(self):
+        assert tid.is_scan_steer_dispatch(self._detection(sub_agent="publicist")) is False
+
+    def test_plain_scan_is_not_steer(self):
+        det = self._detection(id_slug="scan-boston", action="Run a fresh Boston job scan")
+        assert tid.is_scan_steer_dispatch(det) is False
+
+    def test_multi_dispatch_is_not_steer(self):
+        det = self._detection(dispatch_type="multi", n=2)
+        assert tid.is_scan_steer_dispatch(det) is False
+
+    def test_malformed_detection_is_not_steer(self):
+        assert tid.is_scan_steer_dispatch({}) is False
+        assert tid.is_scan_steer_dispatch({"dispatch_type": "single", "dispatches": []}) is False
+        assert tid.is_scan_steer_dispatch(None) is False

@@ -2512,6 +2512,7 @@ class GatewayRunner:
             else:
                 from agent.turn_intent_detector import (
                     detect_turn_intent,
+                    is_scan_steer_dispatch,
                     render_injection_block,
                     render_capability_block,
                     render_affect_report_block,
@@ -2619,20 +2620,37 @@ class GatewayRunner:
                     except Exception as _dp_err:  # noqa: BLE001
                         logger.debug("direction-present mark failed: %s", _dp_err)
 
+                # B-0707-01: a scan-steering confirm bypasses the pending-
+                # announcement suppression — its scan_direction write is the
+                # load-bearing side effect (a suppressed confirm drops
+                # user-confirmed state; Coach's fallback routing then
+                # fabricated "already active" on dev). Duplicate work — the
+                # thing the gate protects against — is structurally blocked
+                # for this class (id-collision rejection + server same-tag
+                # no-op). See is_scan_steer_dispatch docstring.
+                _is_scan_steer = is_scan_steer_dispatch(_detection)
+
                 _should_auto_execute = (
                     _dispatch_type in ("single", "multi")
                     and _conf == "high"
                     and _uid
                     and _dispatches
-                    and not _pending_announce
+                    and (not _pending_announce or _is_scan_steer)
                 )
 
                 if _pending_announce and _dispatch_type in ("single", "multi"):
-                    logger.info(
-                        "turn-intent: chat=%s dispatch_suppressed="
-                        "pending_announcement_present dispatch_type=%s",
-                        _chat, _dispatch_type,
-                    )
+                    if _is_scan_steer and _conf == "high":
+                        logger.info(
+                            "turn-intent: chat=%s dispatch_suppression_bypassed="
+                            "scan_steer dispatch_type=%s",
+                            _chat, _dispatch_type,
+                        )
+                    else:
+                        logger.info(
+                            "turn-intent: chat=%s dispatch_suppressed="
+                            "pending_announcement_present dispatch_type=%s",
+                            _chat, _dispatch_type,
+                        )
 
                 if _should_auto_execute:
                     # Direction C — server auto-execute path.

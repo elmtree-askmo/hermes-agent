@@ -1064,6 +1064,34 @@ def render_onboarding_sharpening_block(dispatch_type: str | None) -> str | None:
     return None
 
 
+# B-0707-01: mirrors the Artemis server's _SCAN_STEER_MARKERS — keep in step.
+SCAN_STEER_MARKERS = (
+    "rerank", "re-rank", "steer", "tilt", "scan-direction", "scan direction",
+)
+
+
+def is_scan_steer_dispatch(detection) -> bool:
+    """B-0707-01: True for a single scout dispatch whose id_slug/action reads
+    as a scan-steering re-rank. Such a dispatch bypasses the gateway's
+    pending-announcement suppression gate: its `scan_direction` write is the
+    load-bearing side effect (suppressing it drops a user-confirmed state
+    change on the floor, and Coach's fallback routing is unreliable —
+    S-0702-01), while the duplicate-work risk the gate protects against is
+    structurally blocked downstream for this class (verbatim id slug →
+    id-collision rejection at preflight + server; same-tag re-confirm →
+    server-side no-op)."""
+    if not isinstance(detection, dict) or detection.get("dispatch_type") != "single":
+        return False
+    dispatches = detection.get("dispatches") or []
+    if len(dispatches) != 1 or not isinstance(dispatches[0], dict):
+        return False
+    d = dispatches[0]
+    if d.get("sub_agent") != "scout":
+        return False
+    blob = f"{d.get('id_slug', '')} {d.get('action', '')}".lower()
+    return any(m in blob for m in SCAN_STEER_MARKERS)
+
+
 def render_already_executed_block(
     sub_agent: str,
     action: str,
