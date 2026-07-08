@@ -524,6 +524,42 @@ def _run_briefing_render(
     return take
 
 
+def _briefing_deliverable(
+    raw_output: str, job_id: str = "?", silence_tier: str | None = None,
+    capture: dict | None = None, user_id: str | None = None,
+) -> str:
+    """Render step-0 JSON to the take body, or FAIL CLOSED to the deterministic
+    quiet-day note (B-0510-01 reopen 2026-07-08).
+
+    When step-0 breaks its JSON contract, the raw output is a pipeline
+    intermediate (model reasoning / labeled decide fields), never a
+    deliverable — the old behavior of flowing it through to delivery, gated
+    only by the log-only voice-scan, leaked chain-of-thought + raw
+    `coaches_take:`-style fields to Slack and silently killed the
+    follow-up-acceptance anchor downstream (the check-in never landed in the
+    structured output the detector reads).
+
+    This gate is a different failure class from the voice-scan's tone
+    blemishes: S-0626-02's log-only decision (don't discard a valid day's
+    content over a stray name) still stands for takes that PARSE. A contract
+    violation has no valid content to preserve — substituting the fixed note
+    is strictly better than delivering an internal artifact.
+    """
+    rendered = _run_briefing_render(
+        raw_output, job_id, silence_tier=silence_tier,
+        capture=capture, user_id=user_id,
+    )
+    if rendered is not None:
+        return rendered
+    logger.warning(
+        "Job '%s': step-0 output failed the JSON contract — substituting the "
+        "deterministic quiet-day note; raw intermediate NOT delivered "
+        "(B-0510-01). First 200 chars: %s",
+        job_id, (raw_output or "")[:200],
+    )
+    return _quiet_day_fallback()
+
+
 # ---------------------------------------------------------------------------
 # Artemis S-0511-07 — briefing-output persistence (scheduler-side write).
 # ---------------------------------------------------------------------------
@@ -2281,21 +2317,26 @@ def tick(verbose: bool = True, adapters=None, loop=None) -> int:
                 # JSON, assemble the body (verbatim response-window check-in
                 # appended below). Voice is handled by the identity-anchored
                 # step-0 prompt + the Phase-5 voice-scan run on deliver_content
-                # below — no name-strip LLM. On any failure _run_briefing_render
-                # returns None and deliver_content flows through Phase 5 unchanged.
+                # below — no name-strip LLM. On parse failure the deliverable
+                # FAILS CLOSED to the deterministic quiet-day note (B-0510-01
+                # reopen 2026-07-08) — the raw step-0 intermediate is never
+                # delivered.
                 _briefing_opener_llm = None  # step-0 opener, captured below
                 _briefing_checkin = None  # verbatim response-window check-in, appended post-scan
                 if should_deliver and success and _is_briefing_job(job) and not _resume_guard_fired:
                     _two_step_uid = (_resolve_origin(job) or {}).get("user_id")
                     _two_step_capture: dict = {}
-                    two_step_result = _run_briefing_render(
+                    # B-0510-01 (reopened 2026-07-08): fail CLOSED on a step-0
+                    # JSON-contract violation — the raw output is a pipeline
+                    # intermediate, never a deliverable. _briefing_deliverable
+                    # substitutes the deterministic quiet-day note on parse
+                    # failure; the raw text no longer flows through to Phase 5.
+                    deliver_content = _briefing_deliverable(
                         deliver_content, job["id"], silence_tier=_silence_tier,
                         capture=_two_step_capture, user_id=_two_step_uid,
                     )
-                    if two_step_result is not None:
-                        deliver_content = two_step_result
-                        _briefing_opener_llm = _two_step_capture.get("opener")
-                        _briefing_checkin = _two_step_capture.get("checkin")
+                    _briefing_opener_llm = _two_step_capture.get("opener")
+                    _briefing_checkin = _two_step_capture.get("checkin")
 
                     # S-0626-02 — quality-gate the ASSEMBLED briefing body (the
                     # raw-output gate above is skipped for briefing jobs because
