@@ -32,10 +32,19 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
-# The offer surfaces in the briefing under this marker. Coach scans the same
-# (hermes.md § Follow-up-draft offer step 1). No marker → no offer → not an
-# acceptance, skip the auxiliary call (the ambiguity guard).
-_OFFER_MARKER = "📌 Follow-ups"
+# The offer surfaces in the briefing as the FIXED server check-in copy
+# (mcp-server appends it byte-exact post-voice-scan; hermes.md § Follow-up-draft
+# offer step 1 scans the same sentence). No offer sentence → not an acceptance,
+# skip the auxiliary call (the ambiguity guard).
+#
+# B-0708-01: this was "📌 Follow-ups" — a section header of the pre-Plan-C
+# briefing layout that S-0626-02 retired the day after this detector shipped;
+# no current render path emits it, so every acceptance skipped
+# (no_offer_in_briefing) on real briefings. The fragment below is stable
+# across both the legacy ("Want me to have Publicist draft a follow-up you
+# can send?") and current ("Would you like Publicist to draft a follow-up
+# you can send?") phrasings of the fixed copy.
+_OFFER_MARKER = "draft a follow-up you can send"
 
 # Hard timeout. Runs synchronously between Coach reply ready and send.
 _DETECT_TIMEOUT_S = 10.0

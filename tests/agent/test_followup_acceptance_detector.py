@@ -420,3 +420,42 @@ class TestExecuteViaHelper:
         assert result["ok"] is False
         assert result["stage"] == "enqueue"
         assert "spawn failed" in result["error"]
+
+
+# ---------------------------------------------------------------------------
+# B-0708-01 — the offer anchor must survive the Plan-C briefing format.
+#
+# S-0626-02 Plan C (2026-06-26) retired the emoji-section briefing layout the
+# day after this detector shipped anchored on the literal "📌 Follow-ups"
+# header; no current render path emits that header, so every acceptance was
+# skipped (`no_offer_in_briefing`) on real briefings. The anchor must match
+# the FIXED server check-in copy (appended byte-exact post-scan), which is
+# present in both the old ("Want me to have Publicist draft a follow-up you
+# can send?") and current ("Would you like Publicist to draft a follow-up you
+# can send?") phrasings via the stable fragment.
+# ---------------------------------------------------------------------------
+
+# Trailing shape of a real delivered Plan-C briefing (dev 2026-07-08 02:54Z).
+_PLAN_C_BRIEFING = (
+    "Holding steady on the healthcare-axis search today.\n\n"
+    "🔍 Scout — 10 ranked Boston matches ...\n"
+    "✍️ Publicist — Drafted cover letter for Brigham ...\n\n"
+    "That Dealer Tire rejection stings — Brigham's packet is ready when "
+    "you are.\n\n"
+    "No reply yet from Wayfair — the response window has passed. Would you "
+    "like Publicist to draft a follow-up you can send?"
+)
+
+
+class TestOfferAnchorSurvivesPlanCFormat:
+    def test_plan_c_briefing_offer_detected(self):
+        import agent.followup_acceptance_detector as fad
+        assert fad._has_offer_line(_PLAN_C_BRIEFING) is True
+
+    def test_legacy_format_still_detected(self):
+        import agent.followup_acceptance_detector as fad
+        assert fad._has_offer_line(_OFFER_BRIEFING) is True
+
+    def test_no_offer_briefing_still_negative(self):
+        import agent.followup_acceptance_detector as fad
+        assert fad._has_offer_line(_NO_OFFER_BRIEFING) is False
