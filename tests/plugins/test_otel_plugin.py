@@ -1460,3 +1460,51 @@ class TestAuxUsageSpans:
 
         spans = [s for s in exporter.get_finished_spans() if s.name == "aux:compression"]
         assert spans and spans[0].parent is None  # root of its own trace, no misattachment
+
+
+class TestMaintenanceTraceName:
+    """Background maintenance runs (session-expiry flush) set a task-local
+    trace-name override so their invoke_agent span is named distinctly, not
+    masquerading as a real user coach-turn (S-0629-01 maintenance-run gap)."""
+
+    def test_trace_name_override_wins_over_role_default(self, monkeypatch, exporter_and_tracer):
+        import importlib
+
+        otel_mod = importlib.import_module("plugins.observability.otel")
+        exporter, tracer = exporter_and_tracer
+
+        from plugins.observability.otel.emitter import OtelGenAIEmitter
+        emitter = OtelGenAIEmitter(tracer, agent_name="coach", trace_name="coach-turn")
+        monkeypatch.setattr(otel_mod, "_get_emitter", lambda: emitter)
+        monkeypatch.setattr(otel_mod, "_get_log_emitter", lambda: None)
+        monkeypatch.setattr(otel_mod, "_resolve_identity", lambda: ("U1", "abc123abc123"))
+
+        from tools.session_context import set_trace_name
+        set_trace_name("memory-flush")
+        try:
+            otel_mod.on_pre_llm_call(session_id="s-maint", user_message="flush", model="m")
+            otel_mod.on_session_end(session_id="s-maint")
+        finally:
+            set_trace_name(None)
+
+        spans = [s for s in exporter.get_finished_spans() if "invoke_agent" in s.name]
+        assert spans and spans[0].attributes.get("langfuse.trace.name") == "memory-flush"
+
+    def test_no_override_keeps_role_default(self, monkeypatch, exporter_and_tracer):
+        import importlib
+
+        otel_mod = importlib.import_module("plugins.observability.otel")
+        exporter, tracer = exporter_and_tracer
+        from plugins.observability.otel.emitter import OtelGenAIEmitter
+        emitter = OtelGenAIEmitter(tracer, agent_name="coach", trace_name="coach-turn")
+        monkeypatch.setattr(otel_mod, "_get_emitter", lambda: emitter)
+        monkeypatch.setattr(otel_mod, "_get_log_emitter", lambda: None)
+        monkeypatch.setattr(otel_mod, "_resolve_identity", lambda: ("U1", "abc123abc123"))
+
+        from tools.session_context import set_trace_name
+        set_trace_name(None)
+        otel_mod.on_pre_llm_call(session_id="s-user", user_message="hi", model="m")
+        otel_mod.on_session_end(session_id="s-user")
+
+        spans = [s for s in exporter.get_finished_spans() if "invoke_agent" in s.name]
+        assert spans and spans[0].attributes.get("langfuse.trace.name") == "coach-turn"

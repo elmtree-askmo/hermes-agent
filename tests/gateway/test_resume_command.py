@@ -219,7 +219,10 @@ class TestHandleResumeCommand:
 
         await runner._handle_resume_command(event)
 
-        runner._async_flush_memories.assert_called_once_with(
-            "current_session_001",
-        )
+        # Flush is called with the session id + the owning user_id (threaded
+        # for maintenance-run attribution, S-0629-01).
+        runner._async_flush_memories.assert_called_once()
+        _call_args = runner._async_flush_memories.call_args
+        assert _call_args.args[0] == "current_session_001"
+        assert len(_call_args.args) == 2  # user_id threaded through
         db.close()

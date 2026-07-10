@@ -538,6 +538,16 @@ def on_pre_llm_call(**kwargs: Any) -> None:
             "hermes.cron_job_id": job_id,
             "langfuse.trace.metadata.hermes_cron_job_id": job_id,
         }
+    # A background maintenance run (memory flush) sets a task-local trace-name
+    # override so its span isn't mislabeled a real user coach-turn. It runs on
+    # a non-cron session, so it never collides with the cron "scheduled" label.
+    _maint_name = None
+    try:
+        from tools.session_context import get_trace_name as _get_trace_name
+        _maint_name = _get_trace_name()
+    except Exception:
+        _maint_name = None
+    _trace_name = _maint_name or ("scheduled" if job_id else None)
     try:
         cm = emitter.turn_span(
             session_id=session_id,
@@ -545,7 +555,7 @@ def on_pre_llm_call(**kwargs: Any) -> None:
             user_prompt=kwargs.get("user_message"),
             user_id=user_id,
             run_trace_id=run_trace_id,
-            trace_name="scheduled" if job_id else None,
+            trace_name=_trace_name,
             extra=extra,
         )
         span = cm.__enter__()

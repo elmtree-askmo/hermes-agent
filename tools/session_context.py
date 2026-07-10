@@ -13,6 +13,7 @@ ContextVars here first.
 from __future__ import annotations
 
 import uuid
+from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import Optional
 
@@ -44,6 +45,14 @@ session_thread_ts: ContextVar[Optional[str]] = ContextVar("hermes_session_thread
 # the same id and the whole Coach→Strategist→Executor run joins on one key.
 session_trace_id: ContextVar[Optional[str]] = ContextVar("hermes_session_trace_id", default=None)
 
+# Optional per-run trace-NAME override. A normal turn leaves this None and the
+# observability plugin names the trace by process role (coach-turn) or by cron
+# detection (scheduled). Background maintenance runs in the coach process
+# (session-expiry memory flush) set it so their span is named distinctly
+# instead of masquerading as a real user coach-turn. Reset by set_session /
+# clear_session so a reused pooled thread never leaks it into a later run.
+session_trace_name: ContextVar[Optional[str]] = ContextVar("hermes_session_trace_name", default=None)
+
 
 def new_trace_id() -> str:
     """Generate a short run-scoped trace id (12 hex chars — enough for grep
@@ -59,6 +68,7 @@ def set_session(
     thread_id: Optional[str] = None,
     user_id: Optional[str] = None,
     trace_id: Optional[str] = None,
+    trace_name: Optional[str] = None,
 ) -> None:
     session_platform.set(platform)
     session_chat_id.set(chat_id)
@@ -66,6 +76,9 @@ def set_session(
     session_thread_id.set(thread_id)
     session_user_id.set(user_id)
     session_trace_id.set(trace_id)
+    # Defaults to None: a normal turn's set_session wipes any leftover
+    # maintenance trace name from a reused thread.
+    session_trace_name.set(trace_name)
 
 
 def clear_session() -> None:
@@ -76,6 +89,7 @@ def clear_session() -> None:
     session_user_id.set(None)
     session_thread_ts.set(None)
     session_trace_id.set(None)
+    session_trace_name.set(None)
 
 
 def get_chat_id() -> Optional[str]:
@@ -115,3 +129,40 @@ def set_trace_id(trace_id: Optional[str]) -> None:
     ``HERMES_TRACE_ID`` env then seeds the ContextVar without a full
     ``set_session`` (no inbound Slack context in that path)."""
     session_trace_id.set(trace_id)
+
+
+def get_trace_name() -> Optional[str]:
+    return session_trace_name.get()
+
+
+def set_trace_name(trace_name: Optional[str]) -> None:
+    session_trace_name.set(trace_name)
+
+
+@contextmanager
+def maintenance_run(
+    *, user_id: Optional[str], trace_name: str, platform: Optional[str] = None,
+    chat_id: Optional[str] = None,
+):
+    """Scope a background coach-process AIAgent run (not a user message) with
+    its own minted trace id, the owning user_id, and a distinct trace name.
+
+    ``platform`` defaults to None on purpose: a maintenance run is headless, it
+    has no interactive origin platform. Claiming "slack" would masquerade it as
+    a user turn (the very mislabel this scope exists to prevent) and mislead any
+    platform-reading tool (tts/cronjob/terminal).
+
+    Runs in a pooled executor thread (run_in_executor doesn't copy context in),
+    so this SETs a fresh identity on entry and CLEARs on exit — the pooled
+    thread never leaks the maintenance identity into a later run reusing it.
+    Yields the minted trace id.
+    """
+    tid = new_trace_id()
+    set_session(
+        platform=platform, chat_id=chat_id, user_id=user_id,
+        trace_id=tid, trace_name=trace_name,
+    )
+    try:
+        yield tid
+    finally:
+        clear_session()

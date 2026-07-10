@@ -644,11 +644,14 @@ class GatewayRunner:
     def _flush_memories_for_session(
         self,
         old_session_id: str,
+        user_id: Optional[str] = None,
     ):
         """Prompt the agent to save memories/skills before context is lost.
 
         Synchronous worker — meant to be called via run_in_executor from
-        an async context so it doesn't block the event loop.
+        an async context so it doesn't block the event loop. ``user_id`` is
+        the owning user of the expired session, threaded through so the flush
+        run is attributed + traced (S-0629-01 maintenance-run gap).
         """
         # Skip cron sessions — they run headless with no meaningful user
         # conversation to extract memories from.
@@ -781,10 +784,26 @@ class GatewayRunner:
                 "tools if needed, then stop.]"
             )
 
-            tmp_agent.run_conversation(
-                user_message=flush_prompt,
-                conversation_history=msgs,
-            )
+            # Attribution: the caller's SessionEntry may not carry the user_id
+            # (only source-side), so fall back to the authoritative state.db
+            # sessions.user_id keyed by the session being flushed.
+            if not user_id and getattr(self, "_session_db", None):
+                try:
+                    _srow = self._session_db.get_session(old_session_id)
+                    user_id = (_srow or {}).get("user_id") or None
+                except Exception:
+                    user_id = None
+
+            # Scope this background run: mint a trace id, attribute it to the
+            # session's owning user, and name the span "memory-flush" so it is
+            # not counted as a real user coach-turn. Runs in a pooled executor
+            # thread; maintenance_run clears on exit so nothing leaks (S-0629-01).
+            from tools.session_context import maintenance_run
+            with maintenance_run(user_id=user_id, trace_name="memory-flush"):
+                tmp_agent.run_conversation(
+                    user_message=flush_prompt,
+                    conversation_history=msgs,
+                )
             logger.info("Pre-reset memory flush completed for session %s", old_session_id)
         except Exception as e:
             logger.debug("Pre-reset memory flush failed for session %s: %s", old_session_id, e)
@@ -792,6 +811,7 @@ class GatewayRunner:
     async def _async_flush_memories(
         self,
         old_session_id: str,
+        user_id: Optional[str] = None,
     ):
         """Run the sync memory flush in a thread pool so it won't block the event loop."""
         loop = asyncio.get_event_loop()
@@ -799,6 +819,7 @@ class GatewayRunner:
             None,
             self._flush_memories_for_session,
             old_session_id,
+            user_id,
         )
 
     @property
@@ -1369,7 +1390,7 @@ class GatewayRunner:
 
                 for key, entry in _expired_entries:
                     try:
-                        await self._async_flush_memories(entry.session_id)
+                        await self._async_flush_memories(entry.session_id, getattr(getattr(entry, 'source', None), 'user_id', None))
                         # Shut down memory provider on the cached agent
                         cached_agent = self._running_agents.get(key)
                         if cached_agent and cached_agent is not _AGENT_PENDING_SENTINEL:
@@ -4384,7 +4405,7 @@ class GatewayRunner:
             old_entry = self.session_store._entries.get(session_key)
             if old_entry:
                 _flush_task = asyncio.create_task(
-                    self._async_flush_memories(old_entry.session_id)
+                    self._async_flush_memories(old_entry.session_id, getattr(getattr(old_entry, 'source', None), 'user_id', None))
                 )
                 self._background_tasks.add(_flush_task)
                 _flush_task.add_done_callback(self._background_tasks.discard)
@@ -6278,7 +6299,7 @@ class GatewayRunner:
         # Flush memories for current session before switching
         try:
             _flush_task = asyncio.create_task(
-                self._async_flush_memories(current_entry.session_id)
+                self._async_flush_memories(current_entry.session_id, getattr(getattr(current_entry, 'source', None), 'user_id', None))
             )
             self._background_tasks.add(_flush_task)
             _flush_task.add_done_callback(self._background_tasks.discard)
