@@ -628,6 +628,20 @@ def _close_cm(cm: Any) -> None:
         logger.debug("failed to close turn span", exc_info=True)
 
 
+class _DropDetachNoise(logging.Filter):
+    """Drops OTel's benign "Failed to detach context" record — logged when the
+    atexit turn-span sweep detaches a token in a foreign contextvars Context
+    (the span was already exported). Matches only that one message, so any other
+    opentelemetry.context record still surfaces — we are not blinded to a real
+    context problem in the drain window (P-0713-01)."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return "Failed to detach context" not in record.getMessage()
+
+
+_DROP_DETACH_NOISE = _DropDetachNoise()
+
+
 def close_open_turns() -> None:
     """Deterministically close any turn spans still open at interpreter exit.
 
@@ -650,8 +664,21 @@ def close_open_turns() -> None:
         cms = list(_OPEN_TURNS.values())
         _OPEN_TURNS.clear()
         _OPEN_TURN_SPANS.clear()
-    for cm in cms:
-        _close_cm(cm)
+    # The drain exits each turn's start_as_current_span context manager here at
+    # atexit — in a different contextvars Context than the one the span was
+    # attached in (the subprocess's asyncio task). OTel's context.detach then
+    # logs a benign "Failed to detach context" ValueError at ERROR (the span
+    # already exported). Drop just that one message while draining so it does not
+    # pollute errors.log or inflate the ops-digest new-error count (P-0713-01);
+    # a scoped message filter, so any OTHER opentelemetry.context record in the
+    # window still surfaces.
+    ctx_logger = logging.getLogger("opentelemetry.context")
+    ctx_logger.addFilter(_DROP_DETACH_NOISE)
+    try:
+        for cm in cms:
+            _close_cm(cm)
+    finally:
+        ctx_logger.removeFilter(_DROP_DETACH_NOISE)
 
 
 def on_pre_api_request(**kwargs: Any) -> None:

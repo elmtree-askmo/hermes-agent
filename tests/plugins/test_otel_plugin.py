@@ -923,6 +923,59 @@ class TestPluginAdapter:
 
         assert plugin.close_open_turns in registered
 
+    def test_close_open_turns_drops_only_benign_detach_noise(
+        self, exporter_and_tracer, monkeypatch, caplog
+    ):
+        """A subprocess opens its turn span inside one contextvars Context (its
+        asyncio task) but the atexit sweep drains it in another, so OTel's
+        context.detach logs a benign `Failed to detach context` ValueError at
+        ERROR — span already exported (zero run impact), but it pollutes
+        errors.log and inflates the ops-digest new-error count (P-0713-01). The
+        sweep must drop ONLY that benign line, and must NOT blind us to any other
+        opentelemetry.context signal surfacing in the same drain window."""
+        import contextvars
+        import logging
+
+        exporter, tracer = exporter_and_tracer
+        plugin, provider = _fresh_plugin()
+        monkeypatch.setattr(provider, "build_tracer", lambda **_: tracer)
+        _le, ol = _in_memory_logger()
+        monkeypatch.setattr(provider, "build_logger", lambda **_: ol)
+
+        ctx = _FakeCtx()
+        plugin.register(ctx)
+        ctx.hooks["on_session_start"](session_id="sess-x", model="m")
+        # Open the turn span inside a CHILD contextvars Context so its attach
+        # token is bound there — mirrors the executor opening the span in its
+        # asyncio task context, then the atexit sweep detaching in another.
+        contextvars.copy_context().run(
+            ctx.hooks["pre_llm_call"], session_id="sess-x", user_message="hi"
+        )
+        assert plugin._OPEN_TURNS  # turn left open, token bound to the child context
+
+        # A second turn whose close emits a DIFFERENT opentelemetry.context
+        # record — stands in for a real, non-benign context problem surfacing in
+        # the same drain window; it must survive the suppression.
+        class _OtherCtxLogCM:
+            def __exit__(self, *_a):
+                logging.getLogger("opentelemetry.context").error(
+                    "sentinel: a real context problem"
+                )
+                return False
+
+        plugin._OPEN_TURNS["sentinel-sess"] = _OtherCtxLogCM()
+
+        with caplog.at_level(logging.ERROR, logger="opentelemetry.context"):
+            plugin.close_open_turns()  # drains in the parent context
+
+        assert not plugin._OPEN_TURNS  # still drained
+        msgs = [
+            r.getMessage() for r in caplog.records
+            if r.name == "opentelemetry.context"
+        ]
+        assert not any("Failed to detach context" in m for m in msgs)  # benign dropped
+        assert any("sentinel" in m for m in msgs)  # real signal preserved
+
     def test_cron_session_labels_trace_scheduled_with_job_id(
         self, exporter_and_tracer, monkeypatch
     ):
