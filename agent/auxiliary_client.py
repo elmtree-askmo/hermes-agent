@@ -1933,7 +1933,8 @@ def _build_call_kwargs(
 
 
 def _emit_usage_hook(
-    response: Any, *, task, provider, model, base_url, messages=None, purpose=None
+    response: Any, *, task, provider, model, base_url, messages=None, purpose=None,
+    started_at=None,
 ) -> Any:
     """Fire ``post_api_request`` for one auxiliary LLM call and return the
     response unchanged.
@@ -1949,6 +1950,8 @@ def _emit_usage_hook(
     plugin must never break the aux call.
     """
     try:
+        import time as _time
+
         raw = getattr(response, "usage", None)
         if not raw:
             return response
@@ -1983,6 +1986,16 @@ def _emit_usage_hook(
             _hermes_trace_id = get_trace_id()
         except Exception:
             _hermes_trace_id = None
+        # Elapsed seconds since the caller's t0 (set once per call_llm entry,
+        # so retries + payment fallback count as total wait — that IS the
+        # user-relevant latency for critical-path consumers like turn-intent).
+        # Lets the OTEL plugin backdate the span start (P-0713-02).
+        _api_duration = None
+        if started_at is not None:
+            try:
+                _api_duration = max(0.0, _time.time() - started_at)
+            except (TypeError, ValueError):
+                _api_duration = None
         invoke_hook(
             "post_api_request",
             model=model or "",
@@ -1995,6 +2008,7 @@ def _emit_usage_hook(
             prompt_messages=messages,
             assistant_response=_resp_text,
             hermes_trace_id=_hermes_trace_id,
+            api_duration=_api_duration,
         )
     except Exception:
         logger.debug("Auxiliary usage hook failed", exc_info=True)
@@ -2120,9 +2134,12 @@ def call_llm(
         base_url=resolved_base_url)
 
     # Handle max_tokens vs max_completion_tokens retry, then payment fallback.
+    import time as _t0mod
+    _t0 = _t0mod.time()
     _hook_kw = dict(task=task, provider=resolved_provider, model=final_model,
                     base_url=str(getattr(client, "base_url", "") or "")
-                    or resolved_base_url, messages=messages, purpose=purpose)
+                    or resolved_base_url, messages=messages, purpose=purpose,
+                    started_at=_t0)
     try:
         return _emit_usage_hook(
             client.chat.completions.create(**kwargs), **_hook_kw)
@@ -2158,7 +2175,7 @@ def call_llm(
                 return _emit_usage_hook(
                     fb_client.chat.completions.create(**fb_kwargs),
                     task=task, provider=fb_label, model=fb_model, base_url=None,
-                    messages=messages, purpose=purpose)
+                    messages=messages, purpose=purpose, started_at=_t0)
         raise
 
 
@@ -2299,9 +2316,12 @@ async def async_call_llm(
         tools=tools, timeout=effective_timeout, extra_body=extra_body,
         base_url=resolved_base_url)
 
+    import time as _t0mod
+    _t0 = _t0mod.time()
     _hook_kw = dict(task=task, provider=resolved_provider, model=final_model,
                     base_url=str(getattr(client, "base_url", "") or "")
-                    or resolved_base_url, messages=messages, purpose=purpose)
+                    or resolved_base_url, messages=messages, purpose=purpose,
+                    started_at=_t0)
     try:
         return _emit_usage_hook(
             await client.chat.completions.create(**kwargs), **_hook_kw)

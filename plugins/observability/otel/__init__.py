@@ -796,7 +796,19 @@ def on_post_api_request(**kwargs: Any) -> None:
             emitter.finish_llm_span(span, **_fields)
         else:
             # No pre-span (plugin loaded mid-call, or an auxiliary call —
-            # auxiliary_client fires only post): instantaneous span, no latency.
+            # auxiliary_client fires only post). Backdate the span start from
+            # the measured elapsed (api_duration, seconds) so the span carries
+            # real latency instead of opening+closing in the same instant
+            # (P-0713-02); without a duration it stays instantaneous.
+            _start_ns = None
+            _dur_s = kwargs.get("api_duration")
+            if _dur_s is not None:
+                try:
+                    import time as _time
+
+                    _start_ns = _time.time_ns() - int(float(_dur_s) * 1e9)
+                except (TypeError, ValueError):
+                    _start_ns = None
             _aux_task = kwargs.get("aux_task")
             if _aux_task:
                 _fields["extra"] = {"hermes.aux_task": str(_aux_task)}
@@ -805,10 +817,11 @@ def on_post_api_request(**kwargs: Any) -> None:
                 # explicit parent still valid). Unknown id -> standalone.
                 _parent = _lookup_turn_context(kwargs.get("hermes_trace_id"))
                 emitter.record_llm_call(
-                    name=f"aux:{_aux_task}", parent_context=_parent, **_fields
+                    name=f"aux:{_aux_task}", parent_context=_parent,
+                    start_time=_start_ns, **_fields
                 )
             else:
-                emitter.record_llm_call(**_fields)
+                emitter.record_llm_call(start_time=_start_ns, **_fields)
     except Exception:
         logger.debug("on_post_api_request: failed to emit chat span", exc_info=True)
         return

@@ -265,3 +265,29 @@ def test_no_purpose_falls_back_to_task(monkeypatch, hook_calls):
 
     _, kw = hook_calls[0]
     assert kw["aux_task"] == "web_extract"
+
+
+def test_hook_carries_api_duration(monkeypatch, hook_calls):
+    """Aux latency backfill (P-0713-02): the hook must carry the call's
+    elapsed seconds so the OTEL plugin can backdate the span start —
+    without it every aux generation reports latency=0."""
+    resp = _fake_response()
+    _wire(monkeypatch, resp)
+
+    aux.call_llm(task="compression", messages=[{"role": "user", "content": "x"}])
+
+    _, kw = hook_calls[0]
+    assert "api_duration" in kw
+    assert isinstance(kw["api_duration"], float)
+    assert kw["api_duration"] >= 0.0
+
+
+@pytest.mark.asyncio
+async def test_async_hook_carries_api_duration(monkeypatch, hook_calls):
+    resp = _fake_response()
+    _wire(monkeypatch, resp, async_mode=True)
+
+    await aux.async_call_llm(task="session_search", messages=[{"role": "user", "content": "x"}])
+
+    _, kw = hook_calls[0]
+    assert kw.get("api_duration") is not None and kw["api_duration"] >= 0.0

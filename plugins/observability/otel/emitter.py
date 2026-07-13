@@ -196,6 +196,7 @@ class OtelGenAIEmitter:
         request_model: str | None = None,
         name: str | None = None,
         parent_context: Any = None,
+        start_time: int | None = None,
     ) -> Any:
         """Open (but do not close) a ``chat`` span for one LLM API call.
 
@@ -215,7 +216,12 @@ class OtelGenAIEmitter:
         whose ambient context is gone; a child created after its parent ended
         is valid OTel and renders normally in Langfuse.
         """
-        span = self._tracer.start_span(name or OP_CHAT, context=parent_context)
+        # start_time (epoch ns) backdates the span open — used by aux calls,
+        # which fire only a post-hook with the measured elapsed; without it the
+        # span opens+closes in the same instant and reports latency 0.
+        span = self._tracer.start_span(
+            name or OP_CHAT, context=parent_context, start_time=start_time
+        )
         span.set_attribute("gen_ai.operation.name", OP_CHAT)
         span.set_attribute("gen_ai.system", GEN_AI_SYSTEM)
         _set_if(span, "gen_ai.request.model", request_model)
@@ -329,6 +335,7 @@ class OtelGenAIEmitter:
         request_model: str | None,
         name: str | None = None,
         parent_context: Any = None,
+        start_time: int | None = None,
         response_model: str | None = None,
         input_tokens: int | None = None,
         output_tokens: int | None = None,
@@ -351,7 +358,8 @@ class OtelGenAIEmitter:
         capture its duration.
         """
         span = self.start_llm_span(
-            request_model=request_model, name=name, parent_context=parent_context
+            request_model=request_model, name=name, parent_context=parent_context,
+            start_time=start_time,
         )
         self.finish_llm_span(
             span,

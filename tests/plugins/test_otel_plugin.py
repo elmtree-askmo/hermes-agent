@@ -1561,3 +1561,70 @@ class TestMaintenanceTraceName:
 
         spans = [s for s in exporter.get_finished_spans() if "invoke_agent" in s.name]
         assert spans and spans[0].attributes.get("langfuse.trace.name") == "coach-turn"
+
+
+class TestAuxLatencyBackfill:
+    """Aux spans carried latency=0 (single post-hook -> instantaneous
+    record_llm_call). P-0713-02: the hook's api_duration backdates the span
+    start so Langfuse computes real latency."""
+
+    def test_record_llm_call_honors_start_time(self, exporter_and_tracer):
+        import time
+
+        exporter, tracer = exporter_and_tracer
+        emitter = OtelGenAIEmitter(tracer)
+        now_ns = time.time_ns()
+        emitter.record_llm_call(
+            request_model="m", name="aux:turn-intent",
+            start_time=now_ns - 4_000_000_000,  # 4s ago
+        )
+        span = [s for s in exporter.get_finished_spans() if s.name == "aux:turn-intent"][0]
+        latency_s = (span.end_time - span.start_time) / 1e9
+        assert 3.5 < latency_s < 60  # real, not instantaneous
+
+    def test_post_api_request_backdates_from_api_duration(self, monkeypatch):
+        import importlib
+
+        otel_mod = importlib.import_module("plugins.observability.otel")
+        calls = {}
+
+        class _Stub:
+            def record_llm_call(self, **kw):
+                calls.update(kw)
+
+        monkeypatch.setattr(otel_mod, "_get_emitter", lambda: _Stub())
+        monkeypatch.setattr(otel_mod, "_get_log_emitter", lambda: None)
+
+        otel_mod.on_post_api_request(
+            model="google/gemini-3-flash-preview",
+            usage={"input_tokens": 5, "output_tokens": 1, "prompt_tokens": 5, "total_tokens": 6},
+            cost_usd=0.0001,
+            aux_task="turn-intent",
+            api_duration=4.2,
+        )
+        import time
+        st = calls.get("start_time")
+        assert st is not None
+        implied = (time.time_ns() - st) / 1e9
+        assert 3.5 < implied < 10  # backdated ~4.2s
+
+    def test_no_duration_stays_instantaneous(self, monkeypatch):
+        import importlib
+
+        otel_mod = importlib.import_module("plugins.observability.otel")
+        calls = {}
+
+        class _Stub:
+            def record_llm_call(self, **kw):
+                calls.update(kw)
+
+        monkeypatch.setattr(otel_mod, "_get_emitter", lambda: _Stub())
+        monkeypatch.setattr(otel_mod, "_get_log_emitter", lambda: None)
+
+        otel_mod.on_post_api_request(
+            model="m",
+            usage={"input_tokens": 5, "output_tokens": 1, "prompt_tokens": 5, "total_tokens": 6},
+            cost_usd=0.0001,
+            aux_task="x",
+        )
+        assert calls.get("start_time") is None
