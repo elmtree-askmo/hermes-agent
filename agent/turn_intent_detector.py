@@ -46,9 +46,11 @@ logger = logging.getLogger(__name__)
 # silently killed them (B/#9, 2026-06-20). Only genuinely empty messages are
 # skipped now; everything else reaches the detector, which classifies no-intent
 # turns ("ok"/"yes") as dispatch_type=none cheaply. Cost note: this adds detector
-# calls on short turns (the aux model is costlier than the main model) — a
-# deliberate accuracy-over-cost tradeoff; cost structure is a separate
-# optimization pass (detector model choice / pre-filter).
+# calls on short turns (the aux model is per-token pricier than the main model) —
+# a deliberate accuracy-over-cost tradeoff. Measured 2026-07-13 (I-0620-01,
+# retired): gemini-3-flash-preview via the auxiliary auto chain, ~20-24
+# calls/day on dev at ~$0.004/call, prod dormant — total cost is trivial, no
+# optimization pass warranted.
 
 # Hard timeout — this runs synchronously on every user turn before Coach
 # starts. Auxiliary must be fast or skipped.
