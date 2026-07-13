@@ -101,6 +101,14 @@ exchanges, decide the **dispatch shape** this turn needs.
   intro", "apply by emailing my resume to jobs@…". (Contrast: "draft a
   cover letter for the Stripe role" — a formal artifact with NO specific
   person to email → single/publicist.)
+  **Also use `none` when the user asks about a specific PART or WORDING
+  of their résumé** — a named section, a particular bullet, how a line is
+  phrased ("what does my summary section say?", "how did we word the
+  revenue bullet?", "read me my education section"). That is a content
+  question Coach answers itself by reading the resume and quoting the
+  named part — NOT an artifact pull (vs surface_existing *deliver*, which
+  hands over the whole file). Only a whole-document pull ("let me see the
+  resume", "send me the résumé") is deliver.
 
 - **single** — exactly ONE sub-agent owns the work. User asked for a
   specific deliverable artifact, OR for a single focused piece of work
@@ -217,6 +225,10 @@ exchanges, decide the **dispatch shape** this turn needs.
   want to read it or receive it, prefer deliver (handing over the file also
   lets them read it; a summary alone can't). Meaningful ONLY for
   surface_existing.
+  **Part-of-résumé exception:** an ask about ONE named part or wording of
+  the résumé (a section, a bullet, a line) is not an artifact pull at all —
+  it is `none` (Coach quotes the named part itself; see the `none` type).
+  The prefer-deliver tie-break applies only to whole-document pulls.
   **Recipient guard:** deliver means the recipient is the **USER** ("send
   ME", "so I can upload it"). If the user is asking to send the draft TO A
   THIRD PARTY (a recruiter, a contact, a named person, "their email"),
