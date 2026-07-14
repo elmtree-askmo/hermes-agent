@@ -1041,6 +1041,70 @@ class TestSilentDelivery:
         deliver_mock.assert_not_called()
 
 
+class TestSilentDayBriefingSkipsSpawn:
+    """P-0714-03: on a silent-gap briefing day (speak=False), tick() skips the
+    run_job spawn entirely. The silence tier is a deterministic function of the
+    user's Slack-inbound clock (computable pre-spawn), so paying for a full LLM
+    session whose only instructed output is [SILENT] is pure waste."""
+
+    @pytest.fixture(autouse=True)
+    def _stub_advance_next_run(self):
+        with patch("cron.scheduler.advance_next_run"):
+            yield
+
+    def _make_briefing_job(self):
+        return {
+            "id": "daily-briefing",
+            "name": "daily-briefing",
+            "deliver": "origin",
+            "skills": ["artemis-briefing"],
+            "origin": {"platform": "slack", "chat_id": "C1", "user_id": "U0SIL1"},
+        }
+
+    def test_silent_gap_day_skips_spawn(self, caplog):
+        with patch("cron.scheduler.get_due_jobs", return_value=[self._make_briefing_job()]), \
+             patch("cron.scheduler.run_job", return_value=(True, "# output", "[SILENT]", None)) as run_mock, \
+             patch("cron.scheduler._briefing_silence", return_value=("day8", False)), \
+             patch("cron.scheduler.save_job_output", return_value="/tmp/out.md") as save_mock, \
+             patch("cron.scheduler._deliver_result") as deliver_mock, \
+             patch("cron.scheduler.mark_job_run"):
+            from cron.scheduler import tick
+            with caplog.at_level(logging.INFO, logger="cron.scheduler"):
+                tick(verbose=False)
+        run_mock.assert_not_called()          # the whole point — no LLM session spawned
+        deliver_mock.assert_not_called()      # nothing delivered on a silent-gap day
+        save_mock.assert_called_once_with("daily-briefing", SILENT_MARKER)  # observability marker
+        assert any(SILENT_MARKER in r.message for r in caplog.records)
+
+    def test_speak_day_briefing_still_spawns(self):
+        """A check-in / engaged day (speak=True) runs run_job unchanged."""
+        with patch("cron.scheduler.get_due_jobs", return_value=[self._make_briefing_job()]), \
+             patch("cron.scheduler.run_job", return_value=(True, "# output", "Results", None)) as run_mock, \
+             patch("cron.scheduler._briefing_silence", return_value=("day1", True)), \
+             patch("cron.scheduler.save_job_output", return_value="/tmp/out.md"), \
+             patch("cron.scheduler._deliver_result") as deliver_mock, \
+             patch("cron.scheduler.mark_job_run"):
+            from cron.scheduler import tick
+            tick(verbose=False)
+        run_mock.assert_called_once()
+        deliver_mock.assert_called_once()
+
+    def test_non_briefing_job_never_silence_gated(self):
+        """A non-briefing job never consults the silence tier, even if speak=False."""
+        job = {"id": "monitor-job", "name": "monitor", "deliver": "origin",
+               "origin": {"platform": "telegram", "chat_id": "123"}}
+        with patch("cron.scheduler.get_due_jobs", return_value=[job]), \
+             patch("cron.scheduler.run_job", return_value=(True, "# output", "Results", None)) as run_mock, \
+             patch("cron.scheduler._briefing_silence", return_value=("day8", False)) as sil_mock, \
+             patch("cron.scheduler.save_job_output", return_value="/tmp/out.md"), \
+             patch("cron.scheduler._deliver_result") as deliver_mock, \
+             patch("cron.scheduler.mark_job_run"):
+            from cron.scheduler import tick
+            tick(verbose=False)
+        run_mock.assert_called_once()
+        sil_mock.assert_not_called()
+
+
 class TestBuildJobPromptSilentHint:
     """Verify _build_job_prompt always injects [SILENT] guidance."""
 

@@ -2301,6 +2301,30 @@ def tick(verbose: bool = True, adapters=None, loop=None) -> int:
                 # One-shot jobs are left alone so they can retry on restart.
                 advance_next_run(job["id"])
 
+                # Artemis P-0714-03: a silent-gap briefing day emits only the
+                # [SILENT] marker, and the silence tier is a deterministic
+                # function of the user's Slack-inbound clock (compute-silence-
+                # tier.py) — computable BEFORE any LLM call. So skip the whole
+                # briefing spawn rather than pay for a full session whose only
+                # instructed output is [SILENT]. Only artemis-briefing jobs carry
+                # a tier; speak=False is a non-check-in silent day (day1/5/8
+                # non-entry). Fail-open: _briefing_silence returns speak=True on
+                # any read error, so an unreadable clock never wrongly skips.
+                # Mirrors a normal [SILENT] day's bookkeeping (output saved,
+                # run marked, counted) minus the spawn.
+                if _is_briefing_job(job):
+                    _sil_tier, _sil_speak = _briefing_silence(job)
+                    if _sil_speak is False:
+                        save_job_output(job["id"], SILENT_MARKER)
+                        logger.info(
+                            "Job '%s': silent-gap briefing day (tier=%s) — skipping "
+                            "spawn, emitting %s without an LLM session (P-0714-03)",
+                            job["id"], _sil_tier, SILENT_MARKER,
+                        )
+                        mark_job_run(job["id"], True, None)
+                        executed += 1
+                        continue
+
                 success, output, final_response, error = run_job(job)
 
                 output_file = save_job_output(job["id"], output)
