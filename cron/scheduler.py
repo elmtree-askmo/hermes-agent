@@ -435,6 +435,47 @@ def _voice_scan_check(text: str, job_id: str = "?") -> tuple[bool, str]:
     return True, ""
 
 
+# step-0 output contract's one required field — the discriminator that tells
+# a briefing package apart from any other JSON object in the output (drafts,
+# examples). The whole-parse gate and the spillover salvage both key on it.
+_STEP0_REQUIRED_KEY = "coaches_take"
+
+
+def _salvage_step0_json(raw: str) -> tuple[dict | None, int]:
+    """Salvage the step-0 JSON from output polluted by reasoning spillover.
+
+    A degraded provider call (slow, reasoning-heavy) sometimes writes its
+    analysis narration into the content channel before the final JSON
+    (observed live 2026-07-08/09 — ~5% of briefing runs, only on degraded
+    calls), which fails the whole-string parse and silently replaced the
+    day's briefing with the quiet-day fallback. Scan every "{" with an
+    incremental decoder and keep the LAST parseable object carrying a
+    non-empty coaches_take — the narration may contain earlier DRAFT
+    objects, and drafts precede the final answer. Only field VALUES are
+    ever extracted, so narration can never leak into delivery.
+
+    Returns (obj, start_offset), or (None, -1) when nothing qualifies —
+    the caller falls back to the Phase-5 path unchanged (which also keeps
+    the bare [SILENT] marker contract intact: no object, no salvage).
+    """
+    decoder = json.JSONDecoder()
+    best, best_at, idx = None, -1, 0
+    while True:
+        start = raw.find("{", idx)
+        if start == -1:
+            break
+        try:
+            obj, end = decoder.raw_decode(raw, start)
+        except json.JSONDecodeError:
+            idx = start + 1  # not an object here — keep scanning
+            continue
+        take = obj.get(_STEP0_REQUIRED_KEY) if isinstance(obj, dict) else None
+        if isinstance(take, str) and take.strip():
+            best, best_at = obj, start
+        idx = end  # jump past the whole object
+    return best, best_at
+
+
 def _parse_step0_output(text: str, job_id: str = "?") -> dict | None:
     """Parse step-0's structured JSON output (S-0626-02 Plan C).
 
@@ -442,7 +483,9 @@ def _parse_step0_output(text: str, job_id: str = "?") -> dict | None:
     {coaches_take, opener, response_window_checkin} directly — no decide LLM.
     Returns the dict (with opener / response_window_checkin defaulted to None
     when absent), or None on any parse failure so the caller falls back to the
-    Phase-5 voice-scan path on the raw output.
+    Phase-5 voice-scan path on the raw output. Tolerated deviations, in order:
+    a ```json code fence (stripped), then a reasoning-spillover narration
+    prefix (salvaged — see :func:`_salvage_step0_json`).
     """
     raw = (text or "").strip()
     if not raw:
@@ -452,9 +495,16 @@ def _parse_step0_output(text: str, job_id: str = "?") -> dict | None:
     try:
         pkg = json.loads(raw)
     except json.JSONDecodeError:
-        logger.info("Job '%s': step-0 output not JSON — Phase 5 fallback", job_id)
-        return None
-    if not isinstance(pkg, dict) or not pkg.get("coaches_take"):
+        pkg, at = _salvage_step0_json(raw)
+        if pkg is None:
+            logger.info("Job '%s': step-0 output not JSON — Phase 5 fallback", job_id)
+            return None
+        logger.warning(
+            "Job '%s': step-0 reasoning spillover — salvaged JSON at offset %d "
+            "of %d chars (non-JSON prefix discarded)",
+            job_id, at, len(raw),
+        )
+    if not isinstance(pkg, dict) or not pkg.get(_STEP0_REQUIRED_KEY):
         logger.info("Job '%s': step-0 JSON missing coaches_take — Phase 5 fallback", job_id)
         return None
     pkg.setdefault("opener", None)
