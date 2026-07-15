@@ -633,6 +633,30 @@ def _briefing_deliverable(
 # means the next day's run produces a fresh one; the user has already
 # received the briefing.
 
+def _user_local_now(user_id: str) -> datetime:
+    """Now, on the user's local calendar. UTC when slack_tz.txt is absent/bad.
+
+    Artemis S-0715-01: the daily job-match artifact is dated on the user's local
+    day, so every reader of it must resolve "today" the same way. Mirrors the
+    Artemis-side `_user_tz` — one `slack_tz.txt`, one basis; the briefing
+    reconciler already derives this job's 9am-local schedule from the same file.
+    """
+    now = datetime.now(timezone.utc)
+    try:
+        name = (
+            get_hermes_home() / "artemis" / user_id / "slack_tz.txt"
+        ).read_text(encoding="utf-8").strip()
+    except OSError:
+        return now
+    if not name:
+        return now
+    try:
+        from zoneinfo import ZoneInfo  # noqa: PLC0415 — stdlib, import where used
+        return now.astimezone(ZoneInfo(name))
+    except Exception:
+        return now
+
+
 def _is_briefing_job(job: dict) -> bool:
     """True for artemis-briefing cron jobs (the only writer of the
     persisted-briefing store today). Skills list is the canonical marker;
@@ -961,7 +985,14 @@ def _render_job_cards_for_briefing(user_id: str, silence_tier: str | None = None
     if silence_tier not in (None, "engaged"):
         return None
     try:
-        today = datetime.now(timezone.utc).strftime("%Y%m%d")
+        # Artemis S-0715-01: the artifact is dated on the USER's local day, not
+        # UTC — same basis the Artemis-side seeder mints the id with. UTC dating
+        # made this read unsatisfiable for UTC+9 (9am-local fires at 00:00 UTC,
+        # looking for a date no prior firing could have written) and left UTC+8
+        # a 1h window between UTC midnight and the briefing. Falls back to UTC
+        # when slack_tz.txt is absent/unreadable — the same fallback the briefing
+        # reconciler uses when scheduling this job.
+        today = _user_local_now(user_id).strftime("%Y%m%d")
         artifact_path = (
             get_hermes_home() / "artemis" / user_id / "jobs" / f"job-match-{today}.json"
         )
