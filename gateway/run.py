@@ -3103,18 +3103,39 @@ class GatewayRunner:
                         # then bridge) is Coach's per SOUL.md § Juncture A/B/Pause.
                         from agent.post_submission_bridge import (
                             detect_next_queued_role,
+                            detect_submit_unrecorded,
                             render_post_submission_bridge_block,
+                            render_submit_unrecorded_block,
                         )
-                        _psb_role = detect_next_queued_role(_ms_user_dir)
-                        if _psb_role:
-                            _psb_block = render_post_submission_bridge_block(_psb_role)
-                            if _psb_block:
-                                context_prompt = context_prompt + "\n" + _psb_block
+                        # Artemis B-0715-02 — submit-not-recorded guard. When the
+                        # submit report did NOT advance the ledger (abbreviated /
+                        # unmatched employer name) yet a materials_ready record
+                        # exists, the bridge would fire and Coach would confirm a
+                        # submit that was never recorded. Inject a "don't confirm,
+                        # ask which role" block INSTEAD of the bridge — the two
+                        # carry conflicting instructions, and reconciling the
+                        # unrecorded submit takes priority over teeing up the next.
+                        _sur_role = detect_submit_unrecorded(_ms_user_text, _ms_user_dir)
+                        if _sur_role:
+                            _sur_block = render_submit_unrecorded_block(_sur_role)
+                            if _sur_block:
+                                context_prompt = context_prompt + "\n" + _sur_block
                                 logger.info(
-                                    "post-submission bridge injected: chat=%s role=%s",
+                                    "submit-unrecorded guard injected: chat=%s role=%s",
                                     source.chat_id or "unknown",
-                                    _psb_role["id"],
+                                    _sur_role["id"],
                                 )
+                        else:
+                            _psb_role = detect_next_queued_role(_ms_user_dir)
+                            if _psb_role:
+                                _psb_block = render_post_submission_bridge_block(_psb_role)
+                                if _psb_block:
+                                    context_prompt = context_prompt + "\n" + _psb_block
+                                    logger.info(
+                                        "post-submission bridge injected: chat=%s role=%s",
+                                        source.chat_id or "unknown",
+                                        _psb_role["id"],
+                                    )
 
                     # Artemis S-0622-04 Phase 2 — interview / outcome advance.
                     # Independent of the submit gate above (an interview/result

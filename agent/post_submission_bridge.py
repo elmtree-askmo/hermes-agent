@@ -29,6 +29,63 @@ _DELIVER_PREFIX = "deliver-"
 _DELIVER_SUFFIX = "-materials"
 
 
+def detect_submit_unrecorded(text: str | None, user_dir: Path) -> dict[str, Any] | None:
+    """Return the bridge role when a submit report was NOT recorded, else None.
+
+    Artemis B-0715-02. The divergence this guards: on one turn ``detect_submit``
+    can fail its strict segment-bounded company match (e.g. the user names an
+    application by an abbreviation — "BVARI" for
+    ``boston-va-research-institute-inc-bvari``) so the ledger is NOT advanced, yet
+    the post-submission bridge fires on any ``materials_ready`` record regardless.
+    Coach then sees a next-role signal with no signal that the submit itself went
+    unrecorded, and confirms a submit the ledger never made.
+
+    Fires only on the exact divergence condition — all three must hold:
+      1. the user reported a completion (``user_reported_completion``),
+      2. ``detect_submit`` returned None (no application was advanced), and
+      3. the bridge fired (a ``materials_ready`` record exists to bridge to).
+
+    This is precisely the state where the bridge advances but the ledger doesn't; a
+    normal recorded submit (``detect_submit`` matched) and a stray non-submit
+    mention (no ``materials_ready`` record) both skip it. Returns the bridge role
+    (same ``{"id", "company_label"}`` shape as ``detect_next_queued_role``) so the
+    render can name the role in the "which one?" ask; None otherwise. Fail-safe: a
+    missing / corrupt ledger flows through the callees' None, never raises.
+    """
+    from agent.milestone_detector import detect_submit, user_reported_completion
+
+    if not user_reported_completion(text):
+        return None
+    if detect_submit(text, user_dir) is not None:
+        return None
+    return detect_next_queued_role(user_dir)
+
+
+def render_submit_unrecorded_block(role: dict[str, Any] | None) -> str:
+    """Render the system-prompt injection block for an unrecorded submit.
+
+    Returns "" when role is None. The block tells Coach the submit was NOT logged
+    (the named employer didn't match a tracked application) and to ask which role /
+    ask the user to name the employer so it can be recorded — explicitly NOT to
+    confirm the submit as done. Additive to the turn; when this fires the bridge
+    block is also present, so this instruction must win: don't bridge-and-confirm,
+    reconcile the unrecorded submit first.
+    """
+    if not role:
+        return ""
+    label = role.get("company_label") or "the role they named"
+    return (
+        "\n**Submit not recorded — do NOT confirm it.** The user reported "
+        "submitting an application, but it did NOT match a tracked application, so "
+        "nothing was logged as submitted. Their only drafted-and-ready application "
+        f"is {label}. Do NOT confirm or congratulate the submit as done — you would "
+        "be affirming a state change that did not happen. Instead, ask which role "
+        f"they mean (name {label} as the likely one) or ask them to give the full "
+        "employer name so it can be recorded. Keep it to a short, natural check — "
+        "one question, no list, no celebration."
+    )
+
+
 def detect_next_queued_role(user_dir: Path) -> dict[str, Any] | None:
     """Return the next materials_ready application to bridge to, or None.
 
