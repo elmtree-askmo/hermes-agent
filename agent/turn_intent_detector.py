@@ -503,21 +503,37 @@ def build_archive_index(archive: Any) -> list[dict[str, Any]]:
     passes the result to `detect_turn_intent(archive_index=...)`, so the
     detector can resolve a directed surface_existing pull to specific ids.
 
-    Candidate set = sub-agent-attributed + non-empty summary. **NOT 24h-gated**
-    — a directed pull may name an older item (the user explicitly asked for
-    it), matching the helper's directed collector (`_collect_surfaceable_by_ids`),
-    which also ignores the recency window. Emits only the fields the detector
-    needs to select: `id`, `sub_agent`, `artifact_name` (None when absent) —
-    not summaries, keeping the prompt bounded.
+    Candidate set = sub-agent-attributed + non-empty summary + not retired
+    (retired tombstones are withdrawn bookkeeping — a directed pull must not
+    resolve to one). **NOT 24h-gated** — a directed pull may name an older
+    item (the user explicitly asked for it), matching the helper's directed
+    collector (`_collect_surfaceable_by_ids`), which also ignores the recency
+    window. Emits only the fields the detector needs to select: `id`,
+    `sub_agent`, `artifact_name` (None when absent) — not summaries, keeping
+    the prompt bounded.
+
+    Family dedup (Artemis P-0716-04): the daily job-match entry and the
+    per-entity scout rechecks are server-injected stable generators — left
+    unfiltered they crowd the index (~93 of ~130 lines on a 2.5-month
+    account) and grow it daily, a per-turn prompt tax that scales with
+    account age. Keep the LATEST job-match (jobs re-delivery reads the
+    newest artifact) and the latest recheck per entity id (older rechecks
+    are superseded by the entity's newer state). Archive is append-only
+    chronological, so latest = last occurrence. Real work is never deduped.
+    Same family rule as the Coach get_strategy archive view, so the two
+    surfaces resolve the same set.
     """
     if not isinstance(archive, list):
         return []
-    out: list[dict[str, Any]] = []
-    for item in archive:
+    candidates: list[tuple[int, str, dict[str, Any]]] = []
+    family_last: dict[str, int] = {}
+    for pos, item in enumerate(archive):
         if not isinstance(item, dict):
             continue
         iid = item.get("id")
         if not isinstance(iid, str) or not iid:
+            continue
+        if item.get("status") == "retired":
             continue
         sub_agent = item.get("sub_agent")
         if sub_agent not in _VALID_SUB_AGENTS:
@@ -528,12 +544,23 @@ def build_archive_index(archive: Any) -> list[dict[str, Any]]:
         artifact_name = item.get("artifact_name")
         if not isinstance(artifact_name, str) or not artifact_name:
             artifact_name = None
-        out.append({
+        if iid.startswith("job-match-"):
+            family = "job-match"
+        elif iid.startswith("scout-recheck-"):
+            family = iid
+        else:
+            family = None
+        if family is not None:
+            family_last[family] = pos  # last occurrence wins
+        candidates.append((pos, family, {
             "id": iid,
             "sub_agent": sub_agent,
             "artifact_name": artifact_name,
-        })
-    return out
+        }))
+    return [
+        entry for pos, family, entry in candidates
+        if family is None or family_last[family] == pos
+    ]
 
 
 def _normalize_dispatches(raw_dispatches: Any) -> list[dict[str, Any]]:

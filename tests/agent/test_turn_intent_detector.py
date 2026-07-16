@@ -1733,6 +1733,57 @@ class TestBuildArchiveIndex:
         assert tid.build_archive_index(None) == []
         assert tid.build_archive_index("nope") == []
 
+    # -- family dedup (Artemis P-0716-04): daily job-match + per-entity scout
+    # rechecks are stable generators that crowd the index (measured 96/130
+    # lines on a 2.5-month account) and grow it daily. Keep the latest
+    # job-match and the latest recheck per entity — archive is append-only
+    # chronological, so "latest" = last occurrence. Real work is never
+    # deduped; a directed pull for an older machinery row degrades to the
+    # Coach conversational path (whose view applies the same family rule).
+
+    def test_keeps_only_latest_job_match(self):
+        archive = [
+            _ai_item("job-match-20260714", "scout", "3 roles matched."),
+            _ai_item("real-work", "publicist", "Draft ready."),
+            _ai_item("job-match-20260715", "scout", "2 roles matched."),
+            _ai_item("job-match-20260716", "scout", "4 roles matched."),
+        ]
+        idx = tid.build_archive_index(archive)
+        assert [i["id"] for i in idx] == ["real-work", "job-match-20260716"]
+
+    def test_keeps_latest_recheck_per_entity(self):
+        archive = [
+            _ai_item("scout-recheck-anthropic", "scout", "Old state.", hours_ago=48),
+            _ai_item("scout-recheck-waymo", "scout", "Waymo state."),
+            _ai_item("scout-recheck-anthropic", "scout", "New state.", hours_ago=1),
+        ]
+        idx = tid.build_archive_index(archive)
+        assert [i["id"] for i in idx] == ["scout-recheck-waymo", "scout-recheck-anthropic"]
+        # last occurrence wins — the survivor is the newer recheck
+        assert len([i for i in idx if i["id"] == "scout-recheck-anthropic"]) == 1
+
+    def test_real_work_never_deduped(self):
+        archive = [
+            _ai_item("tailor-resume-acme", "publicist", "Acme packet."),
+            _ai_item("research-agencies", "scout", "Agency list."),
+            _ai_item("tailor-resume-globex", "publicist", "Globex packet."),
+        ]
+        idx = tid.build_archive_index(archive)
+        assert [i["id"] for i in idx] == [
+            "tailor-resume-acme", "research-agencies", "tailor-resume-globex"]
+
+    def test_drops_retired_entries(self):
+        # retired tombstones carry sub_agent + summary, so the candidate
+        # filter alone admits them — but they are withdrawn bookkeeping the
+        # Coach view hides; a directed pull must not resolve to one.
+        archive = [
+            {"id": "tailor-resume-old", "sub_agent": "publicist",
+             "summary": "withdrawn", "status": "retired"},
+            _ai_item("good", "analyst", "Has summary."),
+        ]
+        idx = tid.build_archive_index(archive)
+        assert [i["id"] for i in idx] == ["good"]
+
 
 # =========================================================================
 # render_progress_ledger_block (S-0626-02 — unconditional grounding for
