@@ -678,11 +678,33 @@ class GatewayRunner:
             # skip the memory toolset entirely when both are disabled.
             try:
                 from hermes_cli.config import load_config as _flush_load_cfg
-                _flush_cfg = _flush_load_cfg().get("memory", {})
+                _cfg = _flush_load_cfg()
+                _flush_cfg = _cfg.get("memory", {})
+                _skills_cfg = _cfg.get("skills", {})
             except Exception:
                 _flush_cfg = {}
+                _skills_cfg = None
             _mem_enabled = _flush_cfg.get("memory_enabled", True)
             _user_enabled = _flush_cfg.get("user_profile_enabled", True)
+            # skill_manage defaults to disabled when config loaded cleanly
+            # (mirrors skill_manager_tool's runtime gate); on a config load
+            # failure fall open and let the flush proceed as before.
+            _skill_manage_enabled = (
+                True
+                if _skills_cfg is None
+                else _skills_cfg.get("skill_manage_enabled", False)
+            )
+            # The flush agent has exactly three write paths: memory, user
+            # profile, and skill_manage. With all three disabled the run
+            # reads the whole transcript into an LLM call and is guaranteed
+            # to write nothing — skip it entirely.
+            if not (_mem_enabled or _user_enabled or _skill_manage_enabled):
+                logger.info(
+                    "Skipping memory flush for session %s: all flush targets "
+                    "disabled (memory, user_profile, skill_manage)",
+                    old_session_id,
+                )
+                return
             _flush_toolsets = ["skills"]
             if _mem_enabled or _user_enabled:
                 _flush_toolsets.insert(0, "memory")
