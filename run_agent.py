@@ -474,6 +474,7 @@ class AIAgent:
         platform: str = None,
         user_id: str = None,
         skip_context_files: bool = False,
+        load_soul_identity: bool = False,
         skip_memory: bool = False,
         session_db=None,
         parent_session_id: str = None,
@@ -523,6 +524,10 @@ class AIAgent:
             skip_context_files (bool): If True, skip auto-injection of SOUL.md, AGENTS.md, and .cursorrules
                 into the system prompt. Use this for batch processing and data generation to avoid
                 polluting trajectories with user-specific persona or project instructions.
+            load_soul_identity (bool): If True, load SOUL.md as the agent identity even when
+                skip_context_files=True — drops repo-context files (.hermes.md / AGENTS.md /
+                .cursorrules) while keeping the operator-authored identity. Mirrors the upstream
+                cron-session split. No effect when skip_context_files=False (SOUL loads anyway).
         """
         _install_safe_stdio()
 
@@ -545,6 +550,7 @@ class AIAgent:
         self._print_fn = None
         self.background_review_callback = None  # Optional sync callback for gateway delivery
         self.skip_context_files = skip_context_files
+        self.load_soul_identity = load_soul_identity
         self.pass_session_id = pass_session_id
         self.persist_session = persist_session
         self._credential_pool = credential_pool
@@ -2607,9 +2613,10 @@ class AIAgent:
         #   6. Current date & time (frozen at build time)
         #   7. Platform-specific formatting hint
 
-        # Try SOUL.md as primary identity (unless context files are skipped)
+        # Try SOUL.md as primary identity (unless context files are skipped —
+        # load_soul_identity keeps it even then; repo-context files stay skipped)
         _soul_loaded = False
-        if not self.skip_context_files:
+        if not self.skip_context_files or self.load_soul_identity:
             _soul_content = load_soul_md(user_id=self._user_id)
             if _soul_content:
                 prompt_parts = [_soul_content]

@@ -1956,6 +1956,33 @@ def _build_job_prompt(job: dict) -> str:
     return "\n".join(parts)
 
 
+def _job_slim_context(job: dict) -> bool:
+    """Per-job opt-in to a slim system prompt (S-0721-01).
+
+    True only when the job record carries ``skip_repo_context: true`` — the
+    session is then built with ``skip_context_files=True`` +
+    ``load_soul_identity=True``: repo-context files (.hermes.md / AGENTS.md /
+    .cursorrules) are dropped while SOUL.md identity is kept. Jobs without
+    the field keep today's full prompt.
+    """
+    return bool(job.get("skip_repo_context"))
+
+
+def _job_enabled_toolsets(job: dict) -> Optional[list]:
+    """Per-job toolset allowlist (S-0721-01).
+
+    Returns the job's ``enabled_toolsets`` list when present and non-empty,
+    else None (AIAgent loads the full default set — legacy behavior). The
+    field is operator/seeder-authored, so it is passed through verbatim; MCP
+    servers are addressed by their raw server name (each connected server is
+    registered as a same-named toolset).
+    """
+    value = job.get("enabled_toolsets")
+    if isinstance(value, list) and value:
+        return [str(v) for v in value]
+    return None
+
+
 def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
     """
     Execute a single cron job.
@@ -2126,8 +2153,13 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
             providers_ignored=pr.get("ignore"),
             providers_order=pr.get("order"),
             provider_sort=pr.get("sort"),
+            enabled_toolsets=_job_enabled_toolsets(job),
             disabled_toolsets=["cronjob", "messaging", "clarify"],
             quiet_mode=True,
+            # S-0721-01: slim-context jobs drop repo-context files but keep
+            # SOUL.md identity; field-less jobs build today's full prompt.
+            skip_context_files=_job_slim_context(job),
+            load_soul_identity=_job_slim_context(job),
             skip_memory=True,  # Cron system prompts would corrupt user representations
             platform="cron",
             session_id=_cron_session_id,
