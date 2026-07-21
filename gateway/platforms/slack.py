@@ -292,6 +292,9 @@ class SlackAdapter(BasePlatformAdapter):
             # Both ack in the same thread as the card.
             self._app.action("job_save")(self._handle_job_save)
             self._app.action("job_skip")(self._handle_job_skip)
+            # View is a url button (opens client-side); the handler just acks
+            # and appends to ~/.hermes/artemis/<user_id>/job-clicks.jsonl.
+            self._app.action("job_view")(self._handle_job_view)
 
             # Start Socket Mode handler in background
             self._handler = AsyncSocketModeHandler(self._app, app_token)
@@ -1559,6 +1562,60 @@ class SlackAdapter(BasePlatformAdapter):
             await self._get_client(channel_id).chat_postMessage(**ack_kwargs)
         except Exception as exc:
             logger.warning("[Slack] job_card_skip ack post failed: %s", exc)
+
+    async def _handle_job_view(self, ack, body, action) -> None:
+        """View click — append a click row to ~/.hermes/artemis/<user_id>/
+        job-clicks.jsonl. The url button opens the posting client-side; this
+        handler only acks (silencing bolt's unhandled-request warning) and
+        records the click. No thread reply, no dedup — repeat views are signal.
+
+        The button value carries the same JSON payload as Save (job_id/title/
+        company/location/url) so each row is self-contained; a non-JSON value
+        is a card rendered before the payload change and is treated as a bare
+        job_id.
+        """
+        await ack()
+        user_id = (body.get("user") or {}).get("id", "")
+        raw_value = action.get("value", "")
+        try:
+            payload = json.loads(raw_value)
+        except (TypeError, ValueError):
+            payload = None
+        if isinstance(payload, dict):
+            job_id = payload.get("job_id", "")
+            job_fields = {
+                k: payload.get(k, "")
+                for k in ("title", "company", "location", "url")
+            }
+        else:
+            job_id = raw_value
+            job_fields = {}
+        if not (user_id and job_id):
+            logger.warning("[Slack] job_card_view: missing user_id / job_id")
+            return
+
+        try:
+            from datetime import datetime, timezone
+            from hermes_constants import get_hermes_home
+
+            clicks_path = (
+                get_hermes_home() / "artemis" / user_id / "job-clicks.jsonl"
+            )
+            clicks_path.parent.mkdir(parents=True, exist_ok=True)
+            clicked_at = (
+                datetime.now(timezone.utc)
+                .isoformat(timespec="microseconds")
+                .replace("+00:00", "Z")
+            )
+            row = json.dumps(
+                {"job_id": job_id, **job_fields, "clicked_at": clicked_at},
+                ensure_ascii=False,
+            )
+            with clicks_path.open("a", encoding="utf-8") as f:
+                f.write(row + "\n")
+            logger.info("[Slack] job_card_view: user=%s job=%s", user_id, job_id)
+        except Exception as exc:
+            logger.error("[Slack] job_card_view handler failed: %s", exc, exc_info=True)
 
     # ----- Thread context fetching -----
 

@@ -268,3 +268,72 @@ class TestJobCardSkip:
         entries = json.loads(path.read_text())
         assert len(entries) == 1
         assert entries[0]["job_id"] == "job-B"
+
+
+class TestJobCardView:
+    @pytest.mark.asyncio
+    async def test_appends_full_click_row(self, hermes_home):
+        """View click → ack + one self-contained jsonl row; no thread reply (silent)."""
+        adapter = _make_adapter()
+        adapter._team_clients["T1"].chat_postMessage = AsyncMock()
+        ack = AsyncMock()
+
+        action = {"action_id": "job_view", "value": _save_value("job-A")}
+        await adapter._handle_job_view(ack, _click_body(), action)
+        ack.assert_called_once()
+
+        path = hermes_home / "artemis" / "U0FIXTURE01" / "job-clicks.jsonl"
+        assert path.exists()
+        rows = [json.loads(l) for l in path.read_text().splitlines()]
+        assert len(rows) == 1
+        assert rows[0]["job_id"] == "job-A"
+        assert rows[0]["title"] == "Senior PM"
+        assert rows[0]["company"] == "Plaid"
+        assert rows[0]["location"] == "SF, CA"
+        assert rows[0]["url"] == "https://plaid.com/x"
+        assert rows[0]["clicked_at"].endswith("Z")
+
+        adapter._team_clients["T1"].chat_postMessage.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_legacy_plain_value_falls_back_to_job_id(self, hermes_home):
+        """Cards rendered before the payload change carry a bare job_id string."""
+        adapter = _make_adapter()
+        ack = AsyncMock()
+
+        action = {"action_id": "job_view", "value": "job-A"}
+        await adapter._handle_job_view(ack, _click_body(), action)
+
+        path = hermes_home / "artemis" / "U0FIXTURE01" / "job-clicks.jsonl"
+        rows = [json.loads(l) for l in path.read_text().splitlines()]
+        assert len(rows) == 1
+        assert rows[0]["job_id"] == "job-A"
+        assert rows[0]["clicked_at"].endswith("Z")
+
+    @pytest.mark.asyncio
+    async def test_repeat_clicks_append(self, hermes_home):
+        """Every click is a row — no dedup; repeat views are signal."""
+        adapter = _make_adapter()
+        ack = AsyncMock()
+
+        action = {"action_id": "job_view", "value": _save_value("job-A")}
+        await adapter._handle_job_view(ack, _click_body(), action)
+        await adapter._handle_job_view(ack, _click_body(), action)
+
+        path = hermes_home / "artemis" / "U0FIXTURE01" / "job-clicks.jsonl"
+        rows = [json.loads(l) for l in path.read_text().splitlines()]
+        assert len(rows) == 2
+
+    @pytest.mark.asyncio
+    async def test_missing_ids_swallowed(self, hermes_home):
+        """No user_id or empty value → ack still called, nothing written, no raise."""
+        adapter = _make_adapter()
+        ack = AsyncMock()
+
+        await adapter._handle_job_view(ack, _click_body(user_id=""), {"action_id": "job_view", "value": _save_value("job-A")})
+        await adapter._handle_job_view(ack, _click_body(), {"action_id": "job_view", "value": ""})
+        await adapter._handle_job_view(ack, _click_body(), {"action_id": "job_view", "value": json.dumps({"title": "no id"})})
+        assert ack.call_count == 3
+
+        path = hermes_home / "artemis" / "U0FIXTURE01" / "job-clicks.jsonl"
+        assert not path.exists()
