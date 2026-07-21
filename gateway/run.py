@@ -3786,6 +3786,45 @@ class GatewayRunner:
                     "failed": False,
                     "skipped_reason": _sc_reason,
                 }
+                # P-0721-01 (Artemis): skipping the agent means pre_llm_call
+                # never fires, so neither the invoke_agent trace root nor the
+                # trace_index row is minted — the turn is invisible in
+                # user-turn metrics and its aux generations orphan as
+                # misnamed, userless traces. Mint both here (each a no-op on
+                # failure; identity comes from the session ContextVars).
+                try:
+                    import sys as _sc_sys
+                    # Must be the SAME module instance the plugin manager
+                    # loaded (hermes_plugins.otel) — a direct
+                    # `from plugins.observability.otel import ...` builds a
+                    # second instance with its own tracer and turn-context
+                    # registry, so the minted root would be invisible to the
+                    # aux emissions flowing through the loaded instance.
+                    _sc_otel_mod = _sc_sys.modules.get("hermes_plugins.otel")
+                    _sc_mint_root = getattr(
+                        _sc_otel_mod, "record_short_circuit_turn", None
+                    )
+                    if _sc_mint_root is not None:
+                        _sc_mint_root(
+                            session_id=session_entry.session_id,
+                            lane=_sc_reason,
+                            user_prompt=message_text,
+                            reply_text=_sc_synthetic_text or None,
+                        )
+                except Exception as _sc_otel_err:  # noqa: BLE001
+                    logger.debug(
+                        "short-circuit turn-span mint failed: %s", _sc_otel_err
+                    )
+                try:
+                    from agent.trace_index import record_turn as _sc_record_turn
+                    _sc_record_turn(
+                        session_entry.session_id,
+                        platform=source.platform.value if source.platform else None,
+                    )
+                except Exception as _sc_ti_err:  # noqa: BLE001
+                    logger.debug(
+                        "short-circuit trace_index record failed: %s", _sc_ti_err
+                    )
             else:
                 agent_result = await self._run_agent(
                     message=message_text,

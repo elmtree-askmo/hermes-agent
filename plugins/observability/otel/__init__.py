@@ -506,6 +506,46 @@ on_session_finalize = _end_turn
 on_session_reset = _end_turn
 
 
+def record_short_circuit_turn(
+    *,
+    session_id: str | None,
+    lane: str,
+    user_prompt: str | None = None,
+    reply_text: str | None = None,
+) -> None:
+    """Mint the turn root span for a gateway short-circuit turn.
+
+    A short-circuit turn (surface_existing replay / multi lead-in — Artemis
+    P-0721-01) answers the user server-side and never reaches ``pre_llm_call``,
+    so the lazy ``invoke_agent`` root never opens. The turn's derived trace
+    (run-id generator) then exports only aux generations and displays named
+    after one of them (``aux:ack-emoji``) with no user — real user turns
+    invisible in user-turn metrics. Called by the gateway at the skip point:
+    emits the same ``turn_span`` the lazy path uses (trace name + ``user.id``
+    land on the trace), registers the parent context so post-reply aux
+    generations nest under it, and stamps the server-rendered reply as the
+    completion. No-op on any failure — observability must not break the turn.
+    """
+    emitter = _get_emitter()
+    if emitter is None:
+        return
+    try:
+        user_id, run_trace_id = _resolve_identity()
+        cm = emitter.turn_span(
+            session_id=session_id,
+            user_prompt=user_prompt,
+            user_id=user_id,
+            run_trace_id=run_trace_id,
+            extra={"hermes.turn_lane": lane},
+        )
+        span = cm.__enter__()
+        _remember_turn_context(run_trace_id, span)
+        emitter.stamp_completion(span, reply_text)
+        cm.__exit__(None, None, None)
+    except Exception:
+        logger.debug("record_short_circuit_turn: failed", exc_info=True)
+
+
 def on_pre_llm_call(**kwargs: Any) -> None:
     """Open the per-turn ``invoke_agent`` span and stamp the prompt.
 

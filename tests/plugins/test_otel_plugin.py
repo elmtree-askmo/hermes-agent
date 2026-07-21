@@ -1628,3 +1628,73 @@ class TestAuxLatencyBackfill:
             aux_task="x",
         )
         assert calls.get("start_time") is None
+
+
+class TestShortCircuitTurn:
+    """Artemis P-0721-01: a gateway short-circuit turn (surface_existing replay
+    / multi lead-in) answers the user server-side and never reaches
+    pre_llm_call — no invoke_agent root exports, so the turn's derived trace
+    shows up named after an aux generation with no user. The gateway calls
+    record_short_circuit_turn() at the skip point to mint the root."""
+
+    def test_mints_named_user_root_with_lane_and_reply(
+        self, exporter_and_tracer, monkeypatch
+    ):
+        monkeypatch.setenv("HERMES_OTEL_CAPTURE_CONTENT", "true")
+        monkeypatch.setenv("HERMES_SESSION_USER_ID", "U0SHORTCUT1")
+        monkeypatch.setenv("HERMES_TRACE_ID", "abc123def456")
+        exporter, tracer = exporter_and_tracer
+        plugin, provider = _fresh_plugin()
+        monkeypatch.setattr(provider, "build_tracer", lambda **_: tracer)
+
+        plugin.record_short_circuit_turn(
+            session_id="sess-sc",
+            user_prompt="can I see what the team found?",
+            reply_text=":mag: *Scout:* replayed products",
+            lane="surface_existing_short_circuit",
+        )
+
+        spans = exporter.get_finished_spans()
+        assert spans, "no root span exported for the short-circuit turn"
+        attrs = _by_name(spans)[OP_INVOKE_AGENT].attributes
+        assert attrs["user.id"] == "U0SHORTCUT1"
+        assert attrs["langfuse.user.id"] == "U0SHORTCUT1"
+        assert attrs["hermes.turn_lane"] == "surface_existing_short_circuit"
+        assert attrs.get("langfuse.trace.name")  # trace stops displaying as aux:*
+        assert attrs["gen_ai.prompt"] == "can I see what the team found?"
+        assert attrs["gen_ai.completion"] == ":mag: *Scout:* replayed products"
+
+    def test_later_aux_emission_parents_under_the_minted_root(
+        self, exporter_and_tracer, monkeypatch
+    ):
+        """The post-reply ack-emoji aux carries the turn's hermes trace id;
+        after the root is minted it must join as a child, not a sibling root."""
+        monkeypatch.setenv("HERMES_SESSION_USER_ID", "U0SHORTCUT1")
+        monkeypatch.setenv("HERMES_TRACE_ID", "abc123def456")
+        exporter, tracer = exporter_and_tracer
+        plugin, provider = _fresh_plugin()
+        monkeypatch.setattr(provider, "build_tracer", lambda **_: tracer)
+
+        plugin.record_short_circuit_turn(
+            session_id="sess-sc",
+            user_prompt="show me",
+            reply_text="replayed",
+            lane="multi_lead_in_short_circuit",
+        )
+        ctx = _FakeCtx()
+        plugin.register(ctx)
+        ctx.hooks["post_api_request"](
+            session_id="aux-sess",
+            model="gemini-flash",
+            aux_task="ack-emoji",
+            hermes_trace_id="abc123def456",
+            api_duration=0.4,
+        )
+
+        spans = exporter.get_finished_spans()
+        by_name = {s.name: s for s in spans}
+        root = _by_name(spans)[OP_INVOKE_AGENT]
+        aux = by_name.get("aux:ack-emoji")
+        assert aux is not None, [s.name for s in spans]
+        assert aux.context.trace_id == root.context.trace_id
+        assert aux.parent is not None and aux.parent.span_id == root.context.span_id
