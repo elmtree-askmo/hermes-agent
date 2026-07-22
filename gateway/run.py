@@ -2957,6 +2957,7 @@ class GatewayRunner:
                 # that seed only the profile).
                 _cs_legacy_pushed = False
                 _cs_has_goal = False
+                _cs_profile = None
                 try:
                     _cs_pp = _cs_user_dir / "profile.json"
                     if _cs_pp.exists():
@@ -3038,6 +3039,22 @@ class GatewayRunner:
                         "cold-start onboarding block injected: chat=%s sharpen=%s",
                         source.chat_id or "unknown",
                         _onb_dispatch_type or "none-bound",
+                    )
+                else:
+                    # B-0721-01: onboarded counterpart of the cold-start block
+                    # — deterministic returning-user grounding so a skipped
+                    # get_user_profile call can't read as first-contact (full
+                    # rationale: agent/onboarded_grounding.py docstring).
+                    # _cs_profile stays None when profile.json is missing or
+                    # unreadable — the grounding floor renders regardless.
+                    from agent.onboarded_grounding import (
+                        render_onboarded_grounding_block,
+                    )
+                    _og_block = render_onboarded_grounding_block(_cs_profile)
+                    context_prompt = context_prompt + "\n" + _og_block
+                    logger.info(
+                        "onboarded grounding block injected: chat=%s",
+                        source.chat_id or "unknown",
                     )
         except Exception as _cs_err:  # noqa: BLE001
             logger.debug("cold-start block injection failed: %s", _cs_err)
