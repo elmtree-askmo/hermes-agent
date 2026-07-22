@@ -225,3 +225,70 @@ class TestMem0Defaults:
         provider.initialize("test")
 
         assert provider._agent_id == "hermes"
+
+
+# ---------------------------------------------------------------------------
+# Prefetch sync fallback (gateway rebuilds agents per turn)
+# ---------------------------------------------------------------------------
+
+
+class TestMem0PrefetchSyncFallback:
+    """prefetch() with no queued result must fall back to a synchronous search
+    with the given query. Gateway agents are rebuilt per turn (per-turn
+    ephemeral prompt invalidates the agent cache), so a queued-prefetch result
+    stored on the previous turn's provider instance never survives — without
+    the fallback, memory auto-recall never fires in gateway mode."""
+
+    def _make_provider(self, monkeypatch, client):
+        provider = Mem0MemoryProvider()
+        provider.initialize("test-session")
+        provider._user_id = "u123"
+        monkeypatch.setattr(provider, "_get_client", lambda: client)
+        return provider
+
+    def test_prefetch_without_queue_runs_sync_search(self, monkeypatch):
+        client = FakeClientV2(search_results={
+            "results": [{"memory": "user prefers small teams"}]
+        })
+        provider = self._make_provider(monkeypatch, client)
+
+        result = provider.prefetch("what kind of team do I want")
+
+        assert "small teams" in result
+        assert result.startswith("## Mem0 Memory")
+        assert client.captured_search["query"] == "what kind of team do I want"
+        assert client.captured_search["filters"] == {"user_id": "u123"}
+
+    def test_prefetch_prefers_queued_result_over_sync(self, monkeypatch):
+        client = FakeClientV2(search_results={
+            "results": [{"memory": "queued fact"}]
+        })
+        provider = self._make_provider(monkeypatch, client)
+
+        provider.queue_prefetch("prior turn message")
+        provider._prefetch_thread.join(timeout=2)
+        client._search_results = {"results": [{"memory": "sync fact"}]}
+
+        result = provider.prefetch("current turn message")
+
+        assert "queued fact" in result
+        assert "sync fact" not in result
+
+    def test_prefetch_sync_fallback_empty_query_no_search(self, monkeypatch):
+        client = FakeClientV2(search_results={
+            "results": [{"memory": "should not appear"}]
+        })
+        provider = self._make_provider(monkeypatch, client)
+
+        result = provider.prefetch("")
+
+        assert result == ""
+        assert client.captured_search == {}
+
+    def test_prefetch_sync_fallback_no_results_returns_empty(self, monkeypatch):
+        client = FakeClientV2(search_results={"results": []})
+        provider = self._make_provider(monkeypatch, client)
+
+        result = provider.prefetch("anything")
+
+        assert result == ""

@@ -241,8 +241,33 @@ class Mem0MemoryProvider(MemoryProvider):
             result = self._prefetch_result
             self._prefetch_result = ""
         if not result:
+            # Gateway agents are rebuilt per turn (per-turn ephemeral prompt
+            # invalidates the agent cache), so a queued result stored on the
+            # previous turn's instance never survives — fall back to a
+            # synchronous search with the current query.
+            result = self._sync_prefetch(query)
+        if not result:
             return ""
         return f"## Mem0 Memory\n{result}"
+
+    def _sync_prefetch(self, query: str) -> str:
+        if not query or self._is_breaker_open():
+            return ""
+        try:
+            client = self._get_client()
+            results = self._unwrap_results(client.search(
+                query=query,
+                filters=self._read_filters(),
+                rerank=self._rerank,
+                top_k=5,
+            ))
+            self._record_success()
+            lines = [r.get("memory", "") for r in results if r.get("memory")]
+            return "\n".join(f"- {l}" for l in lines)
+        except Exception as e:
+            self._record_failure()
+            logger.debug("Mem0 sync prefetch failed: %s", e)
+            return ""
 
     def queue_prefetch(self, query: str, *, session_id: str = "") -> None:
         if self._is_breaker_open():
