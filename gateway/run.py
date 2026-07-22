@@ -3190,16 +3190,29 @@ class GatewayRunner:
                         advance_interview,
                         advance_outcome,
                     )
-                    _outcome = detect_outcome(_ms_user_text, _ms_user_dir)
+                    # B-0722-02: pass the same-turn turn-intent verdict as a
+                    # write veto — the keyword table can't see subject/negation
+                    # ("no thanks" wrote a false rejection). _detection may be
+                    # unbound when the turn-intent block was skipped; the
+                    # detector then falls back to named-company-only writes.
+                    try:
+                        _ms_ti = _detection
+                    except NameError:
+                        _ms_ti = None
+                    _outcome = detect_outcome(
+                        _ms_user_text, _ms_user_dir, turn_intent=_ms_ti,
+                    )
                     if _outcome:
                         if advance_outcome(
                             _ms_user_dir, _outcome["company"],
                             _outcome["result"], _ms_user_text,
                         ):
                             logger.info(
-                                "application outcome recorded: chat=%s company=%s result=%s",
+                                "application outcome recorded: chat=%s company=%s "
+                                "result=%s signal=%r match=%s",
                                 source.chat_id or "unknown",
                                 _outcome["company"], _outcome["result"],
+                                _outcome.get("signal"), _outcome.get("match"),
                             )
                     else:
                         # Outcome takes precedence (a result supersedes an interview

@@ -144,8 +144,9 @@ _COMPLETION_SIGNALS = (
 def user_reported_completion(text: str | None) -> bool:
     """True when the user's turn reads as reporting a just-completed application.
 
-    Deterministic substring match against ``_COMPLETION_SIGNALS`` (case-insensitive).
-    Gates the milestone affirm injection: only a completion-report turn injects +
+    Deterministic word-boundary match against ``_COMPLETION_SIGNALS``
+    (case-insensitive; B-0722-02 upgraded from bare substring). Gates the
+    milestone affirm injection: only a completion-report turn injects +
     marks, so a generic turn never burns an un-voiced tier. Conservative — an
     ambiguous turn returns False (the affirm waits for a clearer report), matching
     the "over-affirm fails safe toward silence" stance.
@@ -153,7 +154,7 @@ def user_reported_completion(text: str | None) -> bool:
     if not text or not isinstance(text, str):
         return False
     low = text.lower()
-    return any(sig in low for sig in _COMPLETION_SIGNALS)
+    return _match_signal(low, _COMPLETION_SIGNALS) is not None
 
 
 def mark_milestone_affirmed(user_dir: Path, tier: str) -> None:
@@ -199,14 +200,33 @@ _INTERVIEW_SIGNALS = (
     "screen", "phone screen", "interview", "interviewed", "got out of",
     "first round", "second round", "spoke with", "talked to",
 )
+# B-0722-02: "no thanks" pruned — it is the standard shape of the user
+# declining a Coach offer, never a rejection report on its own. The remaining
+# phrases stay as a broad recall prefilter; precision comes from word-boundary
+# matching (_match_signal) + the same-turn turn-intent verdict (detect_outcome).
 _OUTCOME_SIGNALS = {
     "rejected": (
         "said no", "passed on", "didn't get", "did not get", "not moving forward",
-        "moving forward with other", "rejected", "turned me down", "no thanks",
+        "moving forward with other", "rejected", "turned me down",
         "went with someone else",
     ),
 }
 _ACTIVE_STATUSES = frozenset({"submitted", "interviewed"})
+
+
+def _match_signal(low: str, signals) -> str | None:
+    """Word-boundary signal match; returns the matched phrase or None.
+
+    B-0722-02: bare `in` substring matching fired inside larger tokens —
+    "sunscreen"/"screenshot"/"screen-share" all matched the interview signal
+    "screen". A signal now only matches when not embedded in a longer
+    alphanumeric (or hyphenated) token on either side."""
+    for sig in signals:
+        if re.search(
+            r"(?<![a-z0-9-])" + re.escape(sig) + r"(?![a-z0-9-])", low
+        ):
+            return sig
+    return None
 
 # B-0628-02: weak company-noun segments a user routinely drops when naming a
 # company ("ikigai" for Ikigai Labs, "stripe" for Stripe Inc). When matching a
@@ -339,29 +359,71 @@ def detect_interview(text, user_dir: Path) -> dict | None:
     if not text or not isinstance(text, str):
         return None
     low = text.lower()
-    if not any(sig in low for sig in _INTERVIEW_SIGNALS):
+    if _match_signal(low, _INTERVIEW_SIGNALS) is None:
         return None
     company = _match_company(text, user_dir)
     return {"company": company} if company else None
 
 
-def detect_outcome(text, user_dir: Path) -> dict | None:
+def detect_outcome(
+    text, user_dir: Path, turn_intent: dict | None = None
+) -> dict | None:
     """Detect a user-reported terminal outcome and map it to a known application.
 
-    Returns {"company": <key>, "result": <result>} or None. This round only
-    `rejected` is produced (Maya scene-4's only outcome); the result value is open
-    for future outcomes without a code change here."""
+    Returns {"company", "result", "signal", "match"} or None (`signal` = the
+    matched phrase, `match` = "named" | "fallback" — both for the gateway's
+    audit log line). This round only `rejected` is produced (Maya scene-4's
+    only outcome); the result value is open for future outcomes without a code
+    change here.
+
+    B-0722-02 precision contract (this detector fabricated permanent false
+    rejections from casual chat — "no thanks" / "we said no big corps"):
+
+    - Signals match on word boundaries; the table is a broad recall prefilter,
+      NOT the precision layer — it cannot see subject, negation, or mood
+      ("i passed on X" vs "X passed on me").
+    - `turn_intent` is the same-turn turn-intent detector result (already
+      computed before this gate runs). When it ran (checked=True), its
+      `application_event` verdict gates the write: anything other than
+      "outcome" vetoes the keyword hit.
+    - The no-named-company fallback (most-recent active) is DOUBLE-KEYED: it
+      only runs when the verdict confirms an outcome report. Without a usable
+      verdict (aux LLM down), named hits fail open to pre-veto behavior, but
+      unnamed hits never guess: a missed outcome self-heals via the
+      response-window check-in, while a false one silently kills that same
+      check-in and — because the fallback pool excludes outcome-carrying
+      records — rotates to poison the next application.
+    """
     if not text or not isinstance(text, str):
         return None
     low = text.lower()
-    result = next(
-        (res for res, sigs in _OUTCOME_SIGNALS.items() if any(s in low for s in sigs)),
-        None,
-    )
+    result = None
+    signal = None
+    for res, sigs in _OUTCOME_SIGNALS.items():
+        signal = _match_signal(low, sigs)
+        if signal is not None:
+            result = res
+            break
     if result is None:
         return None
-    company = _match_company(text, user_dir)
-    return {"company": company, "result": result} if company else None
+    verdict = None
+    if isinstance(turn_intent, dict) and turn_intent.get("checked"):
+        raw = turn_intent.get("application_event")
+        verdict = raw if raw in ("none", "submit", "interview", "outcome") else "none"
+    # Named match first — empty fallback set makes this pass named-only.
+    company = _match_company(text, user_dir, fallback_statuses=frozenset())
+    if company:
+        if verdict is not None and verdict != "outcome":
+            return None
+        return {"company": company, "result": result,
+                "signal": signal, "match": "named"}
+    # Unnamed: most-recent guess only when the verdict confirms the report.
+    if verdict == "outcome":
+        company = _match_company(text, user_dir)
+        if company:
+            return {"company": company, "result": result,
+                    "signal": signal, "match": "fallback"}
+    return None
 
 
 def _write_applications_raw(user_dir: Path, records: list[dict]) -> None:

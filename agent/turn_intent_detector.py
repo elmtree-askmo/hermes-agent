@@ -348,6 +348,23 @@ work requests, confirmations, capability questions, and anything that
 dispatches. When unsure, set `false` — a missed check-in beat is milder
 than a forced one on a turn that didn't carry feeling.
 
+**ALSO set `application_event`** (one of "none" | "submit" | "interview"
+| "outcome"). Classifies whether the user's turn REPORTS a concrete
+application-lifecycle event that actually happened:
+  - "submit"    — the user says they submitted / sent off an application.
+  - "interview" — the user reports an interview or screen that happened
+    (or is booked).
+  - "outcome"   — the user reports the COMPANY'S decision on their
+    application (a rejection, an offer, "they went with someone else").
+Set "none" for everything else — especially: the user DECLINING a
+suggestion or offer ("no thanks", "i'll pass on that one"), hypotheticals
+and questions ("did they say no?"), negations ("they haven't rejected me
+yet"), feelings about the process ("i keep feeling rejected"), and any
+sentence where the subject of the verb is not the company deciding on
+the user's application. Independent of dispatch_type (a report turn is
+usually `none`-dispatch, but set this field on any dispatch type). When
+unsure, set "none".
+
 **ALSO set `affect_gate`** (one of "none" | "empathy_then_gate" |
 "empathy_direct"). This handles MIXED turns — a turn that carries strong
 affect (self-doubt loop, comparison spiral, acute hit) AND an explicit
@@ -394,6 +411,7 @@ Return STRICT JSON, no prose, no markdown fence:
   "user_action_required": true | false,
   "off_domain_no_fallback": true | false,
   "affect_report": true | false,
+  "application_event": "none" | "submit" | "interview" | "outcome",
   "affect_gate": "none" | "empathy_then_gate" | "empathy_direct",
   "direction_present": true | false,
   "confidence": "high|medium|low",
@@ -653,6 +671,7 @@ def detect_turn_intent(
         "user_action_required": False,
         "off_domain_no_fallback": False,
         "affect_report": False,
+        "application_event": "none",
         "direction_present": False,
         "confidence": None,
         "reasoning": None,
@@ -795,6 +814,15 @@ def detect_turn_intent(
     if dispatch_type != "none":
         affect_report = False
 
+    # application_event (B-0722-02) — strict whitelist; anything else "none".
+    # Consumed by the milestone gate as a write veto (detect_outcome), so a
+    # malformed LLM value must degrade to "no event", never to a write.
+    _raw_ae = parsed.get("application_event")
+    application_event = (
+        _raw_ae if _raw_ae in ("none", "submit", "interview", "outcome")
+        else "none"
+    )
+
     # affect_gate (S-0626-01) — mixed-turn affect handling, decoupled from
     # affect_report. Meaningful ONLY on a dispatching turn (none turns are
     # governed by affect_report). Strict whitelist; anything else -> "none".
@@ -814,6 +842,7 @@ def detect_turn_intent(
     out["user_action_required"] = user_action_required
     out["off_domain_no_fallback"] = off_domain_no_fallback
     out["affect_report"] = affect_report
+    out["application_event"] = application_event
     out["affect_gate"] = affect_gate
     # B-0624-03: did the user express a career goal/direction this turn,
     # independent of whether it's dispatchable? Feeds the cold-start
