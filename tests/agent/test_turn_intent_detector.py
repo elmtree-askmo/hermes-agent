@@ -751,6 +751,19 @@ class TestAffectReportBlock:
             "affect_report": False,
         }) is None
 
+    def test_win_report_credit_instruction_present(self):
+        block = tid.render_affect_report_block({
+            "checked": True,
+            "affect_report": True,
+        })
+        low = block.lower()
+        # Third-party positive response → the check-in beat also credits
+        # the user's action (Artemis win-credit surface, S-0722-01 host).
+        assert "third party" in low
+        assert "subject of the crediting clause" in low
+        # Boundary: milestone-note turns defer to the affirm shape instead.
+        assert "positive milestone reached" in low
+
     def test_renders_when_flag_true(self):
         block = tid.render_affect_report_block({
             "checked": True,

@@ -968,6 +968,16 @@ def render_affect_report_block(detection: dict[str, Any]) -> str | None:
         "turn. This is one beat, not the full slow-down: the user reported "
         "a concrete event and will want the debrief shortly — just let "
         "them tell you how it landed first.",
+        "  - If the event is a third party responding positively to "
+        "something the user did (a recruiter callback, an interview or "
+        "screen invite, an accepted referral or intro), the check-in beat "
+        "also credits the user's action as what earned the response — the "
+        "user is the subject of the crediting clause (\"your outreach got "
+        "this\"); team-drafted materials at most a secondary, subordinate "
+        "mention; no counts, no streak language, no emoji. On any other "
+        "event (a rejection, a mixed update), no credit clause — just the "
+        "check-in. If a \"Positive milestone reached this turn\" note is "
+        "present, follow that note's affirm shape instead.",
     ])
 
 
