@@ -958,11 +958,17 @@ def _build_job_card_blocks(jobs: list) -> list:
         blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": f"_Why it fits:_ {job['why']}"}})
         if job.get("salary"):
             blocks.append({"type": "context", "elements": [{"type": "mrkdwn", "text": f"Salary: {job['salary']}"}]})
+        # B-0723-01: View carries the same self-contained payload as Save so the
+        # gateway job_view handler can record the click (a bare url button gets a
+        # random Slack action_id -> 404 -> the click is dropped). The url stays —
+        # Slack opens it client-side AND fires block_actions for the same press.
+        _payload = _json.dumps({"job_id": job["job_id"], "title": job["title"],
+                                "company": job["company"], "location": job["location"], "url": job["url"]})
         blocks.append({"type": "actions", "elements": [
-            {"type": "button", "text": {"type": "plain_text", "text": "View posting"}, "style": "primary", "url": job["url"]},
+            {"type": "button", "text": {"type": "plain_text", "text": "View posting"}, "style": "primary",
+             "url": job["url"], "action_id": "job_view", "value": _payload},
             {"type": "button", "text": {"type": "plain_text", "text": "Save"}, "action_id": "job_save",
-             "value": _json.dumps({"job_id": job["job_id"], "title": job["title"],
-                                   "company": job["company"], "location": job["location"], "url": job["url"]})},
+             "value": _payload},
             {"type": "button", "text": {"type": "plain_text", "text": "Skip"}, "action_id": "job_skip", "value": job["job_id"]},
         ]})
     return blocks

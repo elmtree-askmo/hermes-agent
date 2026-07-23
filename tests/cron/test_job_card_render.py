@@ -186,3 +186,42 @@ def test_deliver_job_cards_falls_back_to_origin_thread(monkeypatch):
     job = {"id": "daily-briefing"}
     _deliver_job_cards(job, _build_job_card_blocks([VALID_JOB]), loop=None)
     assert captured.get("thread_ts") == "origin.ts"
+
+
+# ---- B-0723-01: cross-renderer button contract ------------------------------
+# The briefing-path card renderer (this module) and the artemis send-jobs hook
+# build the same card independently; P-0721-03 wired the View click recording
+# in the hook only, and this renderer's View button silently stayed a bare url
+# button (random Slack action_id -> 404 -> click dropped). These pins keep the
+# two copies from drifting again: every button carries an explicit action_id,
+# and View's value is the same self-contained payload Save carries.
+
+
+def _card_buttons():
+    blocks = _build_job_card_blocks([VALID_JOB])
+    return [
+        el
+        for b in blocks
+        if b.get("type") == "actions"
+        for el in b.get("elements", [])
+    ]
+
+
+def test_every_card_button_has_explicit_action_id():
+    btns = _card_buttons()
+    assert btns, "card rendered no action buttons"
+    for el in btns:
+        label = (el.get("text") or {}).get("text")
+        assert el.get("action_id"), f"button {label!r} has no explicit action_id"
+
+
+def test_view_button_wired_like_save():
+    btns = {(el.get("text") or {}).get("text"): el for el in _card_buttons()}
+    view, save = btns["View posting"], btns["Save"]
+    assert view.get("action_id") == "job_view"
+    view_payload = json.loads(view["value"])
+    save_payload = json.loads(save["value"])
+    assert view_payload == save_payload
+    assert set(view_payload) == {"job_id", "title", "company", "location", "url"}
+    # the client-side open must survive the wiring
+    assert view.get("url") == VALID_JOB["url"]
