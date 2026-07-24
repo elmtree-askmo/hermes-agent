@@ -24,6 +24,7 @@ import hmac
 import json
 import logging
 import os
+import re
 import sqlite3
 import time
 import uuid
@@ -48,6 +49,25 @@ logger = logging.getLogger(__name__)
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8642
 MAX_STORED_RESPONSES = 100
+
+# S-0724-01: CT user id format for the trusted X-Hermes-User-Id header in
+# multi-user mode. Namespace-prefixed and filesystem-safe (the value becomes a
+# session key segment and, via the session, scopes user-partitioned MCP data).
+_CT_USER_ID_RE = re.compile(r"^ct-[A-Za-z0-9_-]+$")
+
+_TRUTHY = ("1", "true", "yes", "on")
+
+
+def _coerce_bool(value: Any) -> bool:
+    """Interpret a config flag that may be a real bool or a string.
+
+    A quoted-YAML or string-injected ``"false"`` / ``"0"`` must NOT read as True
+    (plain ``bool("false")`` does). Strings are matched against the truthy set;
+    non-strings fall back to ``bool()``.
+    """
+    if isinstance(value, str):
+        return value.strip().lower() in _TRUTHY
+    return bool(value)
 MAX_REQUEST_BYTES = 1_000_000  # 1 MB default limit for POST bodies
 
 
@@ -169,7 +189,9 @@ class ResponseStore:
 
 _CORS_HEADERS = {
     "Access-Control-Allow-Methods": "GET, POST, DELETE, OPTIONS",
-    "Access-Control-Allow-Headers": "Authorization, Content-Type, Idempotency-Key",
+    # X-Hermes-User-Id: S-0724-01 multi-user identity header; browser clients on
+    # an allowed origin need it whitelisted or the preflight blocks the request.
+    "Access-Control-Allow-Headers": "Authorization, Content-Type, Idempotency-Key, X-Hermes-User-Id",
 }
 
 
@@ -308,6 +330,29 @@ class APIServerAdapter(BasePlatformAdapter):
         # Creation timestamps for orphaned-run TTL sweep
         self._run_streams_created: Dict[str, float] = {}
         self._session_db: Optional[Any] = None  # Lazy-init SessionDB for session continuity
+        # S-0724-01: multi-user mode. When on, requests must carry a trusted
+        # ``X-Hermes-User-Id: ct-<id>`` header; identity is bound per-request
+        # and sessions route through the gateway session registry. When off
+        # (default), the adapter keeps its single-owner behaviour so R&D /
+        # local single-client use (Open WebUI, curl) works unchanged.
+        _mu = extra.get("multi_user")
+        if _mu is None:
+            _mu = os.getenv("API_SERVER_MULTI_USER", "")
+        self._multi_user: bool = _coerce_bool(_mu)
+        # The X-Hermes-User-Id header is the cross-user isolation boundary; it
+        # is only trustworthy behind an authenticated caller (Bearer key) plus
+        # egress-IP restriction. Without a key, _check_auth allows all callers,
+        # so anyone reaching the port could bind to any user's session. Refuse
+        # to start in that misconfiguration rather than serve spoofable identity.
+        if self._multi_user and not self._api_key:
+            raise ValueError(
+                "api_server multi_user mode requires an API key (API_SERVER_KEY / extra.key); "
+                "the X-Hermes-User-Id header must sit behind an authenticated caller."
+            )
+        # S-0724-01 D4 busy guard: session_keys with a chat-completions run in
+        # flight. Distinct from the base class's _active_sessions (busy-text
+        # Events) — do not merge the two.
+        self._active_chat_sessions: set[str] = set()
 
     @staticmethod
     def _parse_cors_origins(value: Any) -> tuple[str, ...]:
@@ -379,6 +424,54 @@ class APIServerAdapter(BasePlatformAdapter):
             status=401,
         )
 
+    def _resolve_ct_user_id(self, request: "web.Request") -> tuple[Optional[str], Optional["web.Response"]]:
+        """Resolve and validate the calling CT user in multi-user mode (D1).
+
+        Returns ``(user_id, None)`` on success, ``(None, error_response)`` on a
+        rejected request. In single-owner mode (``_multi_user`` off) returns
+        ``(None, None)`` — the caller keeps its legacy behaviour.
+
+        The Bearer check (``_check_auth``) proves *the caller is CT BE*; this
+        header proves *which CT user*. They are orthogonal: the id is trusted
+        because it comes from CT BE (behind an egress-IP restriction), never
+        from LLM-supplied content — the same trust model as Slack's
+        ``source.user_id``.
+        """
+        if not self._multi_user:
+            return None, None
+
+        raw = request.headers.get("X-Hermes-User-Id", "").strip()
+        if not raw or not _CT_USER_ID_RE.match(raw):
+            return None, web.json_response(
+                {"error": {
+                    "message": "Missing or invalid X-Hermes-User-Id header",
+                    "type": "invalid_request_error",
+                    "code": "invalid_user_id",
+                }},
+                status=401,
+            )
+        return raw, None
+
+    def _reject_if_multi_user(self) -> Optional["web.Response"]:
+        """Reject agent-running endpoints not yet wired for per-user identity.
+
+        In multi-user mode only ``/v1/chat/completions`` derives and binds the
+        caller's identity (S-0724-01 scope). ``/v1/responses`` and ``/v1/runs``
+        would otherwise start agent work with no user scoping — an isolation
+        gap — so they are refused rather than silently running identity-less.
+        Returns a 501 response when rejected, else None.
+        """
+        if not self._multi_user:
+            return None
+        return web.json_response(
+            {"error": {
+                "message": "This endpoint is not available in multi-user mode; use /v1/chat/completions",
+                "type": "invalid_request_error",
+                "code": "endpoint_unavailable_multi_user",
+            }},
+            status=501,
+        )
+
     # ------------------------------------------------------------------
     # Session DB helper
     # ------------------------------------------------------------------
@@ -407,6 +500,7 @@ class APIServerAdapter(BasePlatformAdapter):
         session_id: Optional[str] = None,
         stream_delta_callback=None,
         tool_progress_callback=None,
+        user_id: Optional[str] = None,
     ) -> Any:
         """
         Create an AIAgent instance using the gateway's runtime config.
@@ -425,6 +519,34 @@ class APIServerAdapter(BasePlatformAdapter):
 
         user_config = _load_gateway_config()
         enabled_toolsets = sorted(_get_platform_tools(user_config, "api_server"))
+
+        # S-0724-01: in multi-user mode, restrict the toolset to an explicit
+        # ALLOWLIST of tools that are safe for an untrusted, multi-tenant web
+        # caller. The default hermes-api-server bundle is a full-power agent
+        # toolset (terminal, file R/W, code_execution, browser, cronjob,
+        # session_search, delegation, home-assistant) — none of which are
+        # per-user scoped, so on the public CT surface they would grant one CT
+        # user host access or another user's data (e.g. session_search runs a
+        # GLOBAL FTS query with no user_id filter; delegate_task spawns
+        # identity-less child threads). An allowlist (vs. subtracting dangerous
+        # tools) is deliberate: a tool later added to the bundle defaults to
+        # NOT exposed, instead of silently leaking. The kept groups have no
+        # cross-user side effect — web is read-only fetch, memory is already
+        # user-scoped (S-0429-01), todo/skills are per-session/read-mostly.
+        # Own-session history still works (loaded by session_id, not
+        # session_search) and Mem0 recall is unaffected. Artemis's own MCP
+        # tools (get_resume, etc.) are layered separately via Artemis config,
+        # out of this fork's scope.
+        # ``memory`` and ``skills`` are deliberately EXCLUDED: the built-in
+        # memory tool writes shared, non-user-scoped ~/.hermes/memories/*.md, and
+        # the ``skills`` group bundles ``skill_manage`` which writes global
+        # ~/.hermes/skills (no read-only split at toolset granularity). Both
+        # would leak/mutate state across CT users. Per-user continuity comes
+        # from the external Mem0 provider (user_id-scoped), not the built-in
+        # memory tool. Only web (read-only fetch) and todo (per-session) survive.
+        if user_id is not None:
+            _MULTI_USER_SAFE_TOOLSETS = {"web", "todo"}
+            enabled_toolsets = [ts for ts in enabled_toolsets if ts in _MULTI_USER_SAFE_TOOLSETS]
 
         max_iterations = int(os.getenv("HERMES_MAX_ITERATIONS", "90"))
 
@@ -447,7 +569,24 @@ class APIServerAdapter(BasePlatformAdapter):
             tool_progress_callback=tool_progress_callback,
             session_db=self._ensure_session_db(),
             fallback_model=fallback_model,
+            # S-0724-01: scope Hermes-native memory + SessionDB ownership to the
+            # calling CT user. The ContextVar in _run_agent scopes MCP tool
+            # calls; this constructor field scopes AIAgent's own memory provider
+            # and create_session(user_id=...). Both channels need the identity.
+            user_id=user_id,
         )
+        # S-0724-01: in multi-user mode, disable the BUILT-IN memory store
+        # (shared, non-user-scoped ~/.hermes/memories/MEMORY.md + USER.md).
+        # Left enabled, its content is injected into every CT user's prompt —
+        # a cross-user leak. We disable only the built-in store; the external,
+        # user_id-scoped Mem0 provider (constructed from ``user_id`` above) is
+        # untouched and remains the per-user continuity mechanism. Mirrors how
+        # the framework recommends multi-user deployments handle built-in
+        # memory (tools/memory_tool.py) and how the review-agent path toggles
+        # these same flags directly.
+        if user_id is not None:
+            agent._memory_enabled = False
+            agent._user_profile_enabled = False
         return agent
 
     # ------------------------------------------------------------------
@@ -461,7 +600,7 @@ class APIServerAdapter(BasePlatformAdapter):
     async def _handle_models(self, request: "web.Request") -> "web.Response":
         """GET /v1/models — return hermes-agent as an available model."""
         auth_err = self._check_auth(request)
-        if auth_err:
+        if auth_err is not None:
             return auth_err
 
         return web.json_response({
@@ -482,8 +621,13 @@ class APIServerAdapter(BasePlatformAdapter):
     async def _handle_chat_completions(self, request: "web.Request") -> "web.Response":
         """POST /v1/chat/completions — OpenAI Chat Completions format."""
         auth_err = self._check_auth(request)
-        if auth_err:
+        if auth_err is not None:
             return auth_err
+
+        # S-0724-01 D1: resolve the calling CT user (multi-user mode only).
+        ct_user_id, id_err = self._resolve_ct_user_id(request)
+        if id_err is not None:
+            return id_err
 
         # Parse request body
         try:
@@ -529,10 +673,58 @@ class APIServerAdapter(BasePlatformAdapter):
                 status=400,
             )
 
+        guard_key: Optional[str] = None
+        session_entry = None  # registry entry (multi-user only) for post-run writeback
+        if ct_user_id is not None:
+            # S-0724-01 D2: multi-user mode routes through the gateway SESSION
+            # REGISTRY exactly like a Slack DM. The registry maps a stable
+            # per-user session_key (agent:main:api_server:dm:ct-<id>) to the
+            # CURRENT conversation session_id, which is what lets the session
+            # follow context compression (compression mints a new session_id
+            # under the same key). CT BE holds zero session state — the identity
+            # header alone resolves the same conversation on every call. The
+            # client-supplied X-Hermes-Session-Id is ignored in this mode.
+            from gateway.session import SessionSource
+
+            source = SessionSource(
+                platform=Platform.API_SERVER, chat_id=ct_user_id, user_id=ct_user_id,
+            )
+            _store = getattr(self, "_session_store", None)
+            if _store is None:
+                # Registry is wired by the gateway at startup; its absence is a
+                # deployment error, not something to silently run unscoped.
+                return web.json_response(
+                    _openai_error("Session store unavailable", err_type="server_error"),
+                    status=500,
+                )
+            session_entry = _store.get_or_create_session(source)
+            guard_key = session_entry.session_key
+            session_id = session_entry.session_id
+            # D4: acquire the busy guard (keyed by the stable session_key) BEFORE
+            # loading history. If a prior run for this session is still in
+            # flight, reject now — otherwise this request could read stale
+            # history in the window before the guard check, then run against a
+            # session the prior run is still mutating.
+            if guard_key in self._active_chat_sessions:
+                return web.json_response(
+                    {"error": {
+                        "message": "A request for this session is already in progress",
+                        "type": "invalid_request_error",
+                        "code": "session_busy",
+                    }},
+                    status=409,
+                )
+            self._active_chat_sessions.add(guard_key)
+            try:
+                db = self._ensure_session_db()
+                if db is not None:
+                    history = db.get_messages_as_conversation(session_id)
+            except Exception as e:
+                logger.warning("Failed to load session history for %s: %s", session_id, e)
+                history = []
         # Allow caller to continue an existing session by passing X-Hermes-Session-Id.
         # When provided, history is loaded from state.db instead of from the request body.
-        provided_session_id = request.headers.get("X-Hermes-Session-Id", "").strip()
-        if provided_session_id:
+        elif provided_session_id := request.headers.get("X-Hermes-Session-Id", "").strip():
             session_id = provided_session_id
             try:
                 db = self._ensure_session_db()
@@ -578,50 +770,96 @@ class APIServerAdapter(BasePlatformAdapter):
             # Start agent in background.  agent_ref is a mutable container
             # so the SSE writer can interrupt the agent on client disconnect.
             agent_ref = [None]
+            # D4: the busy guard is released inside _run_agent's executor thread
+            # (via release_key), NOT on this asyncio task's completion — a client
+            # disconnect cancels the wrapper while the worker thread keeps running.
             agent_task = asyncio.ensure_future(self._run_agent(
                 user_message=user_message,
                 conversation_history=history,
                 ephemeral_system_prompt=system_prompt,
                 session_id=session_id,
+                user_id=ct_user_id,
                 stream_delta_callback=_on_delta,
                 tool_progress_callback=_on_tool_progress,
                 agent_ref=agent_ref,
+                release_key=guard_key,
+                writeback_entry=session_entry,
             ))
-
+            # D2: the session_id writeback for the stream path happens INSIDE the
+            # executor thread (via writeback_entry above) — the thread owns
+            # compression and runs to completion even if the client disconnects
+            # and the asyncio wrapper is cancelled. A wrapper done-callback would
+            # race the still-running thread.
             return await self._write_sse_chat_completion(
                 request, completion_id, model_name, created, _stream_q,
                 agent_task, agent_ref, session_id=session_id,
             )
 
-        # Non-streaming: run the agent (with optional Idempotency-Key)
+        # Non-streaming: run the agent (with optional Idempotency-Key).
+        # D4: when the run actually executes, the busy guard is released INSIDE
+        # the executor thread (release_key), so a handler-coroutine cancellation
+        # during the await cannot free the guard while the worker still mutates
+        # the session — same in-worker semantics as the stream path. `computed`
+        # records whether _run_agent ran: on an idempotency cache HIT it does
+        # not, so no in-worker release fires and the coroutine finally releases.
+        _computed = {"ran": False}
+
         async def _compute_completion():
+            _computed["ran"] = True
             return await self._run_agent(
                 user_message=user_message,
                 conversation_history=history,
                 ephemeral_system_prompt=system_prompt,
                 session_id=session_id,
+                user_id=ct_user_id,
+                release_key=guard_key,
+                # D2: writeback happens IN-THREAD (cancellation-safe) — the same
+                # reason as the stream path. A post-await writeback would be
+                # skipped if this request is cancelled mid-run while the executor
+                # thread keeps running and compresses. In-thread only fires for
+                # real runs, so idempotency cache hits never rewind the entry.
+                writeback_entry=session_entry,
             )
 
-        idempotency_key = request.headers.get("Idempotency-Key")
-        if idempotency_key:
-            fp = _make_request_fingerprint(body, keys=["model", "messages", "tools", "tool_choice", "stream"])
-            try:
-                result, usage = await _idem_cache.get_or_set(idempotency_key, fp, _compute_completion)
-            except Exception as e:
-                logger.error("Error running agent for chat completions: %s", e, exc_info=True)
-                return web.json_response(
-                    _openai_error(f"Internal server error: {e}", err_type="server_error"),
-                    status=500,
-                )
-        else:
-            try:
-                result, usage = await _compute_completion()
-            except Exception as e:
-                logger.error("Error running agent for chat completions: %s", e, exc_info=True)
-                return web.json_response(
-                    _openai_error(f"Internal server error: {e}", err_type="server_error"),
-                    status=500,
-                )
+        try:
+            idempotency_key = request.headers.get("Idempotency-Key")
+            if idempotency_key:
+                # S-0724-01: namespace the idempotency key by caller so two CT
+                # users sending the same key + body can never reuse each other's
+                # cached (session-derived) result. The key is global otherwise.
+                if ct_user_id is not None:
+                    idempotency_key = f"{ct_user_id}:{idempotency_key}"
+                fp = _make_request_fingerprint(body, keys=["model", "messages", "tools", "tool_choice", "stream"])
+                try:
+                    result, usage = await _idem_cache.get_or_set(idempotency_key, fp, _compute_completion)
+                except Exception as e:
+                    logger.error("Error running agent for chat completions: %s", e, exc_info=True)
+                    return web.json_response(
+                        _openai_error(f"Internal server error: {e}", err_type="server_error"),
+                        status=500,
+                    )
+            else:
+                try:
+                    result, usage = await _compute_completion()
+                except Exception as e:
+                    logger.error("Error running agent for chat completions: %s", e, exc_info=True)
+                    return web.json_response(
+                        _openai_error(f"Internal server error: {e}", err_type="server_error"),
+                        status=500,
+                    )
+        finally:
+            # Release the guard ONLY when the run never executed (idempotency
+            # cache hit) — then no in-worker release_key fired. When it did run,
+            # the executor thread owns the release, so releasing here would free
+            # the guard early under cancellation and reopen the race.
+            if guard_key is not None and not _computed["ran"]:
+                self._active_chat_sessions.discard(guard_key)
+
+        # D2 session_id writeback for the non-stream path is done IN-THREAD (via
+        # writeback_entry in _compute_completion), not here — a post-await
+        # writeback is skipped when the request is cancelled mid-run, losing a
+        # compression-driven id change. In-thread also naturally skips cache
+        # hits (they never enter _run_agent), avoiding stale rewinds.
 
         final_response = result.get("final_response", "")
         if not final_response:
@@ -762,8 +1000,11 @@ class APIServerAdapter(BasePlatformAdapter):
     async def _handle_responses(self, request: "web.Request") -> "web.Response":
         """POST /v1/responses — OpenAI Responses API format."""
         auth_err = self._check_auth(request)
-        if auth_err:
+        if auth_err is not None:
             return auth_err
+        mu_err = self._reject_if_multi_user()
+        if mu_err is not None:
+            return mu_err
 
         # Parse request body
         try:
@@ -953,8 +1194,15 @@ class APIServerAdapter(BasePlatformAdapter):
     async def _handle_get_response(self, request: "web.Request") -> "web.Response":
         """GET /v1/responses/{response_id} — retrieve a stored response."""
         auth_err = self._check_auth(request)
-        if auth_err:
+        if auth_err is not None:
             return auth_err
+        # S-0724-01: the ResponseStore is a GLOBAL, unscoped SQLite cache keyed
+        # by response_id — no per-user binding. In multi-user mode a CT caller
+        # could read another user's stored response, so reject (matches the
+        # /v1/responses POST rejection; the whole Responses API is out of scope).
+        mu_err = self._reject_if_multi_user()
+        if mu_err is not None:
+            return mu_err
 
         response_id = request.match_info["response_id"]
         stored = self._response_store.get(response_id)
@@ -966,8 +1214,13 @@ class APIServerAdapter(BasePlatformAdapter):
     async def _handle_delete_response(self, request: "web.Request") -> "web.Response":
         """DELETE /v1/responses/{response_id} — delete a stored response."""
         auth_err = self._check_auth(request)
-        if auth_err:
+        if auth_err is not None:
             return auth_err
+        # S-0724-01: global unscoped store (see _handle_get_response) — a CT
+        # caller could delete another user's stored response. Reject.
+        mu_err = self._reject_if_multi_user()
+        if mu_err is not None:
+            return mu_err
 
         response_id = request.match_info["response_id"]
         deleted = self._response_store.delete(response_id)
@@ -1020,7 +1273,17 @@ class APIServerAdapter(BasePlatformAdapter):
     _MAX_PROMPT_LENGTH = 5000
 
     def _check_jobs_available(self) -> Optional["web.Response"]:
-        """Return error response if cron module isn't available."""
+        """Return error response if the jobs API can't serve this request.
+
+        S-0724-01: the /api/jobs routes operate on GLOBAL cron state and never
+        resolve X-Hermes-User-Id, so in multi-user mode any authenticated CT
+        caller could list/delete/trigger every user's scheduled jobs. Reject
+        the whole jobs surface in that mode (same posture as /v1/responses and
+        /v1/runs) — per-user cron management is out of this spec's scope.
+        """
+        mu_err = self._reject_if_multi_user()
+        if mu_err is not None:
+            return mu_err
         if not self._CRON_AVAILABLE:
             return web.json_response(
                 {"error": "Cron module not available"}, status=501,
@@ -1039,10 +1302,10 @@ class APIServerAdapter(BasePlatformAdapter):
     async def _handle_list_jobs(self, request: "web.Request") -> "web.Response":
         """GET /api/jobs — list all cron jobs."""
         auth_err = self._check_auth(request)
-        if auth_err:
+        if auth_err is not None:
             return auth_err
         cron_err = self._check_jobs_available()
-        if cron_err:
+        if cron_err is not None:
             return cron_err
         try:
             include_disabled = request.query.get("include_disabled", "").lower() in ("true", "1")
@@ -1054,10 +1317,10 @@ class APIServerAdapter(BasePlatformAdapter):
     async def _handle_create_job(self, request: "web.Request") -> "web.Response":
         """POST /api/jobs — create a new cron job."""
         auth_err = self._check_auth(request)
-        if auth_err:
+        if auth_err is not None:
             return auth_err
         cron_err = self._check_jobs_available()
-        if cron_err:
+        if cron_err is not None:
             return cron_err
         try:
             body = await request.json()
@@ -1102,13 +1365,13 @@ class APIServerAdapter(BasePlatformAdapter):
     async def _handle_get_job(self, request: "web.Request") -> "web.Response":
         """GET /api/jobs/{job_id} — get a single cron job."""
         auth_err = self._check_auth(request)
-        if auth_err:
+        if auth_err is not None:
             return auth_err
         cron_err = self._check_jobs_available()
-        if cron_err:
+        if cron_err is not None:
             return cron_err
         job_id, id_err = self._check_job_id(request)
-        if id_err:
+        if id_err is not None:
             return id_err
         try:
             job = self._cron_get(job_id)
@@ -1121,13 +1384,13 @@ class APIServerAdapter(BasePlatformAdapter):
     async def _handle_update_job(self, request: "web.Request") -> "web.Response":
         """PATCH /api/jobs/{job_id} — update a cron job."""
         auth_err = self._check_auth(request)
-        if auth_err:
+        if auth_err is not None:
             return auth_err
         cron_err = self._check_jobs_available()
-        if cron_err:
+        if cron_err is not None:
             return cron_err
         job_id, id_err = self._check_job_id(request)
-        if id_err:
+        if id_err is not None:
             return id_err
         try:
             body = await request.json()
@@ -1154,13 +1417,13 @@ class APIServerAdapter(BasePlatformAdapter):
     async def _handle_delete_job(self, request: "web.Request") -> "web.Response":
         """DELETE /api/jobs/{job_id} — delete a cron job."""
         auth_err = self._check_auth(request)
-        if auth_err:
+        if auth_err is not None:
             return auth_err
         cron_err = self._check_jobs_available()
-        if cron_err:
+        if cron_err is not None:
             return cron_err
         job_id, id_err = self._check_job_id(request)
-        if id_err:
+        if id_err is not None:
             return id_err
         try:
             success = self._cron_remove(job_id)
@@ -1173,13 +1436,13 @@ class APIServerAdapter(BasePlatformAdapter):
     async def _handle_pause_job(self, request: "web.Request") -> "web.Response":
         """POST /api/jobs/{job_id}/pause — pause a cron job."""
         auth_err = self._check_auth(request)
-        if auth_err:
+        if auth_err is not None:
             return auth_err
         cron_err = self._check_jobs_available()
-        if cron_err:
+        if cron_err is not None:
             return cron_err
         job_id, id_err = self._check_job_id(request)
-        if id_err:
+        if id_err is not None:
             return id_err
         try:
             job = self._cron_pause(job_id)
@@ -1192,13 +1455,13 @@ class APIServerAdapter(BasePlatformAdapter):
     async def _handle_resume_job(self, request: "web.Request") -> "web.Response":
         """POST /api/jobs/{job_id}/resume — resume a paused cron job."""
         auth_err = self._check_auth(request)
-        if auth_err:
+        if auth_err is not None:
             return auth_err
         cron_err = self._check_jobs_available()
-        if cron_err:
+        if cron_err is not None:
             return cron_err
         job_id, id_err = self._check_job_id(request)
-        if id_err:
+        if id_err is not None:
             return id_err
         try:
             job = self._cron_resume(job_id)
@@ -1211,13 +1474,13 @@ class APIServerAdapter(BasePlatformAdapter):
     async def _handle_run_job(self, request: "web.Request") -> "web.Response":
         """POST /api/jobs/{job_id}/run — trigger immediate execution."""
         auth_err = self._check_auth(request)
-        if auth_err:
+        if auth_err is not None:
             return auth_err
         cron_err = self._check_jobs_available()
-        if cron_err:
+        if cron_err is not None:
             return cron_err
         job_id, id_err = self._check_job_id(request)
-        if id_err:
+        if id_err is not None:
             return id_err
         try:
             job = self._cron_trigger(job_id)
@@ -1289,9 +1552,12 @@ class APIServerAdapter(BasePlatformAdapter):
         conversation_history: List[Dict[str, str]],
         ephemeral_system_prompt: Optional[str] = None,
         session_id: Optional[str] = None,
+        user_id: Optional[str] = None,
         stream_delta_callback=None,
         tool_progress_callback=None,
         agent_ref: Optional[list] = None,
+        release_key: Optional[str] = None,
+        writeback_entry=None,
     ) -> tuple:
         """
         Create an agent and run a conversation in a thread executor.
@@ -1303,30 +1569,115 @@ class APIServerAdapter(BasePlatformAdapter):
         at ``agent_ref[0]`` before ``run_conversation`` begins.  This allows
         callers (e.g. the SSE writer) to call ``agent.interrupt()`` from
         another thread to stop in-progress LLM calls.
+
+        S-0724-01 D3: when *user_id* is supplied (multi-user mode), the calling
+        user's identity is bound to ``tools.session_context`` **inside the
+        executor thread** — ``run_in_executor`` does not copy ContextVars in,
+        so binding in the aiohttp handler would never reach the agent's MCP
+        calls (they'd silently fall back to ``os.environ``). Executor threads
+        are pooled and reused across requests, so the ``clear_session`` in the
+        ``finally`` is load-bearing: without it, one user's identity leaks into
+        the next request that lands on the same thread (B-0504-01 hazard class).
         """
         loop = asyncio.get_event_loop()
 
         def _run():
-            agent = self._create_agent(
-                ephemeral_system_prompt=ephemeral_system_prompt,
-                session_id=session_id,
-                stream_delta_callback=stream_delta_callback,
-                tool_progress_callback=tool_progress_callback,
-            )
-            if agent_ref is not None:
-                agent_ref[0] = agent
-            result = agent.run_conversation(
-                user_message=user_message,
-                conversation_history=conversation_history,
-            )
-            usage = {
-                "input_tokens": getattr(agent, "session_prompt_tokens", 0) or 0,
-                "output_tokens": getattr(agent, "session_completion_tokens", 0) or 0,
-                "total_tokens": getattr(agent, "session_total_tokens", 0) or 0,
-            }
-            return result, usage
+            _bind_identity = user_id is not None
+            agent = None
+            if _bind_identity:
+                from tools.session_context import set_session, new_trace_id
+                set_session(
+                    platform=Platform.API_SERVER.value,
+                    chat_id=user_id,
+                    user_id=user_id,
+                    trace_id=new_trace_id(),
+                )
+            try:
+                agent = self._create_agent(
+                    ephemeral_system_prompt=ephemeral_system_prompt,
+                    session_id=session_id,
+                    stream_delta_callback=stream_delta_callback,
+                    tool_progress_callback=tool_progress_callback,
+                    user_id=user_id,
+                )
+                if agent_ref is not None:
+                    agent_ref[0] = agent
+                result = agent.run_conversation(
+                    user_message=user_message,
+                    conversation_history=conversation_history,
+                )
+                # S-0724-01: surface the agent's FINAL session_id. Context
+                # compression mid-run mints a new continuation session_id on the
+                # agent object; the caller writes it back to the registry entry
+                # so the next turn resolves the continuation, not the stale
+                # pre-compression transcript. run_conversation's result dict does
+                # not carry it, so read it off the agent object here.
+                if isinstance(result, dict):
+                    result.setdefault("session_id", getattr(agent, "session_id", session_id))
+                usage = {
+                    "input_tokens": getattr(agent, "session_prompt_tokens", 0) or 0,
+                    "output_tokens": getattr(agent, "session_completion_tokens", 0) or 0,
+                    "total_tokens": getattr(agent, "session_total_tokens", 0) or 0,
+                }
+                return result, usage
+            finally:
+                if _bind_identity:
+                    from tools.session_context import clear_session
+                    clear_session()
+                # D2: persist any compression-driven session_id change from
+                # INSIDE the thread, before releasing the guard. The thread owns
+                # the compression and runs to completion even if the client
+                # disconnected (the asyncio wrapper is cancelled but this thread
+                # is not), so reading the live agent's final session_id here is
+                # the only place that reliably captures a post-compression id on
+                # the stream path. Ordered before the guard release so the next
+                # request resolves the updated entry. Only fresh runs reach here
+                # (cache hits never call _run_agent), so no stale rewind.
+                if writeback_entry is not None and agent is not None:
+                    self._writeback_session_id(
+                        writeback_entry, {"session_id": getattr(agent, "session_id", None)}
+                    )
+                # D4: release the busy guard from INSIDE the executor thread, so
+                # the session key is held until this worker truly exits. A client
+                # disconnect cancels the asyncio wrapper but cannot stop this
+                # thread — releasing on the wrapper's done-callback would free the
+                # key while the worker is still mutating the session (race).
+                if release_key is not None:
+                    self._active_chat_sessions.discard(release_key)
 
         return await loop.run_in_executor(None, _run)
+
+    def _writeback_session_id(self, session_entry, result) -> None:
+        """S-0724-01: after a multi-user run, persist any compression-driven
+        session_id change back to the registry entry, so the next request for
+        the same session_key resolves the continuation session (not the stale
+        pre-compression transcript). No-op outside multi-user mode.
+
+        Runs from an executor thread. The entry mutation + _save() are done
+        UNDER SessionStore._lock — the store's normal paths hold that lock
+        around _entries + _save(), and two concurrent users' writebacks racing
+        a bare _save() could otherwise serialize a stale _entries snapshot and
+        clobber another session's new mapping in sessions.json.
+        """
+        if session_entry is None or not isinstance(result, dict):
+            return
+        new_sid = result.get("session_id")
+        if not new_sid or new_sid == session_entry.session_id:
+            return
+        store = getattr(self, "_session_store", None)
+        try:
+            _lock = getattr(store, "_lock", None) if store is not None else None
+            if _lock is not None:
+                with _lock:
+                    session_entry.session_id = new_sid
+                    store._save()
+            else:
+                # No store/lock (e.g. test doubles) — best-effort update.
+                session_entry.session_id = new_sid
+                if store is not None:
+                    store._save()
+        except Exception as e:
+            logger.warning("Failed to persist session_id writeback: %s", e)
 
     # ------------------------------------------------------------------
     # /v1/runs — structured event streaming
@@ -1379,8 +1730,11 @@ class APIServerAdapter(BasePlatformAdapter):
     async def _handle_runs(self, request: "web.Request") -> "web.Response":
         """POST /v1/runs — start an agent run, return run_id immediately."""
         auth_err = self._check_auth(request)
-        if auth_err:
+        if auth_err is not None:
             return auth_err
+        mu_err = self._reject_if_multi_user()
+        if mu_err is not None:
+            return mu_err
 
         # Enforce concurrency limit
         if len(self._run_streams) >= self._MAX_CONCURRENT_RUNS:
@@ -1532,8 +1886,15 @@ class APIServerAdapter(BasePlatformAdapter):
     async def _handle_run_events(self, request: "web.Request") -> "web.StreamResponse":
         """GET /v1/runs/{run_id}/events — SSE stream of structured agent lifecycle events."""
         auth_err = self._check_auth(request)
-        if auth_err:
+        if auth_err is not None:
             return auth_err
+        # S-0724-01: the paired /v1/runs POST is rejected in multi-user mode, so
+        # no run can legitimately be created; the global _run_streams registry
+        # is also unscoped by user. Reject the events reader too for consistency
+        # and defense-in-depth (no cross-user run-event subscription).
+        mu_err = self._reject_if_multi_user()
+        if mu_err is not None:
+            return mu_err
 
         run_id = request.match_info["run_id"]
 
