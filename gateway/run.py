@@ -3855,6 +3855,32 @@ class GatewayRunner:
                     logger.debug(
                         "short-circuit trace_index record failed: %s", _sc_ti_err
                     )
+                # B-0724-01 (Artemis): skipping the agent also skips run_agent's
+                # memory sync — the only sync call site — so the user's message
+                # (often the highest-signal turn: it multi-dispatched) never
+                # reached the external memory provider. Sync it here with the
+                # same synthetic transcript text the session records. Full
+                # side-effect inventory: gateway/short_circuit_memory.py.
+                try:
+                    from gateway.short_circuit_memory import (
+                        sync_short_circuit_turn as _sc_mem_sync,
+                    )
+                    _sc_mem_fired = _sc_mem_sync(
+                        message_text,
+                        _sc_synthetic_text,
+                        session_id=session_entry.session_id,
+                        user_id=getattr(source, "user_id", "") or "",
+                        platform=source.platform.value if source.platform else "",
+                    )
+                    if _sc_mem_fired:
+                        logger.info(
+                            "short-circuit memory sync fired: chat=%s",
+                            source.chat_id or "unknown",
+                        )
+                except Exception as _sc_mem_err:  # noqa: BLE001
+                    logger.warning(
+                        "short-circuit memory sync failed: %s", _sc_mem_err
+                    )
             else:
                 agent_result = await self._run_agent(
                     message=message_text,
